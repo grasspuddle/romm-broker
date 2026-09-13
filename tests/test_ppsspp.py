@@ -279,27 +279,6 @@ def test_clearing_the_slot_removes_a_screenshot_whose_state_is_already_gone(
     assert other.exists()
 
 
-def test_state_screenshot_path_matches_the_working_state(
-    state_dir: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The screenshot path is the .jpg beside the working slot's state."""
-    monkeypatch.setattr(ppsspp, "STATE_SLOT", 1)
-    _touch(state_dir / "ULUS10041_1_1.ppst")
-    shot = _touch(state_dir / "ULUS10041_1_1.jpg")
-
-    assert ppsspp.Ppsspp().state_screenshot_path() == shot
-
-
-def test_state_screenshot_path_is_none_without_a_thumbnail(
-    state_dir: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The screenshot path is None when the working state has no .jpg beside it."""
-    monkeypatch.setattr(ppsspp, "STATE_SLOT", 1)
-    _touch(state_dir / "ULUS10041_1_1.ppst")
-
-    assert ppsspp.Ppsspp().state_screenshot_path() is None
-
-
 def test_a_players_own_state_bindings_survive_the_launch_patch(
     config_inis: tuple[Path, Path],
 ) -> None:
@@ -506,26 +485,6 @@ class _FakeClock:
     def sleep(self, seconds: float) -> None:
         """Advance the fake clock instead of blocking."""
         self.now += seconds
-
-
-class _WritingClock(_FakeClock):
-    """A fake clock that grows a file as it advances, standing in for a write still in flight."""
-
-    def __init__(self, path: Path, done_at: float) -> None:
-        """Grow `path` by 100 bytes per fake second until `done_at`, then hold it still.
-
-        Args:
-            path: The file the imaginary writer is filling.
-            done_at: Fake time the write finishes at.
-        """
-        super().__init__()
-        self.path = path
-        self.done_at = done_at
-
-    def sleep(self, seconds: float) -> None:
-        """Advance the fake clock and write however much has been produced by then."""
-        super().sleep(seconds)
-        self.path.write_bytes(b"x" * int(min(self.now, self.done_at) * 100))
 
 
 def test_a_write_that_stalls_mid_flight_is_not_reported_as_complete(
@@ -749,51 +708,6 @@ def test_exit_reports_the_working_slot_without_a_running_emulator(
     report = ppsspp.Ppsspp().save_and_exit(4)
 
     assert report == {"state_saved": False, "state_slot": 1, "state_file": None}
-
-
-def test_a_screenshot_still_being_written_is_waited_out(
-    state_dir: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
-) -> None:
-    """A save reported done while the thumbnail is mid-write serves RomM a torn image."""
-    state = _touch(state_dir / "ULUS10041_1_1.ppst")
-    clock = _WritingClock(state_dir / "ULUS10041_1_1.jpg", done_at=1.0)
-    monkeypatch.setattr(ppsspp, "time", clock)
-
-    with caplog.at_level("WARNING"):
-        ppsspp._wait_for_screenshot(state, 5.0)
-
-    assert clock.now >= 1.0 + ppsspp.STATE_SHOT_STABLE
-    assert "never settled" not in caplog.text
-
-
-def test_a_screenshot_that_never_lands_does_not_fail_the_save(
-    state_dir: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
-) -> None:
-    """The state is already confirmed by then, so a missing preview is logged and nothing more."""
-    clock = _FakeClock()
-    monkeypatch.setattr(ppsspp, "time", clock)
-    state = _touch(state_dir / "ULUS10041_1_1.ppst")
-
-    with caplog.at_level("WARNING"):
-        ppsspp._wait_for_screenshot(state, 3.0)
-
-    assert "never settled" in caplog.text
-
-
-def test_a_save_is_not_reported_done_until_its_screenshot_is_waited_on(
-    state_dir: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The save route answering is what sends RomM to fetch the thumbnail, so the wait belongs here."""
-    monkeypatch.setattr(ppsspp, "STATE_SLOT", 1)
-    state = _touch(state_dir / "ULUS10041_1_1.ppst")
-    waited: list[Path] = []
-    monkeypatch.setattr(ppsspp, "_wait_for_state_write", lambda before, deadline: True)
-    monkeypatch.setattr(ppsspp, "_wait_for_screenshot", lambda s, d: waited.append(s))
-    emu = ppsspp.Ppsspp()
-    emu._send_key = lambda key: True
-
-    assert emu.save_state(4) is True
-    assert waited == [state]
 
 
 def test_a_resume_load_waits_for_the_game_window_before_sending_the_hotkey(

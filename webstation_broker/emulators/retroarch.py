@@ -47,7 +47,6 @@ State file naming:
 * `<content_basename>.state` for slot 0.
 * `<content_basename>.state<n>` for slot n.
 * `<content_basename>.state.auto` for slot -1.
-* Each save writes a `<name>.png` thumbnail beside the state file.
 * SRAM: `<content_basename>.srm` under the savefile dir.
 
 Because stdout carries only command replies here, the child is spawned with
@@ -179,14 +178,6 @@ STATE_CONFIRM_WAIT = float(os.environ.get("RETROARCH_STATE_CONFIRM_WAIT", "10.0"
 The platform table's `state_confirm_wait` overrides this per platform, for
 cores whose state files are large enough that this default is too tight.
 """
-STATE_THUMBNAIL_WAIT = float(os.environ.get("RETROARCH_STATE_THUMBNAIL_WAIT", "3.0"))
-"""Seconds a save thumbnail gets to land on disk, from `RETROARCH_STATE_THUMBNAIL_WAIT` (default 3).
-
-Its own window, not carved out of `STATE_CONFIRM_WAIT`: the state file is
-already confirmed by the time this runs, so the thumbnail is not owed a
-share of that budget, and giving it a fixed one of its own means a slow
-state-file write can never starve it down to nothing.
-"""
 SAVE_LOCK_WAIT = float(os.environ.get("RETROARCH_SAVE_LOCK_WAIT", "30.0"))
 """Seconds a save waits for an in-flight resume load or disc swap, from `RETROARCH_SAVE_LOCK_WAIT`.
 
@@ -285,8 +276,8 @@ FIRST_SAVE_SETTLE = float(os.environ.get("RETROARCH_FIRST_SAVE_SETTLE", "3.0"))
 A fast-booting core (gambatte) can still be showing its own boot sequence
 (the Nintendo logo scroll, or a flat boot-transition frame) rather than the
 game's first real frame when the very first save of a session reaches
-`_try_save`: the state file confirms fine, but RetroArch's savestate
-thumbnail grabs whatever is on screen at that instant. Counted from PLAYING
+`_try_save`: the state file confirms fine, but the frame captured with
+the save shows whatever is on screen at that instant. Counted from PLAYING
 rather than from process spawn, since core load and ROM load between spawn
 and PLAYING are themselves variable and would otherwise eat into (or blow
 past) the budget before the game has actually started. Only the first save
@@ -360,10 +351,6 @@ Each entry names the `core` and its `extensions`; the extensions order doubles
 as the preference order when a folder holds several candidates.
 
 `savestate` is assumed true; only specialized cores opt out.
-
-`thumbnail` is assumed true. Cores that render on the GPU can deadlock
-RetroArch's main loop on the framebuffer grab that follows a save, which takes
-the stdin command channel down with it for the rest of the session.
 
 `assets` maps a path under the RetroArch system dir to the directory on the
 image holding those files, for cores that need data the .so does not carry.
@@ -602,16 +589,15 @@ def _ensure_core_assets(assets: dict[str, str]) -> None:
         log.info("retroarch: linked core assets %s -> %s", dest, src)
 
 
-def _write_broker_cfg(thumbnail: bool = True) -> Path:
+def _write_broker_cfg() -> Path:
     """Write the minimal per-launch config, applied *on top of* the user's config.
 
     The stdin interface, the broker save dirs, and the joypad driver the
-    streamed pads need; nothing else. The broker data directories are created
-    first, and the file is written through a temp file.
-
-    Args:
-        thumbnail: Whether RetroArch should capture a thumbnail with each save
-            state; off for cores where the framebuffer grab deadlocks.
+    streamed pads need; nothing else. Save thumbnails are off: the frame RomM
+    files beside a state comes from the broker's own capture, and the
+    framebuffer grab RetroArch would do instead deadlocks GPU-rendered cores.
+    The broker data directories are created first, and the file is written
+    through a temp file.
 
     Returns:
         The path of the written config, `BROKER_CFG`.
@@ -626,7 +612,7 @@ def _write_broker_cfg(thumbnail: bool = True) -> Path:
         'savestate_auto_save = "false"\n'
         'savestate_auto_load = "false"\n'
         'savestate_auto_index = "false"\n'
-        f'savestate_thumbnail_enable = "{"true" if thumbnail else "false"}"\n'
+        'savestate_thumbnail_enable = "false"\n'
         # The stdin QUIT must exit immediately, not arm a "press again"
         # confirmation.
         'confirm_quit = "false"\n'
@@ -740,10 +726,8 @@ def _stable_file_wait(
 ) -> Optional[int]:
     """Poll until `target_name` is rewritten and holds a stable, non-empty size.
 
-    Shared by the state-file wait and the thumbnail wait: both confirm a
-    write landed the same way, a changed mtime since `before` followed by a
-    non-zero size holding steady, only the watched filename and stop time
-    differ. Zero bytes never counts as stable: a file RetroArch created but
+    A write is confirmed by a changed mtime since `before` followed by a
+    non-zero size holding steady. Zero bytes never counts as stable: a file RetroArch created but
     stalled on before writing anything would otherwise pass as complete.
 
     Args:
@@ -1242,8 +1226,6 @@ class Retroarch(Emulator):
         """
         self._launch_seq = 0
         """Launch generation, bumped on every launch and stop so stale background waits bail out."""
-        self._thumbnail_enabled = True
-        """Whether the loaded platform writes a save thumbnail; set from the platform table at launch."""
         self._resume_settle = RESUME_LOAD_SETTLE
         """Seconds between PLAYING and a deferred resume load; set from the platform table at launch."""
         self._state_confirm_wait = STATE_CONFIRM_WAIT
@@ -1537,10 +1519,9 @@ class Retroarch(Emulator):
             )
         core = _ensure_core(info["core"], info.get("core_source"))
         _ensure_core_assets(info.get("assets", {}))
-        self._thumbnail_enabled = info.get("thumbnail", True)
         self._resume_settle = info.get("resume_settle", RESUME_LOAD_SETTLE)
         self._state_confirm_wait = info.get("state_confirm_wait", STATE_CONFIRM_WAIT)
-        cfg_path = _write_broker_cfg(self._thumbnail_enabled)
+        cfg_path = _write_broker_cfg()
 
         env = base_launch_env()
         binary = os.environ.get("RETROARCH_BIN", "retroarch")
@@ -1930,12 +1911,6 @@ class Retroarch(Emulator):
     def _try_save(self) -> bool:
         """Send `SAVE_STATE` once and confirm the file landed in `STATE_SLOT`.
 
-        When the platform writes thumbnails, the sibling `.png` is also
-        waited on, in its own `STATE_THUMBNAIL_WAIT` window, once the state
-        file itself is confirmed. A thumbnail that never lands is only logged:
-        the state file is already good, and losing a preview should not read
-        as losing the save.
-
         Returns:
             True when the slot's state file changed on disk, is non-empty,
             and held a stable size within `_state_confirm_wait`.
@@ -1943,27 +1918,9 @@ class Retroarch(Emulator):
         before = _state_snapshot(STATE_DIR, self._rom_base)
         if not self._write_cmd("SAVE_STATE"):
             return False
-        if not _wait_for_state_file(
+        return _wait_for_state_file(
             before, STATE_DIR, self._rom_base, STATE_SLOT, self._state_confirm_wait
-        ):
-            return False
-        if self._thumbnail_enabled:
-            self._wait_for_state_thumbnail(before)
-        return True
-
-    def _wait_for_state_thumbnail(self, before: dict[Path, tuple[int, float]]) -> None:
-        """Wait for the working slot's save thumbnail, without failing the save on a miss.
-
-        Args:
-            before: The `_state_snapshot` taken before `SAVE_STATE` was sent.
-        """
-        target_name = _state_name(self._rom_base, STATE_SLOT) + ".png"
-        deadline = time.monotonic() + STATE_THUMBNAIL_WAIT
-        if _stable_file_wait(before, STATE_DIR, self._rom_base, target_name, deadline) is None:
-            log.warning(
-                "retroarch: save thumbnail %s not confirmed on disk (platform=%s, rom=%s)",
-                target_name, self.platform, self._rom_base,
-            )
+        )
 
     def save_state(self, slot: int) -> bool:
         """Save the running game into `STATE_SLOT`.
@@ -2242,21 +2199,6 @@ class Retroarch(Emulator):
     def unlock_state_write(self) -> None:
         """Release `_disc_lock` taken by `lock_for_state_write`."""
         self._disc_lock.release()
-
-    def state_screenshot_path(self) -> Optional[Path]:
-        """The thumbnail RetroArch wrote beside the working slot's state, or None.
-
-        RetroArch writes the thumbnail as `<state file>.png` beside the state,
-        so it is only meaningful next to the state it was taken with.
-
-        Returns:
-            The `.png` next to `state_path`, or None when either is missing.
-        """
-        state = self.state_path()
-        if state is None:
-            return None
-        shot = state.with_name(f"{state.name}.png")
-        return shot if shot.is_file() else None
 
     def _clear_subtree(self, subtree: str) -> None:
         """Empty one of `save_subtrees` without removing the directory itself.

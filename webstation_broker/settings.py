@@ -121,11 +121,12 @@ archive of huge numbers of near-zero-byte deeply-nested entries from
 exhausting inodes or hanging the restore walk.
 """
 
-STATE_SCREENSHOT_MAX_BYTES = int(os.environ.get("BROKER_STATE_SCREENSHOT_MAX_BYTES", str(16 * 1024 * 1024)))
-"""Same two-sided cap for the frame served alongside a state.
+STATE_SCREENSHOT_SIZE = int(os.environ.get("BROKER_STATE_SCREENSHOT_SIZE", "640"))
+"""Longest side, in pixels, of the frame captured with a state.
 
-From `BROKER_STATE_SCREENSHOT_MAX_BYTES` (default 16 MiB). Matches RomM's own
-ceiling on the transfer.
+From `BROKER_STATE_SCREENSHOT_SIZE` (default 640). The capture is the whole
+streamed desktop, so it is scaled down to this before it is served as the
+state's thumbnail.
 """
 
 DEV_MODE = os.environ.get("BROKER_DEV_MODE", "").lower() == "true"
