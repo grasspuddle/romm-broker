@@ -1242,7 +1242,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     // Arrivals on an invite link have no RomM window around this one, so the
     // fader in the bar is their only way to turn the game down. RomM arrivals
-    // keep the parent's control bar and never see it.
+    // see it as well, alongside the parent bar's own volume control.
     const streamVolume = document.getElementById('stream-volume');
     const streamMuteBtn = document.getElementById('stream-mute-btn');
     const streamVolumeSlider = document.getElementById('stream-volume-slider');
@@ -1372,11 +1372,9 @@ document.addEventListener('DOMContentLoaded', async () => {
     const audioInputSelect = document.getElementById('audio-input-select');
     const videoInputSelect = document.getElementById('video-input-select');
     const reloadStreamBtn = document.getElementById('reload-stream-btn');
+    // Stays hidden as it ships until the first state_update says who holds
+    // mouse and keyboard; nobody can be offered the mode before that is known.
     const gamingModeBtn = document.getElementById('gaming-mode-btn');
-    // Read-only viewers never hold input; controllers get it back with M/K.
-    if (COLLAB_DATA.userRole !== 'controller' && COLLAB_DATA.userPermission !== 'readonly') {
-        gamingModeBtn.classList.remove('hidden');
-    }
     const videoGrid = document.getElementById('video-grid');
     const videoStrip = document.getElementById('video-strip');
     const videoGridContent = document.getElementById('video-grid-content');
@@ -2559,10 +2557,18 @@ document.addEventListener('DOMContentLoaded', async () => {
                         const mkOwnerUser = data.viewers.find(u => u.has_mk);
                         const newMkOwner = mkOwnerUser ? mkOwnerUser.publicId : COLLAB_DATA.userPublicId;
 
+                        // Gaming mode pointer-locks the stream, so it is only
+                        // on offer to whoever currently holds mouse and
+                        // keyboard: locking anyone else's pointer would feed
+                        // it to a stream that routes none of their input.
                         const iHaveMk = (mkOwnerUser && mkOwnerUser.publicId === COLLAB_DATA.userPublicId)
                             || (!mkOwnerUser && COLLAB_DATA.userRole === 'controller');
-                        gamingModeBtn.classList.toggle('hidden', COLLAB_DATA.userPermission === 'readonly'
-                            || (COLLAB_DATA.userRole === 'controller' && !iHaveMk));
+                        const canGame = COLLAB_DATA.userPermission !== 'readonly' && iHaveMk;
+                        gamingModeBtn.classList.toggle('hidden', !canGame);
+                        // Handing mouse and keyboard on mid-session leaves the
+                        // loser pointer-locked to a stream that no longer
+                        // routes them, so the mode goes with the input.
+                        if (!canGame) gamingMode.exitIfActive();
 
                         if (COLLAB_DATA.userRole === 'controller' && currentMkOwner !== newMkOwner) {
                             currentMkOwner = newMkOwner;
@@ -3518,6 +3524,9 @@ document.addEventListener('DOMContentLoaded', async () => {
         let active = false;
         let escapePresses = 0;
         let lastEscapeAt = 0;
+        // Reset at every point the user asks for a lock, so each request gets
+        // the full retry budget rather than inheriting a spent one.
+        let lockAttempt = 0;
 
         const frame = () => document.getElementById('session-frame');
         const isFullscreen = () => {
@@ -3536,27 +3545,34 @@ document.addEventListener('DOMContentLoaded', async () => {
             return (input && input.element) || doc.getElementById('overlayInput');
         };
 
-        const requestLock = (attempt = 0) => {
+        const requestLock = () => {
             if (!isFullscreen()) return;
             const doc = frameDoc();
             const target = lockTarget();
             if (!doc || !target || typeof target.requestPointerLock !== 'function') return;
             if (doc.pointerLockElement === target) return;
-            let request;
             try {
-                request = target.requestPointerLock();
+                // Chromium hands back a promise and rejects it on refusal;
+                // Firefox and Safari hand back nothing at all. Every engine
+                // fires pointerlockerror either way, so that event is what
+                // drives the retry and the rejection is swallowed only to
+                // keep an unhandled one out of the console.
+                const request = target.requestPointerLock();
+                if (request && typeof request.catch === 'function') request.catch(() => {});
             } catch (err) {
-                request = Promise.reject(err);
+                console.warn('[Gaming] Pointer lock threw:', err);
             }
-            if (!request || typeof request.catch !== 'function') return;
-            request.catch((err) => {
-                // Chrome refuses a lock while fullscreen is still settling.
-                if (attempt < LOCK_RETRIES) {
-                    setTimeout(() => requestLock(attempt + 1), LOCK_RETRY_MS);
-                } else {
-                    console.warn('[Gaming] Pointer lock refused:', err);
-                }
-            });
+        };
+        // Chrome refuses a lock while fullscreen is still settling, so a
+        // refusal is retried on a short timer before it is called a failure.
+        const onFrameLockError = () => {
+            if (!isFullscreen()) return;
+            if (lockAttempt >= LOCK_RETRIES) {
+                console.warn('[Gaming] Pointer lock refused; giving up after', LOCK_RETRIES, 'retries.');
+                return;
+            }
+            lockAttempt += 1;
+            setTimeout(requestLock, LOCK_RETRY_MS);
         };
         const releaseLock = () => {
             const doc = frameDoc();
@@ -3576,7 +3592,9 @@ document.addEventListener('DOMContentLoaded', async () => {
         // Clicks in the stream wake audio and re-lock after an Escape release.
         const onFrameMouseDown = (e) => {
             unlockAllAudio();
-            if (e.button === 0) requestLock();
+            if (e.button !== 0) return;
+            lockAttempt = 0;
+            requestLock();
         };
         // Selkies escape hatch: three quick Escapes exit, third press swallowed.
         // Bound at frame load so it runs before the core's keydown listener.
@@ -3600,6 +3618,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                 const win = boundDoc.defaultView;
                 if (win) win.removeEventListener('keydown', onFrameKeyDown, true);
                 boundDoc.removeEventListener('mousedown', onFrameMouseDown, true);
+                boundDoc.removeEventListener('pointerlockerror', onFrameLockError);
             } catch (err) { /* frame gone */ }
             boundDoc = null;
         };
@@ -3611,6 +3630,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             if (!win) return;
             win.addEventListener('keydown', onFrameKeyDown, true);
             doc.addEventListener('mousedown', onFrameMouseDown, true);
+            doc.addEventListener('pointerlockerror', onFrameLockError);
             boundDoc = doc;
         };
 
@@ -3629,15 +3649,18 @@ document.addEventListener('DOMContentLoaded', async () => {
             el.requestFullscreen().catch((err) => console.error('[Gaming] Fullscreen refused:', err));
             el.focus();
         };
+        // Scoped to the frame: with some other element fullscreen this is not
+        // gaming mode's to close, and toggle falls through to entering instead.
         const leave = () => {
-            if (document.fullscreenElement && document.exitFullscreen) {
-                document.exitFullscreen().catch((err) => console.error(err));
+            if (isFullscreen() && document.exitFullscreen) {
+                document.exitFullscreen().catch((err) => console.error('[Gaming] Fullscreen exit refused:', err));
             }
         };
 
         document.addEventListener('fullscreenchange', () => {
             if (isFullscreen()) {
                 bindFrame();
+                lockAttempt = 0;
                 requestLock();
                 lockKeyboard();
                 setActive(true);
@@ -3654,6 +3677,9 @@ document.addEventListener('DOMContentLoaded', async () => {
             bindFrame();
         }
 
-        return { toggle: () => (document.fullscreenElement ? leave() : enter()) };
+        return {
+            toggle: () => (isFullscreen() ? leave() : enter()),
+            exitIfActive: () => { if (active) leave(); },
+        };
     })();
 });

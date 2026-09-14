@@ -59,6 +59,9 @@ Everything but the game itself lives in the bar along the bottom (swipe it
 down, or tap the handle at the bottom edge, to hide it and get the whole
 screen back). Left to right:
 
+- **The stream controls** at the left edge: a volume fader for the game with
+  a mute button under it, a **Reload Stream** button for the rare case the
+  stream freezes, and **Gaming Mode**, described below.
 - **The controller tray** (host only), then **your own tile**, then a tile
   for everyone else in the room.
 - **The invite tile** (host only), described above.
@@ -70,8 +73,29 @@ screen back). Left to right:
   room, chat folds to a narrow tab at the right edge with a dot for unread
   messages; tap the tab to open it.
 
-Game volume, fullscreen, saving and stopping the game are RomM's own
-controls, on the bar RomM shows above the stream, not the room's.
+Saving and stopping the game are RomM's own controls, on the bar RomM shows
+above the stream, not the room's. Volume appears in both places: the room's
+fader is the only one an invite link gets, and inside RomM it sits alongside
+RomM's, each turning the same game down.
+
+### Gaming mode
+
+The crosshair button blows the stream up to the whole screen and hands the
+game your mouse the way a native game takes it: the pointer stops being a
+cursor on a page and becomes aim, so mouselook works instead of the mouse
+sliding off the edge of the stream. It only appears while you're the one
+holding mouse and keyboard, since there's nothing to aim with otherwise.
+
+Press **Esc three times quickly** to come back out. The first two go through
+to the game, so in-game menus still open on them.
+
+<Callout type="warn" title="Esc may drop you out on the first press.">
+Trapping Esc needs a keyboard lock that browsers only grant to the page
+you're actually looking at. On an invite link that's the room, so the three
+press exit works. Inside RomM the room is in a frame and the lock is RomM's
+to ask for, so the first Esc leaves gaming mode. Mouselook still works
+either way.
+</Callout>
 
 ### Your own tile
 
@@ -82,7 +106,7 @@ just your video.
 
 The gear opens a small dialog for picking which microphone and camera to
 use, if your device has more than one (your choice is remembered for next
-time), and a **Reload Stream** button for the rare case the stream freezes.
+time).
 
 Spectators have no tile of their own and so none of these, since there's
 nothing for them to control.
