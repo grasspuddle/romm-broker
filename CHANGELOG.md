@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.8.2](https://github.com/romm-streaming/romm-broker/compare/v0.8.1...v0.8.2) (2026-09-14)
+
+
+### Bug Fixes
+
+* Merge pull request [#36](https://github.com/romm-streaming/romm-broker/issues/36) from thelamer/master ([7c3ba01](https://github.com/romm-streaming/romm-broker/commit/7c3ba01d972af056db40d77b81f9e6ef1bd70bbe))
+* **room:** gate gaming mode on mouse and keyboard ownership ([dc5ef34](https://github.com/romm-streaming/romm-broker/commit/dc5ef34513ca62e0a7a8d4b617beea171ab90ae9))
+* Use proper socket, make grabbing a screenshot universal ([7c3ba01](https://github.com/romm-streaming/romm-broker/commit/7c3ba01d972af056db40d77b81f9e6ef1bd70bbe))
+
+
+### Documentation
+
+* cover the stream controls and gaming mode in the bar ([d409f91](https://github.com/romm-streaming/romm-broker/commit/d409f9198198309735c0cbd74120429b55952568))
+* document PCSX2 GS init failure on AMD iGPU as a Vulkan/RADV issue ([88dde26](https://github.com/romm-streaming/romm-broker/commit/88dde26c00c9ee3f1945fd0bcea30d0df725cfe2))
+* document the conventions and security invariants inline ([52c1cda](https://github.com/romm-streaming/romm-broker/commit/52c1cdaddb1d7e336abccb35be95b3f4c8db0ede))
+
 ## [0.8.1](https://github.com/romm-streaming/romm-broker/compare/v0.8.0...v0.8.1) (2026-09-12)
 
 
