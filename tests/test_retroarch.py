@@ -58,16 +58,6 @@ def test_an_unmapped_platform_has_no_core() -> None:
     assert retroarch._platform_info(None) is None
 
 
-@pytest.mark.parametrize("slug", ["ngc", "wii"])
-def test_the_dolphin_core_keeps_state_thumbnails_off(slug: str) -> None:
-    """The Dolphin core's platforms turn state thumbnails off.
-
-    It renders on the GPU, and the framebuffer grab after a save deadlocks
-    RetroArch's runloop, taking the command channel down with it.
-    """
-    assert retroarch._platform_info(slug)["thumbnail"] is False
-
-
 def test_psp_declares_where_the_core_finds_its_assets() -> None:
     """The psp platform points the PPSSPP asset link straight at the assets tree.
 
@@ -219,12 +209,11 @@ class TestBrokerConfig:
         assert f'savestate_directory = "{retroarch.STATE_DIR}"' in cfg
         assert f'savefile_directory = "{retroarch.SAVE_DIR}"' in cfg
 
-    @pytest.mark.parametrize("thumbnail,expected", [(True, "true"), (False, "false")])
-    def test_thumbnails_follow_the_platform(self, thumbnail: bool, expected: str) -> None:
-        """The thumbnail flag passed in is what the overlay writes."""
-        cfg = retroarch._write_broker_cfg(thumbnail).read_text()
+    def test_retroarch_own_thumbnails_are_off(self) -> None:
+        """The overlay turns RetroArch's save thumbnail off; the broker captures the frame itself."""
+        cfg = retroarch._write_broker_cfg().read_text()
 
-        assert f'savestate_thumbnail_enable = "{expected}"' in cfg
+        assert 'savestate_thumbnail_enable = "false"' in cfg
 
 
 def test_extensions_and_save_subtrees_survive_the_load_as_tuples() -> None:
@@ -1177,110 +1166,6 @@ class TestNewestState:
     def test_returns_none_when_no_state_exists(self, state_dir: Path) -> None:
         """An empty state dir is a slot nobody has saved into yet, not an error."""
         assert retroarch._newest_state(state_dir, "Game [USA]", 0) is None
-
-
-def _write_after(path: Path, data: bytes, delay: float) -> None:
-    """Write `data` to `path` after `delay` seconds, from a background thread.
-
-    Args:
-        path: The file to write.
-        data: The bytes to write.
-        delay: Seconds to sleep before writing, simulating an emulator that
-            produces the file some time after the save was triggered.
-    """
-    time.sleep(delay)
-    path.write_bytes(data)
-
-
-class TestSaveStateThumbnail:
-    """Waiting for the paired save thumbnail alongside the state file."""
-
-    @pytest.fixture
-    def emulator(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> retroarch.Retroarch:
-        """A Retroarch that looks alive, skips slot homing, and drops commands silently.
-
-        Args:
-            tmp_path: Backs the savestate directory.
-            monkeypatch: The pytest monkeypatch fixture.
-
-        Returns:
-            A Retroarch ready to have `save_state` called on it, with
-            `STATE_DIR` pointed at a throwaway directory and enough time on
-            `STATE_CONFIRM_WAIT` and `STATE_THUMBNAIL_WAIT` for both waits to
-            settle.
-        """
-        states = tmp_path / "states"
-        states.mkdir()
-        monkeypatch.setattr(retroarch, "STATE_DIR", states)
-        monkeypatch.setattr(retroarch, "STATE_CONFIRM_WAIT", 2.5)
-        monkeypatch.setattr(retroarch, "STATE_THUMBNAIL_WAIT", 1.5)
-        emulator = retroarch.Retroarch()
-        emulator.platform = "gc"
-        emulator._rom_base = "Game"
-        emulator._slot_homed = True
-        emulator._thumbnail_enabled = True
-        monkeypatch.setattr(emulator, "alive", lambda: True)
-        monkeypatch.setattr(emulator, "_write_cmd", lambda cmd: True)
-        return emulator
-
-    def test_a_thumbnail_written_after_the_state_is_still_waited_for(
-        self, emulator: retroarch.Retroarch, caplog: pytest.LogCaptureFixture
-    ) -> None:
-        """A thumbnail that lands after the state file is still confirmed, not skipped."""
-        threading.Thread(
-            target=_write_after, args=(retroarch.STATE_DIR / "Game.state", b"savedata", 0.05), daemon=True
-        ).start()
-        threading.Thread(
-            target=_write_after, args=(retroarch.STATE_DIR / "Game.state.png", b"thumb", 0.7), daemon=True
-        ).start()
-
-        with caplog.at_level(logging.WARNING):
-            assert emulator.save_state(0) is True
-
-        assert "save thumbnail" not in caplog.text
-        assert (retroarch.STATE_DIR / "Game.state.png").exists()
-
-    def test_a_slow_state_confirmation_does_not_starve_the_thumbnail_wait(
-        self, emulator: retroarch.Retroarch, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
-    ) -> None:
-        """The thumbnail gets its own `STATE_THUMBNAIL_WAIT`, not whatever the state wait left behind.
-
-        The state file lands late enough that only a sliver of
-        `_state_confirm_wait` remains once it is confirmed — too little for
-        the thumbnail's own 0.5s stability requirement. If the thumbnail
-        wait were still carved out of that same, nearly-spent deadline (the
-        pre-fix behaviour), a thumbnail landing shortly after would be
-        reported missing even though it arrived in plenty of time.
-        """
-        emulator._state_confirm_wait = 1.0
-        monkeypatch.setattr(retroarch, "STATE_THUMBNAIL_WAIT", 1.0)
-        threading.Thread(
-            target=_write_after, args=(retroarch.STATE_DIR / "Game.state", b"savedata", 0.2), daemon=True
-        ).start()
-        threading.Thread(
-            target=_write_after, args=(retroarch.STATE_DIR / "Game.state.png", b"thumb", 0.9), daemon=True
-        ).start()
-
-        with caplog.at_level(logging.WARNING):
-            assert emulator.save_state(0) is True
-
-        assert "save thumbnail" not in caplog.text
-        assert (retroarch.STATE_DIR / "Game.state.png").exists()
-
-    def test_a_missing_thumbnail_does_not_fail_the_save(
-        self, emulator: retroarch.Retroarch, caplog: pytest.LogCaptureFixture
-    ) -> None:
-        """No .png ever lands; the state save itself still reports success, with a warning logged."""
-        emulator._state_confirm_wait = 1.0
-        threading.Thread(
-            target=_write_after, args=(retroarch.STATE_DIR / "Game.state", b"savedata", 0.05), daemon=True
-        ).start()
-
-        with caplog.at_level(logging.WARNING):
-            assert emulator.save_state(0) is True
-
-        assert "save thumbnail" in caplog.text
-        assert "Game.state.png" in caplog.text
 
 
 class TestLoadStateConfirmation:

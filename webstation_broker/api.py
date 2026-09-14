@@ -25,7 +25,7 @@ from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel, Field
 from starlette.websockets import WebSocketState
 
-from . import callback, memcard, saves, selkies, session, settings
+from . import callback, memcard, saves, screenshot, selkies, session, settings
 from .emulators import get_emulator
 from .emulators.base import Emulator, reap_orphan
 
@@ -1006,8 +1006,10 @@ async def _keep_archive(zip_bytes: bytes, name: str, session_id: str) -> Optiona
 async def _do_exit(save_slot: Optional[int]) -> dict[str, Any]:
     """Save state, stop the emulator, dump the save delta, and report.
 
-    A `save_slot` of None exits without writing a state. The save dump still
-    runs: the game's own save data belongs to the player either way, so an
+    A `save_slot` of None exits without writing a state. Otherwise the
+    streamed desktop is captured first and, once the state is confirmed,
+    kept on the emulator as the frame RomM fetches beside it. The save dump
+    still runs: the game's own save data belongs to the player either way, so an
     emulator that failed outright on the state is stopped and dumped anyway
     rather than allowed to abort the teardown. The dump only goes ahead once
     the process is confirmed gone, and a dump that fails is reported rather
@@ -1037,6 +1039,9 @@ async def _do_exit(save_slot: Optional[int]) -> dict[str, Any]:
         raise HTTPException(status_code=409, detail="no active session")
 
     emulator = sess["emulator_obj"]
+    frame = None
+    if save_slot is not None:
+        frame = await anyio.to_thread.run_sync(screenshot.capture_frame)
     try:
         exit_report = await anyio.to_thread.run_sync(emulator.save_and_exit, save_slot)
     except Exception as exc:
@@ -1052,6 +1057,8 @@ async def _do_exit(save_slot: Optional[int]) -> dict[str, Any]:
             "state_file": None,
             "exit_error": str(exc),
         }
+    if exit_report.get("state_saved"):
+        emulator.state_screenshot = frame
 
     if await _confirm_stopped(emulator, sess["id"]):
         dump = await _dump_saves(emulator, sess)
@@ -1280,7 +1287,11 @@ async def save_state(body: StateIn, x_broker_secret: Optional[str] = Header(defa
     """Save a state into the emulator's working slot.
 
     The requested slot is resolved to the single working slot and the reply
-    reports the slot actually used.
+    reports the slot actually used. The streamed desktop is captured before
+    the save is sent, so the frame is what the player saw at the moment of
+    saving, and it is kept on the emulator only once the state is confirmed.
+    A capture that fails leaves the state with no frame rather than the
+    previous save's.
 
     Args:
         body: The requested slot.
@@ -1297,8 +1308,11 @@ async def save_state(body: StateIn, x_broker_secret: Optional[str] = Header(defa
     _check_secret(x_broker_secret)
     with _session_operation("save-state"):
         emulator = _state_emulator()
+        frame = await anyio.to_thread.run_sync(screenshot.capture_frame)
         saved = await anyio.to_thread.run_sync(emulator.save_state, body.slot)
         slot = emulator.state_slot
+        if saved:
+            emulator.state_screenshot = frame
     if saved:
         log.info("save state slot %d: ok", slot)
     else:
@@ -1470,45 +1484,30 @@ async def get_state_file(x_broker_secret: Optional[str] = Header(default=None)) 
 async def get_state_screenshot(x_broker_secret: Optional[str] = Header(default=None)) -> Response:
     """Serve the frame captured with the working slot's state.
 
-    Only for emulators that write the thumbnail as its own file; the ones that
-    embed it in the state answer 404, which is the caller's cue to read the
-    frame out of the state it already fetched. `slot` is accepted and ignored
-    the same way the state-file routes ignore it, and like the state itself the
-    frame stays readable after exit.
+    The frame is the streamed desktop as it was when the save was sent, held
+    on the emulator by the save and exit routes, so it stays readable after
+    exit on the same terms as the state itself. `slot` is accepted and
+    ignored the same way the state-file routes ignore it.
 
     Args:
         x_broker_secret: The shared secret RomM sends; required when `BROKER_SECRET` is set.
 
     Returns:
-        The screenshot as a PNG.
+        The frame as a PNG.
 
     Raises:
         HTTPException: 403 on a bad secret; 409 when there is no session to
             read from or another session operation is in flight; 404 when the
-            slot has no screenshot file; 500 when the file cannot be read; 413
-            when it exceeds STATE_SCREENSHOT_MAX_BYTES.
+            slot's state has no frame.
     """
     _check_secret(x_broker_secret)
     with _session_operation("state-screenshot read"):
         emulator = _readable_emulator()
-        path = await anyio.to_thread.run_sync(emulator.state_screenshot_path)
-        if path is None:
-            log.debug("state-screenshot: no screenshot for slot")
+        body = emulator.state_screenshot
+        if body is None:
+            log.debug("state-screenshot: no frame for slot")
             raise HTTPException(status_code=404, detail="no state screenshot for slot")
-        try:
-            size = path.stat().st_size
-        except OSError as exc:
-            log.error("state-screenshot: could not stat %s: %s", path, exc)
-            raise HTTPException(status_code=500, detail="could not read screenshot")
-        if size > settings.STATE_SCREENSHOT_MAX_BYTES:
-            log.debug("state-screenshot: %s exceeds size limit (%d bytes)", path, size)
-            raise HTTPException(status_code=413, detail="screenshot exceeds size limit")
-        try:
-            body = await anyio.to_thread.run_sync(path.read_bytes)
-        except OSError as exc:
-            log.error("state-screenshot: could not read %s: %s", path, exc)
-            raise HTTPException(status_code=500, detail="could not read screenshot")
-        log.info("state-screenshot: serving %s (%d bytes)", path.name, len(body))
+        log.info("state-screenshot: serving %d bytes", len(body))
         return Response(content=body, media_type="image/png")
 
 

@@ -15,7 +15,7 @@ from typing import Any, Optional
 import pytest
 from fastapi.testclient import TestClient
 
-from webstation_broker import selkies, session, settings
+from webstation_broker import screenshot, selkies, session, settings
 from webstation_broker.app import create_app
 from webstation_broker.emulators import base
 from webstation_broker.emulators.base import Emulator
@@ -46,6 +46,18 @@ def clean_session() -> Iterator[None]:
     session.ROOM["controller"] = None
     session.ROOM["viewers"] = {}
     session.ROOM["cooldowns"] = {}
+
+
+@pytest.fixture(autouse=True)
+def no_frame_capture(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stub the frame capture so a save never reaches for a computer-use endpoint.
+
+    A test that wants a frame patches `screenshot.capture_frame` itself.
+
+    Args:
+        monkeypatch: Pytest's attribute patcher, undone when the test ends.
+    """
+    monkeypatch.setattr(screenshot, "capture_frame", lambda: None)
 
 
 @pytest.fixture(autouse=True)

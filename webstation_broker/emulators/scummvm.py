@@ -1277,18 +1277,6 @@ class Scummvm(Emulator):
         """The working slot's save file for the booted target, or None when empty."""
         return slot_file(self._target, STATE_SLOT)
 
-    def state_screenshot_path(self) -> Optional[Path]:
-        """None: ScummVM embeds the thumbnail in the save itself.
-
-        Every GUI-made save carries a `THMB` block inside it (see
-        `Graphics::saveThumbnail`), so there is no separate file to point at and
-        the frame travels inside the state RomM already fetched.
-
-        Returns:
-            Always None.
-        """
-        return None
-
     def clear_working_slot(self) -> None:
         """Delete every game's working-slot save before a new session boots.
 

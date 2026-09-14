@@ -17,13 +17,11 @@ of these need setting inside the stock image except `BROKER_SECRET`, and
 | `BROKER_EXPORT_DIR` | `/config/broker-exports` | Where exit writes save archives: always in dev mode, otherwise only when the upload fails. |
 | `BROKER_IMPORT_DIR` | `/config/broker-imports` | Where uploaded save archives land, ready to pass to activate as `save.archive`. |
 | `BROKER_FRONTEND_DIST` | `/usr/share/webstation-broker/www` | The built room UI served outside dev mode. |
-| `BROKER_DISPLAY` | `:0` | X display emulators are launched onto. |
-| `BROKER_WAYLAND_DISPLAY` | `wayland-0` | Wayland display emulators are launched onto. |
 | `BROKER_PID_FILE` | `/config/broker-emulator.json` | Where the running emulator's pid is recorded so a restarted broker can still kill it. |
 | `BROKER_SAVE_UPLOAD_PATH` | `/api/webstation/saves` | Path appended to the callback base URL when exit POSTs the save archive. |
 | `BROKER_SAVE_UPLOAD_TIMEOUT` | `30` | Seconds allowed for the exit save upload. |
 | `BROKER_STATE_FILE_MAX_BYTES` | `268435456` | Ceiling on one state file over the state-file routes (256 MiB). RomM caps the same transfer, so raising one end alone only moves which end refuses. |
-| `BROKER_STATE_SCREENSHOT_MAX_BYTES` | `16777216` | Ceiling on the frame served with a state (16 MiB). Same two-sided cap. |
+| `BROKER_STATE_SCREENSHOT_SIZE` | `640` | Longest side, in pixels, of the frame captured with a state. The capture is the whole streamed desktop, scaled down before it is served as the thumbnail. |
 | `SAVE_FILE_MAX_BYTES` | `268435456` | Ceiling on a save or memory-card archive, over the import, exit-dump and memory-card routes (256 MiB). Unlike the other broker settings this one has no `BROKER_` prefix. |
 | `BROKER_SAVE_FILE_MAX_ENTRIES` | `10000` | Ceiling on the number of members a save or memory-card archive may contain. Independent of `SAVE_FILE_MAX_BYTES`: a byte-size cap alone doesn't stop an archive of huge numbers of near-zero-byte, deeply nested entries from exhausting inodes or hanging the restore walk. |
 | `BROKER_GAMEPAD_SLOTS` | `4` | Number of virtual gamepad slots the room can assign. |

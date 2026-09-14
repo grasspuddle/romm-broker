@@ -18,9 +18,7 @@ onto the first `[section]` line and never match it.
 
 Save states have no boot-time load flag, unlike Dolphin's `-s`, so a resume
 always goes through the deferred hotkey load below rather than loading before
-the window exists to fail into. Unlike Dolphin, PPSSPP writes a screenshot
-alongside every state, so the thumbnail here comes from that file rather than
-the streamed canvas.
+the window exists to fail into.
 """
 
 import logging
@@ -90,20 +88,6 @@ From env `PPSSPP_STATE_STABLE`, default 1.5. Long enough that a stalled write
 is not mistaken for a finished one, short enough to stay well inside
 `STATE_WAIT`.
 """
-STATE_SHOT_WAIT = float(os.environ.get("PPSSPP_STATE_SHOT_WAIT", "5.0"))
-"""Seconds the screenshot beside a finished state gets to land (env `PPSSPP_STATE_SHOT_WAIT`, default 5).
-
-Its own short window rather than the rest of `STATE_WAIT`: the state itself is
-already confirmed by the time this is waited on, so a screenshot PPSSPP never
-writes costs a few seconds instead of the whole save budget.
-"""
-STATE_SHOT_STABLE = 0.5
-"""Seconds the screenshot's size must hold still before the write counts as finished.
-
-Shorter than `STATE_STABLE`: a jpeg thumbnail is orders of magnitude smaller
-than the state it belongs to.
-"""
-
 LOAD_WAIT = float(os.environ.get("PPSSPP_LOAD_WAIT", "20.0"))
 """Seconds PPSSPP has to read the state back after the load hotkey (env `PPSSPP_LOAD_WAIT`, default 20)."""
 LOAD_SETTLE = float(os.environ.get("PPSSPP_LOAD_SETTLE", "2.0"))
@@ -149,7 +133,7 @@ _STAGING_SUFFIX = ".tmp"
 _STATE_NAME_RE = re.compile(r"^(?P<prefix>[^/]+)_(?P<slot>\d+)\.ppst$")
 """Matches `<game id>_<version>_<slot>.ppst`, the name PPSSPP builds for a save state.
 
-The screenshot beside it shares the same stem with a `.jpg` extension.
+PPSSPP writes a `.jpg` of its own beside it, under the same stem.
 """
 
 _XDOTOOL = os.environ.get("XDOTOOL_BIN", "xdotool")
@@ -456,45 +440,6 @@ def _wait_for_state_write(before: dict[Path, tuple[int, float]], deadline: float
     return False
 
 
-def _wait_for_screenshot(state: Path, deadline: float) -> None:
-    """Wait for the screenshot PPSSPP writes beside `state` to finish landing.
-
-    Unlike the state, the screenshot is written in place with no staging file
-    to rename, so nothing but its size holding still marks the end of that
-    write, and the state-screenshot route serves it straight off disk the
-    moment a save reports done. A screenshot that never settles is only
-    logged: the state is already confirmed good, and losing a preview should
-    not read as losing the save.
-
-    Args:
-        state: The state file the save settled on.
-        deadline: `time.monotonic` value to give up at.
-    """
-    POLL_SECS = 0.1
-    shot = state.with_suffix(".jpg")
-    last: Optional[int] = None
-    stable_since = 0.0
-    while time.monotonic() < deadline:
-        try:
-            size = shot.stat().st_size
-        except FileNotFoundError:
-            log.debug("screenshot not yet present beside %s", state.name)
-            size = 0
-        except OSError as exc:
-            log.warning("could not stat the screenshot beside %s: %s", state.name, exc)
-            return
-        if size == 0:
-            last = None
-        elif size != last:
-            last = size
-            stable_since = time.monotonic()
-        elif time.monotonic() - stable_since >= STATE_SHOT_STABLE:
-            log.debug("save state screenshot complete: %s (%d bytes)", shot.name, size)
-            return
-        time.sleep(POLL_SECS)
-    log.warning("save state screenshot %s never settled; the state itself is good", shot.name)
-
-
 def _backdate_atime(path: Path) -> Optional[float]:
     """Stamp `path`'s access time behind its own mtime and return what was written.
 
@@ -619,9 +564,8 @@ class Ppsspp(Emulator):
     Save data (`SAVEDATA`) and states (`PPSSPP_STATE`) both ride the save
     archive. A state is named for the game id and version, so pushed names
     are restamped into the broker's slot and the working slot is cleared
-    before a boot. PPSSPP writes a `.jpg` screenshot beside every state, so
-    the thumbnail comes from that file rather than the streamed canvas, and
-    clearing a state drops its screenshot too.
+    before a boot. PPSSPP writes a `.jpg` of its own beside every state, and
+    clearing a state drops that too.
 
     Attributes:
         name: RomM platform key, `ppsspp`.
@@ -862,10 +806,6 @@ class Ppsspp(Emulator):
         `STATE_SLOT` and the caller reads the effective slot back off
         `state_slot`.
 
-        The screenshot PPSSPP writes beside the state is waited on too, since
-        a save reported done is what sends RomM to fetch the thumbnail. A
-        screenshot that never settles does not fail the save.
-
         Args:
             slot: The slot RomM requested; not used.
 
@@ -876,12 +816,7 @@ class Ppsspp(Emulator):
         before = _snapshot()
         if not self._send_key(SAVE_KEY):
             return False
-        if not _wait_for_state_write(before, time.monotonic() + STATE_WAIT):
-            return False
-        state = self.state_path()
-        if state is not None:
-            _wait_for_screenshot(state, time.monotonic() + STATE_SHOT_WAIT)
-        return True
+        return _wait_for_state_write(before, time.monotonic() + STATE_WAIT)
 
     def load_state(self, slot: int) -> bool:
         """Load the broker's slot over the hotkey and confirm PPSSPP read the state back.
@@ -929,14 +864,6 @@ class Ppsspp(Emulator):
         """Return the newest state file in the broker's slot, or None when it holds nothing."""
         return _state_for_slot(STATE_SLOT)
 
-    def state_screenshot_path(self) -> Optional[Path]:
-        """Return the `.jpg` PPSSPP wrote beside the current state, or None when there is none."""
-        state = self.state_path()
-        if state is None:
-            return None
-        shot = state.with_suffix(".jpg")
-        return shot if shot.is_file() else None
-
     def clear_working_slot(self) -> None:
         """Delete everything the broker's slot holds before a new session boots.
 
@@ -948,7 +875,7 @@ class Ppsspp(Emulator):
         The staging file goes with them. A session killed mid-save leaves one
         behind with no state to pair it against, and the save archive sweeps
         up whatever sits in the state tree, so it would ship to RomM as a
-        state of its own. So would a screenshot whose state is already gone,
+        state of its own. So would a `.jpg` whose state is already gone,
         which is why those are swept by name rather than only alongside the
         state they belong to.
         """
