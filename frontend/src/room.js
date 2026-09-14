@@ -2778,6 +2778,38 @@ document.addEventListener('DOMContentLoaded', async () => {
     const openInvite = () => inviteTile.classList.add('open');
     const closeInvite = () => inviteTile.classList.remove('open');
 
+    // navigator.clipboard is gated by the clipboard-write Permissions-Policy,
+    // which a cross-origin parent (e.g. RomM iframing this room from another
+    // origin) has to opt this page into and usually does not. execCommand is
+    // deprecated but isn't subject to that policy, so it still works there;
+    // if even that is blocked, hand the link to the user directly rather than
+    // reporting a failure when the link itself was created fine.
+    const copyToClipboard = async (text) => {
+        if (navigator.clipboard && window.isSecureContext) {
+            try {
+                await navigator.clipboard.writeText(text);
+                return true;
+            } catch (err) {
+                console.warn('[Invite] Clipboard API write blocked, falling back:', err);
+            }
+        }
+        const scratch = document.createElement('textarea');
+        scratch.value = text;
+        scratch.style.position = 'fixed';
+        scratch.style.opacity = '0';
+        document.body.appendChild(scratch);
+        scratch.focus();
+        scratch.select();
+        let copied = false;
+        try {
+            copied = document.execCommand('copy');
+        } catch (err) {
+            console.warn('[Invite] execCommand copy blocked:', err);
+        }
+        scratch.remove();
+        return copied;
+    };
+
     const initInviteControls = () => {
         inviteBtn.addEventListener('click', openInvite);
         // The broker hands back the same link for a permission all session,
@@ -2795,6 +2827,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             };
             button.addEventListener('click', async () => {
                 const permission = button.dataset.permission;
+                let url;
                 try {
                     if (!inviteUrls[permission]) {
                         const resp = await fetch(
@@ -2809,14 +2842,20 @@ document.addEventListener('DOMContentLoaded', async () => {
                         const invited = await resp.json();
                         inviteUrls[permission] = new URL(invited.url, window.location.href).href;
                     }
-                    await navigator.clipboard.writeText(inviteUrls[permission]);
+                    url = inviteUrls[permission];
+                } catch (err) {
+                    console.error('[Invite] failed to create link:', err);
+                    flash(t('inviteLinks.failed'));
+                    return;
+                }
+
+                if (await copyToClipboard(url)) {
                     flash(t('inviteLinks.copied'));
                     // Long enough to read the confirmation before the panel goes.
                     setTimeout(closeInvite, INVITE_FLASH_MS);
-                } catch (err) {
-                    console.error('[Invite] failed:', err);
-                    flash(t('inviteLinks.failed'));
+                    return;
                 }
+                window.prompt(t('inviteLinks.copyManually'), url);
             });
         });
     };

@@ -1,6 +1,6 @@
 ---
 title: "Reverse proxy"
-description: "Serving the container from a subfolder of RomM's origin, with recipes for nginx, Caddy and Traefik and a note on Zoraxy."
+description: "Serving the container from a subfolder of RomM's origin, with recipes for nginx, Nginx Proxy Manager, Caddy and Traefik."
 ---
 
 The room UI iframes the selkies stream, and RomM in turn iframes the room. When
@@ -13,6 +13,28 @@ taskbar.
 Serving the container from a subfolder of RomM's origin fixes that: the player
 attaches listeners inside the frame, nothing overlays the stream, and the
 container's desktop is fully clickable.
+
+<Callout type="warn" title="Skipping this also breaks the room's camera, microphone and invite-link copy button — not just pointer tracking.">
+On the cross-origin path (a full URL `host`, not a subfolder), three things
+fail with no error message pointing back here:
+
+- **Camera and microphone** are refused instantly. `getUserMedia` fails
+  before the browser ever shows a permission prompt.
+- **The invite buttons** can't copy the link automatically and fall back to
+  a manual copy prompt instead.
+- **Pointer tracking** is lost inside the frame, which is what the edge-strip
+  overlay above is compensating for.
+
+All three have the same root cause and no proxy-side fix: the browser's
+Permissions-Policy for camera, microphone and clipboard-write defaults to
+same-origin only, and RomM's iframe cannot grant those permissions to a
+cross-origin child. Websocket forwarding, exploit blocking, and every other
+proxy setting are irrelevant here — this is the browser treating the room as
+a different site, full stop.
+
+Serving the container from a subfolder of RomM's own origin, below, is the
+only fix, and it removes the restriction entirely.
+</Callout>
 
 Nothing about this is proxied by RomM itself. A reverse proxy in front of both
 services maps a path on RomM's origin to the container, and the container is
@@ -75,15 +97,17 @@ streaming:
 ```
 
 `host` also still accepts a full URL (`https://webstation.example.com`), which
-is the cross origin deployment. Everything works there except the in frame
-pointer tracking, and RomM's player falls back to its edge strip automatically.
+is the cross origin deployment. RomM's player falls back to its edge strip
+automatically for the pointer tracking it loses, but camera, microphone and
+automatic invite-link copying stay broken there for the reason above — there
+is no proxy-side fix for those.
 
 Session identity is derived from `broker_host`, not `host`, so moving a
 container behind a proxy does not disturb a session it is already holding.
 
 ## Proxy recipes
 
-<Tabs items={['nginx', 'Caddy', 'Traefik']}>
+<Tabs items={['nginx', 'Nginx Proxy Manager', 'Caddy', 'Traefik']}>
 <Tab value="nginx">
 
 ```nginx
@@ -102,6 +126,46 @@ location /streaming/ {
 nginx strip `/streaming/` before forwarding, which breaks every asset.
 `proxy_buffering off` matters for the stream, and the long read timeout keeps an
 idle session's websocket from being culled mid game.
+
+</Tab>
+<Tab value="Nginx Proxy Manager">
+
+<Callout type="warn" title="Add a Custom Location on RomM's own Proxy Host. Do not create a second Proxy Host for the container.">
+A separate Proxy Host means a separate domain or subdomain, which is a
+cross-origin embed and brings back everything this page exists to avoid
+(pointer tracking, camera/mic, clipboard). The container has to end up on a
+*path* under the same Proxy Host RomM is already served from.
+</Callout>
+
+Open the Proxy Host for RomM's own domain and, under **Custom Locations** at
+the bottom of its Details tab, add one:
+
+- **Location**: `/streaming/` — same rule as everywhere else on this page,
+  it has to match `SUBFOLDER` exactly, trailing slash included.
+- **Scheme**: `http`
+- **Forward Hostname/IP**: the container's address, e.g. `10.0.1.56`
+- **Forward Port**: `3009` (or whatever host port maps to the container's 3000)
+
+Custom Locations proxy to that host:port with no path prepended, so the
+prefix isn't stripped by default — that part NPM already gets right.
+
+Click the location's own edit (pencil) icon and paste the rest into its
+**Advanced** config box, since the location-level form has no fields for it:
+
+```nginx
+proxy_http_version 1.1;
+proxy_set_header Upgrade $http_upgrade;
+proxy_set_header Connection "upgrade";
+proxy_set_header Host $host;
+proxy_buffering off;
+proxy_read_timeout 3600s;
+```
+
+The Proxy Host's own **Websockets Support** toggle applies to the whole
+vhost, but paste the upgrade headers into the location's Advanced box
+anyway — Custom Locations don't reliably inherit it. Leave **Block Common
+Exploits** on if you already use it; it only screens query strings for
+exploit patterns and has no effect on any of this.
 
 </Tab>
 <Tab value="Caddy">

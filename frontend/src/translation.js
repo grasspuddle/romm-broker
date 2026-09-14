@@ -53,6 +53,7 @@ const en = {
         readonly: 'Viewer Invite Link',
         copied: 'Link copied',
         failed: 'Could not create an invite link',
+        copyManually: 'Your browser blocked copying automatically. Copy this link:',
     },
     disconnect: {
         title: 'Disconnected',
