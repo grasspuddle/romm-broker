@@ -41,6 +41,20 @@ already sitting in the expected directory. What pre-seeding removes is the
 upload step itself, not the one-time wizard visit described per emulator
 below.
 
+## Leaving desktop mode
+
+You do not have to close the emulators you opened before ending the session.
+Exiting desktop mode closes everything that was started from the desktop,
+whether or not you left its window open, so a forgotten RetroArch or PCSX2
+window is not still running (and still rendering into the next session's
+stream) afterwards.
+
+Each app gets `DESKTOP_STOP_WAIT` seconds (default 15, see
+[Configuration](/docs/configuration/emulators)) to shut down on its own before
+it is killed outright, which is what lets an emulator write the configuration
+you just set. Raise it if an emulator you use needs longer than that to save
+its settings on exit.
+
 ## Controllers
 
 Controllers behave identically in the desktop view and in single game

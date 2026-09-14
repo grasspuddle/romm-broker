@@ -17,7 +17,7 @@ import pytest
 from webstation_broker import emulators
 from webstation_broker.emulators import base
 
-from .conftest import SLEEPER_CMD
+from .conftest import DETACHED_CMD, SLEEPER_CMD, await_gone
 
 
 def test_an_unknown_name_resolves_to_nothing() -> None:
@@ -165,6 +165,25 @@ def test_reaping_kills_an_emulator_an_earlier_broker_left_running(
 
     assert killed["pid"] == proc.pid
     assert proc.wait(timeout=10) == -signal.SIGTERM
+    assert not pid_record.exists()
+
+
+def test_reaping_kills_what_the_orphan_had_detached(
+    pid_record: Path, desktop_tree: tuple[subprocess.Popen[bytes], int, str]
+) -> None:
+    """Reaping an orphan takes down the apps it had started in sessions of their own.
+
+    This is the desktop record after a broker restart: the shell is still up with the user's
+    emulators open, and killing its process group alone would clear the record while leaving those
+    running with nothing that knows about them. The tag is read off the recorded pid, so the record
+    itself does not have to carry one.
+    """
+    shell, app_pid, _tag = desktop_tree
+    base._record_pid("desktop", shell.pid, SLEEPER_CMD)
+
+    assert base.reap_orphan()["pid"] == shell.pid
+
+    assert await_gone(app_pid, DETACHED_CMD)
     assert not pid_record.exists()
 
 

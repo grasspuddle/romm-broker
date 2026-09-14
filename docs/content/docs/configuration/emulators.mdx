@@ -16,6 +16,7 @@ Timings are in seconds.
 | `XDOTOOL_BIN` | `xdotool` | The xdotool used to send save/load hotkeys to Dolphin and PPSSPP. |
 | `XDG_RUNTIME_DIR` | `/config/.XDG` | Where PCSX2's PINE socket (`pcsx2.sock`) is looked for. |
 | `DESKTOP_BIN` | `selkies-desktop` | What the `desktop` type launches. |
+| `DESKTOP_STOP_WAIT` | `15` | SIGTERM grace before SIGKILL for the desktop session, and for every app left open on it. Longer than the base 5 s because it is mostly spent on those apps writing their config and save data on the way out. |
 
 ## PCSX2
 

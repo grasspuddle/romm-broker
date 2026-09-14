@@ -11,6 +11,7 @@ import os
 import signal
 import subprocess
 import time
+from collections.abc import Collection
 from pathlib import Path
 from typing import Any, Optional
 
@@ -49,6 +50,20 @@ read), not a slow shutdown: nothing the emulator does with the time can change
 the outcome. Long enough for that I/O to come back, short enough that the exit
 route still answers.
 """
+
+SESSION_TAG_ENV = "WEBSTATION_SESSION_TAG"
+"""Env var stamping a launched session, so what it starts can be found again at teardown.
+
+Only the desktop sets it (see `Desktop.launch`). The desktop shell starts each
+app with a double fork, which leaves the app parented to pid 1 and sitting in a
+session whose leader has already exited, so nothing in the process tree ties it
+back to the session that started it. An inherited environment variable does,
+and survives the app re-execing itself, which the launcher-style entries in the
+menu do.
+"""
+
+_PROC_DIR = Path("/proc")
+"""Process table root, walked to find the apps carrying a session tag."""
 
 WAYLAND_DISPLAY = "wayland-0"
 """labwc's socket under `XDG_RUNTIME_DIR`, the nested session every app renders into.
@@ -182,6 +197,201 @@ def _record_term_timeout(record: dict[str, Any]) -> float:
     return float(grace)
 
 
+def _environ(pid: int) -> dict[str, str]:
+    """Read a process's environment out of `/proc`.
+
+    Args:
+        pid: The process to look up.
+
+    Returns:
+        The environment as a dict, or an empty one when the process is gone or
+        belongs to another user. Only the block the process was exec'd with is
+        visible here, which is the whole point: it is what the process
+        inherited and cannot quietly drop.
+    """
+    try:
+        raw = Path(f"/proc/{pid}/environ").read_bytes()
+    except OSError as exc:
+        log.debug("could not read the environment of pid %d: %s", pid, exc)
+        return {}
+    env = {}
+    for entry in raw.decode(errors="replace").split("\0"):
+        key, sep, value = entry.partition("=")
+        if sep:
+            env[key] = value
+    return env
+
+
+def session_tag(pid: int) -> Optional[str]:
+    """Read the session tag a process was launched with, if it carries one.
+
+    Args:
+        pid: The process to look up.
+
+    Returns:
+        The value of `SESSION_TAG_ENV` in the process's environment, or None
+        when it has none.
+    """
+    return _environ(pid).get(SESSION_TAG_ENV) or None
+
+
+def tagged_processes(tag: str, exclude: Collection[int] = ()) -> list[tuple[int, list[str]]]:
+    """Find every process carrying a session tag.
+
+    The tag is an environment variable, so it reaches an app however it was
+    started: a process inherits its parent's environment across fork and exec
+    and cannot shed it, which is what makes this hold where the process tree
+    does not. A desktop app is double-forked away from its parent and into a
+    session led by a pid that has already exited, so by the time the session
+    ends nothing in the tree still connects it to the shell that started it.
+
+    Args:
+        tag: The tag to match, as returned by `session_tag`.
+        exclude: Pids to leave out of the result, normally the tagged process
+            that is being stopped through its own handle.
+
+    Returns:
+        A `(pid, argv)` pair per match. The argv is what the pid was running
+        when it was found, which is what lets a later kill tell it apart from
+        whatever the kernel may have given the pid to since.
+    """
+    found: list[tuple[int, list[str]]] = []
+    for entry in _PROC_DIR.glob("[0-9]*"):
+        try:
+            pid = int(entry.name)
+        except ValueError:
+            continue
+        if pid in exclude or pid == os.getpid():
+            continue
+        if _environ(pid).get(SESSION_TAG_ENV) != tag:
+            continue
+        cmd = _cmdline(pid)
+        if cmd:
+            found.append((pid, cmd))
+    return found
+
+
+def _still_running(pid: int, cmd: list[str]) -> bool:
+    """Whether a pid is still running the argv it was snapshotted with.
+
+    Args:
+        pid: The process to check.
+        cmd: The argv the process was running when it was snapshotted.
+
+    Returns:
+        True only while the pid is alive and its argv still matches, which is
+        false for a pid that exited and false for one the kernel handed to an
+        unrelated process since.
+    """
+    return _cmdline(pid) == cmd
+
+
+def _signal_process(entry: tuple[int, list[str]], sig: signal.Signals) -> bool:
+    """Send one signal to a snapshotted process, addressing its whole group.
+
+    The group is what carries an app's own helper processes, so signalling it
+    rather than the pid is what takes an emulator's children down with it. The
+    group normally outlives the pid that led it: the desktop shell's second
+    fork leaves each app in a group whose leader has already exited, and a
+    group lives as long as any member of it does.
+
+    Args:
+        entry: The `(pid, argv)` pair to signal.
+        sig: The signal to send.
+
+    Returns:
+        True when the signal was delivered, False when the process was already
+        gone, had been replaced by an unrelated one, or could not be signalled.
+    """
+    pid, cmd = entry
+    if not _still_running(pid, cmd):
+        return False
+    try:
+        pgid = os.getpgid(pid)
+        # Signalling a whole process group is worth one guard against ever
+        # aiming one at the broker: the sweep is driven by what /proc reports,
+        # and a match on the broker's own group would end the session that is
+        # running the teardown.
+        if pid == os.getpid() or pgid == os.getpgid(0):
+            log.error(
+                "refusing to signal pid %d (group %d), which is the broker's own", pid, pgid
+            )
+            return False
+        os.killpg(pgid, sig)
+    except (ProcessLookupError, PermissionError) as exc:
+        log.warning("could not signal leftover pid %d (%s): %s", pid, cmd[0], exc)
+        return False
+    return True
+
+
+def _await_exit(
+    entries: list[tuple[int, list[str]]], timeout: float
+) -> list[tuple[int, list[str]]]:
+    """Wait out a grace period and report which snapshotted processes are left.
+
+    Args:
+        entries: The `(pid, argv)` pairs to wait on.
+        timeout: Seconds to wait before giving up on the stragglers.
+
+    Returns:
+        The entries still running their snapshotted argv when the time ran out.
+    """
+    remaining = [entry for entry in entries if _still_running(*entry)]
+    deadline = time.monotonic() + timeout
+    while remaining and time.monotonic() < deadline:
+        time.sleep(0.2)
+        remaining = [entry for entry in remaining if _still_running(*entry)]
+    return remaining
+
+
+def kill_processes(
+    snapshot: list[tuple[int, list[str]]],
+    term_timeout: float = _DEFAULT_TERM_TIMEOUT,
+    kill_timeout: float = _DEFAULT_KILL_TIMEOUT,
+) -> int:
+    """Put down every process in a snapshot, SIGTERM first and SIGKILL after.
+
+    Every process is signalled before any of them is waited on, so a desktop
+    session that left four emulators running costs one grace period rather than
+    four in a row on the exit route.
+
+    Args:
+        snapshot: `(pid, argv)` pairs, normally from `tagged_processes`.
+        term_timeout: Seconds SIGTERM gets before the escalation to SIGKILL.
+        kill_timeout: Seconds SIGKILL gets before the survivors are written off.
+
+    Returns:
+        How many of the snapshotted processes were signalled. Zero is the
+        ordinary case: it means whatever was launched had already been closed.
+    """
+    signalled = [entry for entry in snapshot if _signal_process(entry, signal.SIGTERM)]
+    if not signalled:
+        return 0
+    log.info(
+        "stopping %d process(es) left behind: %s",
+        len(signalled),
+        ", ".join(f"{cmd[0]} (pid {pid})" for pid, cmd in signalled),
+    )
+    survivors = _await_exit(signalled, term_timeout)
+    if survivors:
+        log.warning(
+            "%d leftover process(es) ignored SIGTERM for %s s, killing: %s",
+            len(survivors),
+            term_timeout,
+            ", ".join(f"{cmd[0]} (pid {pid})" for pid, cmd in survivors),
+        )
+        for entry in survivors:
+            _signal_process(entry, signal.SIGKILL)
+        survivors = _await_exit(survivors, kill_timeout)
+        if survivors:
+            log.error(
+                "%d leftover process(es) outlived SIGKILL and are still running: %s",
+                len(survivors),
+                ", ".join(f"{cmd[0]} (pid {pid})" for pid, cmd in survivors),
+            )
+    return len(signalled)
+
+
 def reap_orphan() -> Optional[dict[str, Any]]:
     """Kill an emulator left running by an earlier broker process.
 
@@ -193,6 +403,12 @@ def reap_orphan() -> Optional[dict[str, Any]]:
     teardown budget here as it would from `Emulator.stop`; a record written
     without one falls back to `_DEFAULT_TERM_TIMEOUT`. The record is cleared
     whatever happens.
+
+    Anything sharing the orphan's session tag goes with it, which is what a
+    reaped desktop record means in practice: the apps configured through that
+    session are in neither its process group nor its process tree, and would
+    otherwise be left running with nothing that knows about them (see
+    `SESSION_TAG_ENV` and `Desktop.stop`).
 
     Returns:
         The record that was acted on, a dict with `{"name", "pid", "cmd"}` and
@@ -217,6 +433,8 @@ def reap_orphan() -> Optional[dict[str, Any]]:
         _clear_pid_record()
         return None
 
+    grace = _record_term_timeout(record)
+    left_open: list[tuple[int, list[str]]] = []
     try:
         # Emulators are spawned with start_new_session, so the recorded pid is
         # its own session and group leader. A pid that is not one is not the
@@ -228,14 +446,18 @@ def reap_orphan() -> Optional[dict[str, Any]]:
 
         log.warning("reaping orphaned %s (pid %d) from an earlier broker process",
                     record.get("name", "emulator"), pid)
+        # Read before the signal, while there is still a process to read it off.
+        tag = session_tag(pid)
+        left_open = tagged_processes(tag, exclude={pid}) if tag else []
         os.killpg(pgid, signal.SIGTERM)
-        deadline = time.monotonic() + _record_term_timeout(record)
+        deadline = time.monotonic() + grace
         while time.monotonic() < deadline and _cmdline(pid) == cmd:
             time.sleep(0.2)
         if _cmdline(pid) == cmd:
             os.killpg(pgid, signal.SIGKILL)
     except (ProcessLookupError, PermissionError) as exc:
         log.warning("could not kill orphaned pid %d: %s", pid, exc)
+    kill_processes(left_open, grace)
     _clear_pid_record()
     return record
 
@@ -536,6 +758,10 @@ class Emulator:
         would leave it with nothing able to find it, which is the orphan
         `PID_FILE` exists to prevent, and every subclass `launch` opens with a
         `stop` that would then be its next chance to try again.
+
+        This reaches the process and its group, which is every emulator here.
+        An app that starts other apps and detaches them needs more than a
+        signal to one group, and overrides this (see `Desktop.stop`).
         """
         proc = self._proc
         if proc is None or proc.poll() is not None:
