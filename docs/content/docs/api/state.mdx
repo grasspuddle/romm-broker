@@ -73,13 +73,16 @@ curl -k -X GET https://localhost:3001/streaming/api/session/state-screenshot \
   -H 'X-Broker-Secret: <shared secret>' -o state.png
 ```
 
-This is what gives a stored state its thumbnail in RomM's resume picker. Only
-emulators that write the frame as its own file answer it: RetroArch saves a
-`<state file>.png` beside every state, so it serves that. PCSX2 embeds the frame
-inside the `.p2s` and returns `404`, which is the caller's cue to read it out of
-the state it already fetched rather than an error. It stays readable after exit
-on the same terms as the state itself, with `413` over
-`BROKER_STATE_SCREENSHOT_MAX_BYTES` (16 MiB).
+This is what gives a stored state its thumbnail in RomM's resume picker. The
+frame is the streamed desktop as it was the moment the save was sent: the
+save-state and exit routes capture it over the pixelflux computer-use endpoint
+on `127.0.0.1:5000` before the emulator is told to save, scale it to
+`BROKER_STATE_SCREENSHOT_SIZE` on its longest side, and keep it once the state
+is confirmed. It is the same for every emulator, so nothing depends on what
+the emulator itself writes beside a state. It stays readable after exit on the
+same terms as the state itself. `404` means the state has no frame, because
+the capture failed or the container runs without `PIXELFLUX_CU`; RomM files
+the state without a thumbnail.
 
 ## Resume after activate
 

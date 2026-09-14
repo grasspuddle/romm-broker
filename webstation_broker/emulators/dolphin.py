@@ -6,9 +6,6 @@ patch an INI, and `-s` loads a state file by path at boot, so a resume that
 is already on disk never depends on a keystroke landing. What is left is the
 mid-session save, which only the hotkey can reach; the broker runs as the
 same user as the session, so xdotool talks to Xwayland directly.
-
-Save states are not thumbnailed here. The frame comes off the streamed canvas
-in the browser, which is the only capture that cannot stall the emulator.
 """
 
 import logging

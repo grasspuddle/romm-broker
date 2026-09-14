@@ -43,7 +43,7 @@ not as settled.
 
 | Platform | Core | Setup | Details |
 | --- | --- | --- | --- |
-| GameCube / Wii | `dolphin` | Optional | HLE boot by default; a real `IPL.bin` improves accuracy. Thumbnails are disabled for this core (a GPU framebuffer grab after save can deadlock the stdin command channel), and it uses a custom save-subtree layout. |
+| GameCube / Wii | `dolphin` | Optional | HLE boot by default; a real `IPL.bin` improves accuracy. Uses a custom save-subtree layout. |
 | 3DS | `azahar` | Optional | Most dumps boot with nothing; encrypted `.3ds`/`.cci` files need decryption keys (`boot9.bin`/`boot11.bin`) in the system dir. Sourced from a GitHub release instead of the buildbot, and uses a custom save-subtree layout. This is the only integration point for 3DS; standalone Azahar has no IPC for the broker to reach it (see [Azahar setup](/docs/emulators/setup#azahar)). |
 
 ## Sega
@@ -117,5 +117,5 @@ not as settled.
 Generated from `webstation_broker/emulators/retroarch_platforms.json` and
 `webstation_broker/emulators/retroarch.py`, cross-referenced against
 libretro's BIOS Information Hub. Update this table if platform mappings,
-`core_source` overrides, `assets`, `save_subtrees`, `savestate`, or
-`thumbnail` fields change in `retroarch_platforms.json`.
+`core_source` overrides, `assets`, `save_subtrees`, or `savestate` fields
+change in `retroarch_platforms.json`.
