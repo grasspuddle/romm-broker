@@ -44,28 +44,37 @@ A resolved disc image must sit under it; candidates resolving outside are discar
 """
 
 
-def _default_data_dir() -> str:
-    """Work out DuckStation's Linux data root.
+def _data_root() -> Path:
+    """Work out DuckStation's data root the way DuckStation works it out.
 
     DuckStation keeps its whole tree (settings.ini, memcards, savestates)
-    under the XDG *data* home, so that is the variable this follows: a
-    container that sets `XDG_CONFIG_HOME` would otherwise point the broker at
-    a directory DuckStation never writes, and every card and state would look
-    missing.
+    under one root, and picks that root from `XDG_CONFIG_HOME`, not
+    `XDG_DATA_HOME`, despite what it holds. Probed against the container's
+    build: a run with only `XDG_DATA_HOME` set still wrote to
+    `$HOME/.local/share/duckstation`, and one with only `XDG_CONFIG_HOME` set
+    wrote to `$XDG_CONFIG_HOME/duckstation`. Following the data variable would
+    point the broker at a directory DuckStation never writes, and every card
+    and state would look missing.
 
     Returns:
-        `$XDG_DATA_HOME/duckstation` when that variable is set to an absolute
-        path, otherwise `~/.local/share/duckstation` under `$HOME` (default
-        `/config`).
+        `$XDG_CONFIG_HOME/duckstation` when that variable is set to an
+        absolute path, otherwise DuckStation's own fallback,
+        `~/.local/share/duckstation` under `$HOME` (default `/config`).
     """
-    xdg = os.environ.get("XDG_DATA_HOME")
+    xdg = os.environ.get("XDG_CONFIG_HOME")
     if xdg and os.path.isabs(xdg):
-        return os.path.join(xdg, "duckstation")
-    return os.path.join(os.environ.get("HOME", "/config"), ".local/share/duckstation")
+        return Path(xdg) / "duckstation"
+    return Path(os.environ.get("HOME", "/config")) / ".local/share" / "duckstation"
 
 
-DATA_DIR = Path(os.environ.get("DUCKSTATION_DATA_DIR", _default_data_dir()))
-"""DuckStation's data root (env `DUCKSTATION_DATA_DIR`, default from `_default_data_dir`)."""
+DATA_DIR = _data_root()
+"""DuckStation's data root, holding settings.ini, the memory cards and the savestates.
+
+Not configurable, and deliberately: nothing on DuckStation's command line
+names it, so an override would move only the tree the broker patches and reads
+its resume states out of and leave DuckStation writing its own. `launch`
+exports the root this resolved to instead.
+"""
 INI_PATH = DATA_DIR / "settings.ini"
 """The settings.ini the broker patches before every launch."""
 SSTATE_DIR = DATA_DIR / "savestates"
@@ -599,10 +608,17 @@ class Duckstation(Emulator):
             cmd += ["-statefile", str(state)]
         cmd += ["--", str(rom_path)]
 
-        log.info("launching duckstation (rom=%s, statefile=%s)", rom_path, state)
+        # Nothing on the command line names the data root, so DuckStation
+        # resolves it itself, from XDG_CONFIG_HOME. Export the root the broker
+        # resolved so the settings.ini it patched and the resume state it reads
+        # back afterwards belong to the tree this launch writes.
+        env = base_launch_env()
+        env["XDG_CONFIG_HOME"] = str(DATA_DIR.parent)
+        log.info("launching duckstation (rom=%s, statefile=%s, data=%s)",
+                 rom_path, state, DATA_DIR)
         # The exit's owner marker names this disc, so it has to outlive launch().
         self._rom_path = rom_path
-        self._spawn(cmd, base_launch_env())
+        self._spawn(cmd, env)
 
     def save_and_exit(self, slot: Optional[int]) -> dict[str, Any]:
         """Stop the emulator and report the resume state its shutdown wrote.

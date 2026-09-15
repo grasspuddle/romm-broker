@@ -585,6 +585,29 @@ def test_launch_pins_the_display_settings_before_spawning(
     assert _fullscreen_of(cfg) is True
 
 
+def test_a_launch_tells_xemu_which_toml_the_broker_pinned(
+    emulator: xemu.Xemu, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The launch names the config the broker read the HDD path out of and pinned.
+
+    Nothing else states it, so without the flag xemu loads the one in its own
+    SDL pref dir: the renderer and fullscreen pins would never reach this run,
+    and the saves would be injected into a different HDD image than the one
+    booting.
+    """
+    monkeypatch.setattr(xemu, "_reap_strays", lambda: None)
+    monkeypatch.setattr(xemu.Xemu, "stop", lambda self: None)
+    spawned: list[list[str]] = []
+    monkeypatch.setattr(xemu.Xemu, "_spawn",
+                        lambda self, cmd, env: spawned.append(cmd))
+
+    emulator.launch(_xiso(tmp_path / "g.iso"), None)
+
+    assert spawned, "launch did not spawn xemu"
+    cmd = spawned[0]
+    assert cmd[cmd.index("-config_path") + 1] == str(xemu.XEMU_TOML)
+
+
 # ── Stray process reaping ────────────────────────────────────────────────────
 
 

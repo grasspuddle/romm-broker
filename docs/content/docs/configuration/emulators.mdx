@@ -36,9 +36,17 @@ Timings are in seconds.
 | Env var | Default | Purpose |
 | --- | --- | --- |
 | `DUCKSTATION_BIN` | `/opt/duckstation/AppRun` | DuckStation binary. |
-| `DUCKSTATION_DATA_DIR` | `/config/.local/share/duckstation` | DuckStation's data root (`settings.ini`, `savestates/`, memory cards); `$XDG_CONFIG_HOME/duckstation` when that is set. |
 | `DUCKSTATION_LOG_PATH` | `/config/duckstation.log` | Where DuckStation's stdout/stderr is captured. |
 | `DUCKSTATION_STOP_WAIT` | `30` | SIGTERM grace before SIGKILL; the graceful shutdown serialises the resume state. |
+
+DuckStation's data root is not configurable. It holds everything (`settings.ini`,
+`savestates/`, the memory cards) and DuckStation picks it from
+`$XDG_CONFIG_HOME/duckstation`, despite what is in it, falling back to
+`$HOME/.local/share/duckstation` and then `/config/.local/share/duckstation`.
+Nothing on DuckStation's command line names it, so a knob there would move only
+the `settings.ini` the broker patches and the resume state it reads back, not
+the tree the emulator writes. The broker exports the root it resolved to the
+emulator it launches.
 
 ## Dolphin
 
@@ -196,7 +204,7 @@ resolved to every RPCS3 it runs, the headless installer included.
 | Env var | Default | Purpose |
 | --- | --- | --- |
 | `XEMU_BIN` | `/opt/xemu/AppRun` | xemu binary. |
-| `XEMU_TOML` | `/config/.local/share/xemu/xemu/xemu.toml` | xemu's config, read for the HDD image path and pinned for the renderer. |
+| `XEMU_TOML` | `/config/.local/share/xemu/xemu/xemu.toml` | xemu's config, read for the HDD image path and pinned for the renderer. Passed to xemu as `-config_path` on every launch, so moving it moves the file both read. |
 | `XEMU_HDD_IMAGE` | `/config/xemu/xbox_hdd.qcow2` | HDD image used only when `xemu.toml` has no usable `hdd_path`. |
 | `XEMU_RENDERER` | `OPENGL` | Renderer pinned in `xemu.toml` before each launch; `VULKAN` where the driver is known good, `KEEP` to leave the file alone. |
 | `XEMU_SOFTWARE_GL` | unset | Truthy renders xemu on the CPU (`LIBGL_ALWAYS_SOFTWARE` for xemu only); slow, for hosts where both GPU paths abort. |
@@ -251,7 +259,7 @@ emulator it launches.
 | Env var | Default | Purpose |
 | --- | --- | --- |
 | `SCUMMVM_BIN` | probed | ScummVM binary; `/usr/games/scummvm`, `/usr/bin/scummvm` and `/usr/local/bin/scummvm` are tried in that order. |
-| `SCUMMVM_CONFIG_DIR` | `/config/.config/scummvm` | Holds `scummvm.ini`, which the broker pins its settings into and reads game targets back out of. |
+| `SCUMMVM_CONFIG_DIR` | `/config/.config/scummvm` | Holds `scummvm.ini`, which the broker pins its settings into and reads game targets back out of. Its `scummvm.ini` is passed as `--config` on every launch and on every `--add`, so moving it moves the file both read. |
 | `SCUMMVM_DATA_DIR` | `/config/.local/share/scummvm` | ScummVM's data directory; `saves/` under it is the save subtree and the working slot alike. |
 | `SCUMMVM_LOG_PATH` | `/config/scummvm.log` | Where ScummVM's stdout/stderr is captured. |
 | `SCUMMVM_STATE_SLOT` | `1` | The slot the broker saves into. Kept low because the chooser is walked one `Down` per slot, and slot 0 is ScummVM's write-protected autosave. |

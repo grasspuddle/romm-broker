@@ -112,6 +112,11 @@ XEMU_TOML = Path(os.environ.get("XEMU_TOML", str(_default_toml_path())))
 """The xemu.toml the HDD path is read from and display settings are pinned into (env `XEMU_TOML`).
 
 Defaults to the SDL pref dir location `_default_toml_path` computes.
+
+Safe to move, because the launch states it: `-config_path` names this file on
+xemu's own command line. Without that the knob would move only the file the
+broker reads the HDD path out of and pins the display settings into, while
+xemu kept loading the one in its pref dir.
 """
 FALLBACK_HDD_IMAGE = Path(
     os.environ.get("XEMU_HDD_IMAGE", "/config/xemu/xbox_hdd.qcow2")
@@ -1217,7 +1222,10 @@ class Xemu(Emulator):
         log.info("launching xemu (rom=%s)", rom_path)
         # Only an exit that ends this process counts against this session.
         self._forced_exit = False
-        self._spawn([XEMU_BIN, "-dvd_path", str(rom_path)], _launch_env())
+        # -config_path, so the file just pinned is the one xemu loads: the
+        # settings are only pinned for this run if both agree on the toml.
+        self._spawn([XEMU_BIN, "-config_path", str(XEMU_TOML), "-dvd_path", str(rom_path)],
+                    _launch_env())
 
     def save_and_exit(self, slot: Optional[int]) -> dict[str, Any]:
         """Stop xemu and stage the launched title's saves for the dump.

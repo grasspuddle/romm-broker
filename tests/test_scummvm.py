@@ -249,7 +249,7 @@ def test_registering_reads_the_target_back_out_of_the_ini(
     monkeypatch.setattr(scummvm.subprocess, "run", fake_run)
 
     assert scummvm.register_target(folder) == "monkey"
-    assert calls[0][1:] == ["--add", f"--path={folder}"]
+    assert calls[0][1:] == [f"--config={dirs['ini']}", "--add", f"--path={folder}"]
 
 
 def test_a_folder_scummvm_detects_nothing_in_has_no_target(
@@ -919,6 +919,23 @@ def test_a_launch_boots_the_target_with_the_broker_savepath(
     assert spawned.cmd[-1] == "monkey"
     assert f"--savepath={dirs['saves']}" in spawned.cmd
     assert not any(arg.startswith("--save-slot") for arg in spawned.cmd)
+
+
+def test_a_launch_tells_scummvm_which_ini_the_broker_pinned(
+    dirs: dict[str, Path], spawned: Spawned
+) -> None:
+    """The launch names the config the broker patched.
+
+    Nothing else states it, so without the flag ScummVM resolves its own and
+    the pinned settings and the registered target sit in a file this run never
+    opens.
+    """
+    folder = registered(dirs)
+    emu = Scummvm()
+
+    emu.launch(emu.resolve_rom_file(folder), None)
+
+    assert f"--config={dirs['ini']}" in spawned.cmd
 
 
 def test_a_launch_forces_sdl_onto_x11(dirs: dict[str, Path], spawned: Spawned) -> None:

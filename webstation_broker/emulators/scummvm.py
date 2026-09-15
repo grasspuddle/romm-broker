@@ -61,7 +61,14 @@ A resolved game folder must sit under it; anything resolving outside is discarde
 """
 
 CONFIG_DIR = Path(os.environ.get("SCUMMVM_CONFIG_DIR", "/config/.config/scummvm"))
-"""ScummVM's config directory (env `SCUMMVM_CONFIG_DIR`, default `/config/.config/scummvm`)."""
+"""ScummVM's config directory (env `SCUMMVM_CONFIG_DIR`, default `/config/.config/scummvm`).
+
+Safe to move, because every ScummVM the broker runs is told where it is:
+`--config` names `INI_PATH` on the launch command line and on `--add`'s.
+Without that the knob would move only the file the broker patches while
+ScummVM kept resolving its own, so the pinned settings and the registered
+game targets would land in a file nothing opens.
+"""
 INI_PATH = CONFIG_DIR / "scummvm.ini"
 """The config the broker pins before every launch and reads game targets back out of."""
 DATA_DIR = Path(os.environ.get("SCUMMVM_DATA_DIR", "/config/.local/share/scummvm"))
@@ -554,7 +561,9 @@ def _run_add(rom_dir: Path) -> Optional[subprocess.CompletedProcess]:
     Returns:
         The finished process, or None when it could not be run at all.
     """
-    cmd = [scummvm_bin(), "--add", f"--path={rom_dir}"]
+    # --config, because the domain this writes is only there for the launch to
+    # boot if both command lines name the same ini.
+    cmd = [scummvm_bin(), f"--config={INI_PATH}", "--add", f"--path={rom_dir}"]
     try:
         result = subprocess.run(
             cmd,
@@ -1072,7 +1081,10 @@ class Scummvm(Emulator):
         # SDL would pick Wayland, where the menu macros could never be injected.
         env["SDL_VIDEODRIVER"] = "x11"
 
-        cmd = [scummvm_bin(), f"--savepath={SAVE_DIR}"]
+        # Both directories are stated, so the ini the broker just pinned and
+        # the saves it dumps afterwards are the ones this run uses, whatever
+        # the env knobs have been set to.
+        cmd = [scummvm_bin(), f"--config={INI_PATH}", f"--savepath={SAVE_DIR}"]
         if language:
             # Authoritative for this run: --add wrote whatever it detected into
             # the game domain, and the flag overrides that for the session.
