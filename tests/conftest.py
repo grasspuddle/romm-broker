@@ -443,7 +443,9 @@ def shell_with_detached_app(pid_file: Path, tag: str) -> subprocess.Popen[bytes]
         "    pid = os.fork()\n"
         "    if pid == 0:\n"
         f"        os.execv({DETACHED_CMD[0]!r}, {DETACHED_CMD!r})\n"
-        f"    open({str(pid_file)!r}, 'w').write(str(pid))\n"
+        f"    tmp = {str(pid_file)!r} + '.tmp'\n"
+        "    open(tmp, 'w').write(str(pid))\n"
+        f"    os.rename(tmp, {str(pid_file)!r})\n"
         "    os._exit(0)\n"
         f"os.execv({SLEEPER_CMD[0]!r}, {SLEEPER_CMD!r})\n"
     )

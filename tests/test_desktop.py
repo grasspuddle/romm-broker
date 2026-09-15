@@ -3,6 +3,7 @@
 import logging
 import os
 import subprocess
+import time
 import uuid
 from collections.abc import Callable
 from pathlib import Path
@@ -225,11 +226,13 @@ def test_stop_leaves_an_untagged_process_alone(
     assert bystander.poll() is None
 
 
-def test_stop_without_a_running_shell_sweeps_nothing(desktop_tree: DesktopTree) -> None:
-    """With no shell to read a tag off, the teardown sweeps nothing rather than guessing.
+def test_stop_on_a_launcher_that_never_launched_sweeps_nothing(
+    desktop_tree: DesktopTree,
+) -> None:
+    """A launcher with no session behind it has no tag, and sweeps nothing rather than guessing.
 
-    A desktop whose shell already exited has no tag to read, and matching on
-    anything looser would reach processes this session never started.
+    It holds neither a shell to read a tag off nor one of its own from `launch`,
+    and matching on anything looser would reach processes it never started.
     """
     _shell, app_pid, _tag = desktop_tree
     emu = desktop.Desktop()
@@ -237,6 +240,190 @@ def test_stop_without_a_running_shell_sweeps_nothing(desktop_tree: DesktopTree) 
     emu.stop()
 
     assert base._cmdline(app_pid) == DETACHED_CMD
+
+
+def test_stop_closes_apps_left_open_by_a_shell_that_already_exited(
+    desktop_tree: DesktopTree,
+) -> None:
+    """The apps outlive the shell, so the teardown cannot depend on the shell being there.
+
+    Quitting the desktop from inside the GUI ends the shell and leaves every app
+    it started running, which is the case this sweep exists for. `/proc` holds
+    an environment only for as long as its process lives, so the tag comes from
+    what `launch` kept rather than from the shell.
+    """
+    shell, app_pid, tag = desktop_tree
+    emu = desktop.Desktop()
+    emu._proc = shell
+    emu._tag = tag
+    shell.kill()
+    shell.wait()
+
+    emu.stop()
+
+    assert await_gone(app_pid, DETACHED_CMD)
+
+
+def test_launch_keeps_the_tag_it_stamped(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Launch holds on to the tag, since the shell it stamped will not always be there to ask."""
+    monkeypatch.setattr(desktop.Desktop, "_spawn", lambda self, cmd, env: None)
+    emu = desktop.Desktop()
+
+    emu.launch(None, None)
+
+    assert emu._tag
+
+
+def test_stop_signals_what_was_left_open_before_it_waits_on_the_shell(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The shell and the apps spend the same grace period rather than one after the other.
+
+    `Emulator.stop` blocks for up to `term_timeout` waiting on the shell. Signalling the apps
+    only once that returned put two full budgets back to back on the exit route, which at the
+    default `DESKTOP_STOP_WAIT` is half a minute spent on a request the user is waiting on.
+    """
+    order: list[str] = []
+
+    def _term(snapshot: list[tuple[int, list[str]]]) -> list[tuple[int, list[str]]]:
+        """Record that the apps were signalled, and report every signal as landed.
+
+        Args:
+            snapshot: The `(pid, argv)` pairs the sweep was handed.
+
+        Returns:
+            The snapshot unchanged.
+        """
+        order.append("signal apps")
+        return list(snapshot)
+
+    def _wait_on_shell(self: base.Emulator) -> None:
+        """Stand in for the base teardown, which is where the waiting happens.
+
+        Args:
+            self: The launcher being stopped.
+        """
+        order.append("wait on shell")
+
+    monkeypatch.setattr(base, "tagged_processes", lambda tag, exclude=(): [(1, ["app"])])
+    monkeypatch.setattr(base, "term_processes", _term)
+    monkeypatch.setattr(
+        base, "kill_survivors", lambda signalled, deadline, kill_timeout: len(signalled)
+    )
+    monkeypatch.setattr(base.Emulator, "stop", _wait_on_shell)
+    emu = desktop.Desktop()
+    emu._tag = uuid.uuid4().hex
+
+    emu.stop()
+
+    assert order == ["signal apps", "wait on shell"]
+
+
+def test_stop_starts_the_apps_grace_at_their_own_signal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The apps' grace is anchored to their SIGTERM, not to whenever the shell's wait returns.
+
+    `Emulator.stop` blocks, so a deadline computed after it would hand the apps a fresh full
+    budget on top of the time they had already been sitting on SIGTERM, and a shell that ignored
+    the signal for its whole `term_timeout` would double the exit route's cost all over again.
+    """
+    deadlines: list[float] = []
+
+    def _slow_shell_stop(self: base.Emulator) -> None:
+        """Stand in for a shell that takes its time going down.
+
+        Args:
+            self: The launcher being stopped.
+        """
+        time.sleep(0.3)
+
+    def _record_deadline(
+        signalled: list[tuple[int, list[str]]], deadline: float, kill_timeout: float
+    ) -> int:
+        """Capture the deadline the apps were given instead of waiting on it.
+
+        Args:
+            signalled: The `(pid, argv)` pairs SIGTERM reached.
+            deadline: The `time.monotonic()` value their grace expires at.
+            kill_timeout: Seconds SIGKILL would get; unused here.
+
+        Returns:
+            Every signalled process, reported as closed.
+        """
+        deadlines.append(deadline)
+        return len(signalled)
+
+    monkeypatch.setattr(base, "tagged_processes", lambda tag, exclude=(): [(1, ["app"])])
+    monkeypatch.setattr(base, "term_processes", lambda snapshot: list(snapshot))
+    monkeypatch.setattr(base, "kill_survivors", _record_deadline)
+    monkeypatch.setattr(base.Emulator, "stop", _slow_shell_stop)
+    monkeypatch.setattr(desktop.Desktop, "term_timeout", 0.05)
+    emu = desktop.Desktop()
+    emu._tag = uuid.uuid4().hex
+
+    before = time.monotonic()
+    emu.stop()
+
+    assert deadlines
+    assert deadlines[0] < before + 0.2
+
+
+def test_stop_keeps_the_tag_when_an_app_outlived_the_sweep(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A tag whose apps are still running is held on to, being the only handle left on them.
+
+    `Emulator.stop` keeps the pid record in the same situation and for the same reason: dropping
+    what can still find a running process leaves it with nothing that knows about it, and the
+    next `stop` is the next chance to try again.
+    """
+    monkeypatch.setattr(base, "tagged_processes", lambda tag, exclude=(): [(1, ["app"])])
+    monkeypatch.setattr(base, "term_processes", lambda snapshot: list(snapshot))
+    monkeypatch.setattr(base, "kill_survivors", lambda signalled, deadline, kill_timeout: 0)
+    monkeypatch.setattr(base.Emulator, "stop", lambda self: None)
+    emu = desktop.Desktop()
+    tag = emu._tag = uuid.uuid4().hex
+
+    emu.stop()
+
+    assert emu._tag == tag
+
+
+def test_stop_keeps_the_tag_when_an_app_could_not_be_signalled_at_all(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An app the sweep never got a signal into is still running, so the tag stays.
+
+    `term_processes` reports what it reached, and an app it could not reach is missing from both
+    that and the closed count, so the two agreeing says nothing about whether anything is left.
+    Only `/proc` does, and it is what the tag is dropped on.
+    """
+    monkeypatch.setattr(base, "tagged_processes", lambda tag, exclude=(): [(1, ["app"])])
+    monkeypatch.setattr(base, "term_processes", lambda snapshot: [])
+    monkeypatch.setattr(base, "kill_survivors", lambda signalled, deadline, kill_timeout: 0)
+    monkeypatch.setattr(base.Emulator, "stop", lambda self: None)
+    emu = desktop.Desktop()
+    tag = emu._tag = uuid.uuid4().hex
+
+    emu.stop()
+
+    assert emu._tag == tag
+
+
+def test_stop_drops_the_tag_once_everything_it_named_is_closed(
+    desktop_tree: DesktopTree,
+) -> None:
+    """A tag with nothing left running is dropped, so a later stop does not sweep by a stale one."""
+    shell, app_pid, tag = desktop_tree
+    emu = desktop.Desktop()
+    emu._proc = shell
+    emu._tag = tag
+
+    emu.stop()
+
+    assert await_gone(app_pid, DETACHED_CMD)
+    assert emu._tag is None
 
 
 def test_launch_sweeps_before_starting_a_new_shell(
@@ -290,3 +477,61 @@ def test_kill_processes_refuses_the_brokers_own_process(
 def test_kill_processes_on_an_empty_snapshot_does_nothing() -> None:
     """A desktop session that left nothing open sweeps nothing."""
     assert base.kill_processes([]) == 0
+
+
+def test_kill_processes_counts_the_process_it_closed(
+    sleeper: Callable[[], subprocess.Popen[bytes]],
+) -> None:
+    """The count is what the sweep confirmed gone, which is what the log reports as closed."""
+    proc = sleeper()
+
+    assert base.kill_processes([(proc.pid, SLEEPER_CMD)]) == 1
+    assert await_gone(proc.pid, SLEEPER_CMD)
+
+
+def test_kill_processes_does_not_count_a_process_that_outlived_sigkill(
+    sleeper: Callable[[], subprocess.Popen[bytes]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A process still running at the end is not reported as one the sweep closed.
+
+    Nothing survives a real SIGKILL on demand, so the observation is what is faked here: the
+    signals are sent for real and the wait is told they changed nothing. The count is what the
+    desktop log reports to the user, and it claiming a closed emulator that is still rendering
+    into the stream is the failure being guarded against.
+    """
+    proc = sleeper()
+    monkeypatch.setattr(base, "_await_exit", lambda entries, timeout: list(entries))
+
+    assert base.kill_processes([(proc.pid, SLEEPER_CMD)], 0.0, 0.0) == 0
+
+
+def test_kill_processes_rechecks_the_pid_once_its_group_is_resolved(
+    sleeper: Callable[[], subprocess.Popen[bytes]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A pid that stops matching between the first check and the signal is not signalled.
+
+    The snapshot is taken before the shell is signalled and acted on a grace period later, so a
+    pid can die and be reissued in between. The sweep signals whole process groups, and the
+    reissued pid's group is one it would have no business ending.
+    """
+    bystander = sleeper()
+    seen: list[int] = []
+
+    def _shifting_cmdline(pid: int) -> list[str]:
+        """Report the snapshotted argv once, then something else, as a reissued pid would.
+
+        Args:
+            pid: The process being looked up.
+
+        Returns:
+            `SLEEPER_CMD` on the first call and an unrelated argv after it.
+        """
+        seen.append(pid)
+        return SLEEPER_CMD if len(seen) == 1 else ["/usr/bin/sleep", "somethingelse"]
+
+    monkeypatch.setattr(base, "_cmdline", _shifting_cmdline)
+
+    assert base.kill_processes([(bystander.pid, SLEEPER_CMD)]) == 0
+
+    assert len(seen) == 2
+    assert bystander.poll() is None

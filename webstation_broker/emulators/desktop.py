@@ -11,6 +11,7 @@ they inherited rather than by the process tree they are no longer in (see
 
 import logging
 import os
+import time
 import uuid
 from pathlib import Path
 from typing import Optional
@@ -50,7 +51,16 @@ class Desktop(Emulator):
 
     Longer than the base default because the shell itself is not what it is
     spent on: it is spent on the emulators the user left open, which write
-    their config and save data on the way out.
+    their config and save data on the way out. One budget covers the shell and
+    those apps together, since `stop` signals them all before waiting on any.
+    """
+    _tag: Optional[str] = None
+    """The tag `launch` stamped into this session, kept for when the shell is gone.
+
+    The session outlives the shell process: quitting the desktop from the GUI
+    ends it and leaves its apps running, and `/proc` only holds an environment
+    for as long as its process lives. The broker keeps one launcher per session
+    (`sess["emulator_obj"]`), so what `launch` recorded is still here at `stop`.
     """
 
     def launch(self, rom_path: Optional[Path], resume_slot: Optional[int]) -> None:
@@ -75,7 +85,7 @@ class Desktop(Emulator):
         # Fresh per launch, so a sweep can never match something a previous
         # desktop session left behind and a restarted broker reads the live
         # session's own tag off the shell rather than guessing at one.
-        env[base.SESSION_TAG_ENV] = uuid.uuid4().hex
+        self._tag = env[base.SESSION_TAG_ENV] = uuid.uuid4().hex
         try:
             self._spawn([binary], env)
         except OSError:
@@ -94,14 +104,32 @@ class Desktop(Emulator):
         session that started it had ended.
 
         What it does still carry is the environment it inherited, which is why
-        `launch` stamps a tag into it. The tag is read back off the shell here,
-        before it is signalled, since afterwards there is no process left to
-        read it from.
+        `launch` stamps a tag into it. The tag is preferred off the live shell
+        and falls back to the one `launch` kept, because the shell is the first
+        thing to go: quitting the desktop from inside the GUI ends it and
+        leaves every app it started running, which is precisely the case this
+        sweep exists for and the one where there is no environment left to read.
+
+        The apps are signalled before the shell is waited on, so the one grace
+        period `term_timeout` buys is spent on both at once. Signalling them
+        afterwards instead put two full budgets back to back on the exit route.
         """
         proc = self._proc
         tag = base.session_tag(proc.pid) if proc is not None and proc.poll() is None else None
-        left_open = base.tagged_processes(tag, exclude={proc.pid}) if tag else []
+        tag = tag or self._tag
+        exclude = {proc.pid} if proc is not None else set()
+        left_open = base.tagged_processes(tag, exclude=exclude) if tag else []
+        deadline = time.monotonic() + self.term_timeout
+        signalled = base.term_processes(left_open)
         super().stop()
-        closed = base.kill_processes(left_open, self.term_timeout, self.kill_timeout)
+        closed = base.kill_survivors(signalled, deadline, self.kill_timeout)
         if closed:
             log.info("desktop: closed %d app(s) left open on the desktop", closed)
+        # Dropped only once nothing carries the tag any more, which is not the
+        # same as everything signalled having gone: an app the sweep could not
+        # signal at all never reaches `signalled`, so counting that as a clean
+        # result would throw away the one handle left on a process still
+        # running. Kept otherwise for the same reason `Emulator.stop` keeps the
+        # pid record: the next `stop` is the next chance to use it.
+        if tag and not base.tagged_processes(tag, exclude=exclude):
+            self._tag = None

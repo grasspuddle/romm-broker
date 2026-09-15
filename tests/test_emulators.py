@@ -5,9 +5,12 @@ record.
 """
 
 import json
+import os
 import signal
 import subprocess
+import sys
 import time
+import uuid
 from collections.abc import Callable
 from pathlib import Path
 from typing import Optional
@@ -17,7 +20,7 @@ import pytest
 from webstation_broker import emulators
 from webstation_broker.emulators import base
 
-from .conftest import DETACHED_CMD, SLEEPER_CMD, await_gone
+from .conftest import DETACHED_CMD, SLEEPER_CMD, await_cmdline, await_gone
 
 
 def test_an_unknown_name_resolves_to_nothing() -> None:
@@ -184,6 +187,188 @@ def test_reaping_kills_what_the_orphan_had_detached(
     assert base.reap_orphan()["pid"] == shell.pid
 
     assert await_gone(app_pid, DETACHED_CMD)
+    assert not pid_record.exists()
+
+
+def test_the_pid_record_carries_the_session_tag(pid_record: Path, tmp_path: Path) -> None:
+    """A spawn stamped with a tag records it, so a later broker does not need the process.
+
+    The environment is readable only while the process lives, and the shell is the first thing to
+    go, so a record that did not carry the tag would leave a dead session's apps unfindable.
+    """
+    tag = uuid.uuid4().hex
+
+    class _Tagged(base.Emulator):
+        """A stand-in emulator that spawns whatever it is handed."""
+
+        name = "tagged"
+        """Registry key this stand-in would be registered under."""
+        log_path = tmp_path / "tagged.log"
+        """Kept inside the test's own directory rather than /config."""
+
+    emu = _Tagged()
+    try:
+        emu._spawn(SLEEPER_CMD, {**os.environ, base.SESSION_TAG_ENV: tag})
+        assert json.loads(pid_record.read_text())["tag"] == tag
+    finally:
+        base.Emulator.stop(emu)
+
+
+def test_an_untagged_spawn_records_no_tag(pid_record: Path, tmp_path: Path) -> None:
+    """Only the desktop stamps a tag, so every other record stays as it was."""
+
+    class _Plain(base.Emulator):
+        """A stand-in emulator spawned without a tag, as every non-desktop session is."""
+
+        name = "plain"
+        """Registry key this stand-in would be registered under."""
+        log_path = tmp_path / "plain.log"
+        """Kept inside the test's own directory rather than /config."""
+
+    emu = _Plain()
+    try:
+        emu._spawn(SLEEPER_CMD, dict(os.environ))
+        assert "tag" not in json.loads(pid_record.read_text())
+    finally:
+        base.Emulator.stop(emu)
+
+
+def test_reaping_closes_apps_a_shell_that_already_exited_left_open(
+    pid_record: Path, desktop_tree: tuple[subprocess.Popen[bytes], int, str]
+) -> None:
+    """A record whose process is gone is still swept by the tag it carries.
+
+    Quitting the desktop from inside the GUI ends the shell and leaves every app it started
+    running. There is then no environment left to read a tag from, and dropping the record on the
+    grounds that its pid no longer matches would strand those apps for good.
+    """
+    shell, app_pid, tag = desktop_tree
+    base._record_pid("desktop", shell.pid, SLEEPER_CMD, tag=tag)
+    shell.kill()
+    shell.wait()
+
+    assert base.reap_orphan() is None
+
+    assert await_gone(app_pid, DETACHED_CMD)
+    assert not pid_record.exists()
+
+
+def test_reaping_does_not_sweep_by_a_tag_read_off_a_recycled_pid(
+    pid_record: Path, desktop_tree: tuple[subprocess.Popen[bytes], int, str]
+) -> None:
+    """A record whose pid now belongs to something else is not swept by that process's tag.
+
+    A record written before the tag was stored leaves the pid as the only place to read one from,
+    and a pid the kernel has reissued carries whatever tag its new owner was launched with. Here
+    that owner is a live desktop shell, so reading the tag before checking that the pid is still
+    the recorded process would take a running session's apps down with a stale record.
+    """
+    shell, app_pid, _tag = desktop_tree
+    base._record_pid("desktop", shell.pid, ["/usr/bin/some-other-emulator"])
+
+    assert base.reap_orphan() is None
+
+    assert base._cmdline(app_pid) == DETACHED_CMD
+    assert shell.poll() is None
+    assert not pid_record.exists()
+
+
+def test_reaping_closes_apps_the_orphan_left_open_when_the_orphan_is_out_of_reach(
+    pid_record: Path,
+    desktop_tree: tuple[subprocess.Popen[bytes], int, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A recorded pid that cannot be reached does not take its apps' only handle with it.
+
+    The pid is checked against `/proc` and signalled a moment later, so it can die in between and
+    leave the group lookup raising. That is the shell-already-exited case one moment later, and
+    dropping the record there would strand the apps the shell detached for good.
+    """
+    shell, app_pid, tag = desktop_tree
+    base._record_pid("desktop", shell.pid, SLEEPER_CMD, tag=tag)
+    shell.kill()
+    shell.wait()
+    real_cmdline = base._cmdline
+
+    def _one_step_behind(pid: int) -> list[str]:
+        """Report the reaped shell as still running its recorded argv.
+
+        Standing in for the `/proc` read that happened just before the process exited, which is
+        what puts the reaper past the identity check and into a group lookup on a dead pid. Every
+        other process is reported as it really is, so the sweep still works off the real table.
+
+        Args:
+            pid: The process to look up.
+
+        Returns:
+            The recorded argv for the shell, and the real argv for anything else.
+        """
+        return SLEEPER_CMD if pid == shell.pid else real_cmdline(pid)
+
+    monkeypatch.setattr(base, "_cmdline", _one_step_behind)
+
+    assert base.reap_orphan() is None
+
+    assert await_gone(app_pid, DETACHED_CMD)
+    assert not pid_record.exists()
+
+
+def test_reaping_a_tagged_pid_that_leads_no_group_leaves_its_group_alone(
+    pid_record: Path, tmp_path: Path
+) -> None:
+    """A pid refused for leading no process group is refused by the tag sweep as well.
+
+    Signalling that pid reaches a group the record does not account for, which is why the reaper
+    gives up on it. The sweep addresses groups the same way, so without being told to skip that
+    pid it walks into the very group the branch above it exists to keep out of.
+    """
+    tag = uuid.uuid4().hex
+    pid_file = tmp_path / "tagged-child.pid"
+    # The tag goes on the forked child only, so the group leader is untagged and the sweep has
+    # exactly one way to reach it: through the child it is told to leave alone.
+    script = (
+        "import os\n"
+        f"env = dict(os.environ, **{{{base.SESSION_TAG_ENV!r}: {tag!r}}})\n"
+        "pid = os.fork()\n"
+        "if pid == 0:\n"
+        f"    os.execve({SLEEPER_CMD[0]!r}, {SLEEPER_CMD!r}, env)\n"
+        f"tmp = {str(pid_file)!r} + '.tmp'\n"
+        "open(tmp, 'w').write(str(pid))\n"
+        f"os.rename(tmp, {str(pid_file)!r})\n"
+        f"os.execv({SLEEPER_CMD[0]!r}, {SLEEPER_CMD!r})\n"
+    )
+    parent = subprocess.Popen([sys.executable, "-c", script], start_new_session=True)
+    try:
+        deadline = time.monotonic() + 10.0
+        while not pid_file.exists():
+            if time.monotonic() >= deadline:
+                pytest.fail("the parent stand-in never reported the pid it forked")
+            time.sleep(0.01)
+        child = int(pid_file.read_text())
+        await_cmdline(child, SLEEPER_CMD)
+        assert os.getpgid(child) == parent.pid
+        base._record_pid("desktop", child, SLEEPER_CMD, tag=tag)
+
+        assert base.reap_orphan() is None
+
+        assert parent.poll() is None
+        assert base._cmdline(child) == SLEEPER_CMD
+        assert not pid_record.exists()
+    finally:
+        parent.kill()
+        parent.wait()
+
+
+def test_a_corrupt_record_is_dropped_rather_than_read_again(pid_record: Path) -> None:
+    """A record that cannot be parsed is cleared, not left to be re-read on every activate.
+
+    Nothing can be recovered from it, so keeping it only buys the same warning once per session
+    start and once per activate for as long as the container runs.
+    """
+    pid_record.write_text("{not json")
+
+    assert base.reap_orphan() is None
+
     assert not pid_record.exists()
 
 
