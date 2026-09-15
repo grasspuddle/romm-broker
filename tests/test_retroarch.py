@@ -209,6 +209,17 @@ class TestBrokerConfig:
         assert f'savestate_directory = "{retroarch.STATE_DIR}"' in cfg
         assert f'savefile_directory = "{retroarch.SAVE_DIR}"' in cfg
 
+    def test_the_system_dir_is_stated_in_the_overlay(self) -> None:
+        """The overlay names the system directory the broker fills.
+
+        Nothing on RetroArch's command line names it, so without this key the
+        firmware and the linked core assets would land in the broker's
+        directory while the cores kept looking in RetroArch's own.
+        """
+        cfg = retroarch._write_broker_cfg().read_text()
+
+        assert f'system_directory = "{retroarch.SYSTEM_DIR}"' in cfg
+
     def test_retroarch_own_thumbnails_are_off(self) -> None:
         """The overlay turns RetroArch's save thumbnail off; the broker captures the frame itself."""
         cfg = retroarch._write_broker_cfg().read_text()
@@ -2102,3 +2113,98 @@ class TestLoadStateBackdateFailure:
         assert loaded is False
         assert "could not backdate" in caplog.text
         assert "access times are not tracked" not in caplog.text
+
+
+class TestConfigPathResolution:
+    """Which `retroarch.cfg` the broker reads its directory settings out of."""
+
+    @pytest.fixture(autouse=True)
+    def _roots(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Put RetroArch's own root and `$HOME` under tmp_path with no knob set.
+
+        Args:
+            tmp_path: The per-test temporary directory.
+            monkeypatch: The pytest monkeypatch fixture.
+        """
+        monkeypatch.delenv("RETROARCH_CONFIG_DIR", raising=False)
+        monkeypatch.setenv("HOME", str(tmp_path / "home"))
+        monkeypatch.setattr(retroarch, "RA_BASE_DIR", tmp_path / "xdg" / "retroarch")
+
+    def test_the_knob_wins_outright(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A configured directory is used whether or not the file is there yet.
+
+        The launch names the result with `--config`, and RetroArch creates a
+        missing one from its skeleton config, so there is nothing to fall back
+        to.
+        """
+        monkeypatch.setenv("RETROARCH_CONFIG_DIR", str(tmp_path / "elsewhere"))
+
+        assert retroarch._resolve_config_path() == tmp_path / "elsewhere" / "retroarch.cfg"
+
+    def test_retroarchs_own_root_comes_first(self, tmp_path: Path) -> None:
+        """The config under RetroArch's own root is preferred to the legacy file."""
+        base = tmp_path / "xdg" / "retroarch"
+        base.mkdir(parents=True)
+        (base / "retroarch.cfg").write_text("")
+        legacy = tmp_path / "home"
+        legacy.mkdir()
+        (legacy / ".retroarch.cfg").write_text("")
+
+        assert retroarch._resolve_config_path() == base / "retroarch.cfg"
+
+    def test_a_legacy_config_is_still_read(self, tmp_path: Path) -> None:
+        """A container carrying only `~/.retroarch.cfg` is read out of that file.
+
+        RetroArch would load it, so assuming the XDG path would have the broker
+        reading a file that does not exist and handing the session a fresh one
+        the user has never seen.
+        """
+        home = tmp_path / "home"
+        home.mkdir()
+        (home / ".retroarch.cfg").write_text("")
+
+        assert retroarch._resolve_config_path() == home / ".retroarch.cfg"
+
+    def test_nothing_on_disk_resolves_to_the_file_retroarch_would_create(
+        self, tmp_path: Path
+    ) -> None:
+        """With no config anywhere, the path is the one under RetroArch's own root."""
+        assert retroarch._resolve_config_path() == tmp_path / "xdg" / "retroarch" / "retroarch.cfg"
+
+
+def test_a_launch_tells_retroarch_which_config_the_broker_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The launch names the `retroarch.cfg` the broker took its directories from.
+
+    RetroArch resolves its own otherwise, so without `--config` the cores and
+    system directories the broker read out of one file could be answered out of
+    another.
+    """
+    spawned: list[list[str]] = []
+
+    class _NullThread:
+        """A threading.Thread stand-in whose target is never run."""
+
+        def __init__(self, **kwargs: Any) -> None:
+            """Accept and discard whatever launch() builds the thread with."""
+
+        def start(self) -> None:
+            """Start nothing."""
+
+    monkeypatch.setattr(retroarch, "RA_CONFIG_PATH", tmp_path / "ra" / "retroarch.cfg")
+    monkeypatch.setattr(retroarch, "_ensure_core", lambda name, source=None: tmp_path / f"{name}.so")
+    monkeypatch.setattr(retroarch, "_ensure_core_assets", lambda assets: None)
+    monkeypatch.setattr(retroarch, "_write_broker_cfg", lambda *a: tmp_path / "broker.cfg")
+    monkeypatch.setattr(retroarch.shutil, "which", lambda binary, path=None: "/usr/bin/retroarch")
+    monkeypatch.setattr(retroarch.Retroarch, "stop", lambda self: None)
+    monkeypatch.setattr(retroarch.Retroarch, "_spawn_ra", lambda self, cmd, env: spawned.append(cmd))
+    monkeypatch.setattr(retroarch.threading, "Thread", _NullThread)
+    emu = retroarch.Retroarch()
+    emu.platform = "snes"
+
+    emu.launch(tmp_path / "game.sfc", None)
+
+    cmd = spawned[0]
+    assert cmd[cmd.index("--config") + 1] == str(retroarch.RA_CONFIG_PATH)
+

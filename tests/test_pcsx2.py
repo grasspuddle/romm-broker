@@ -494,6 +494,66 @@ def test_a_launch_stops_at_an_unpatchable_ini(
     assert spawned == []
 
 
+def test_the_data_root_follows_the_config_variable_not_the_data_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """PCSX2's tree hangs off `XDG_CONFIG_HOME`, whatever it holds.
+
+    Probed against the container's build: a `-testconfig` run with only
+    `XDG_DATA_HOME` set still built the tree under `$HOME/.config/PCSX2`.
+    Following the data variable because the tree holds save states and memory
+    cards would point the broker at a directory PCSX2 never writes.
+    """
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+
+    assert pcsx2._data_root() == tmp_path / "cfg" / "PCSX2"
+
+
+def test_the_broker_directories_all_sit_under_the_data_root() -> None:
+    """The ini, the states and the cards are all resolved from the one root.
+
+    Any of them pinned somewhere else would stay put when the exported root
+    moves, which is how the broker ends up patching an ini PCSX2 never opens
+    or globbing a state directory nothing writes.
+    """
+    assert pcsx2.INI_PATH == pcsx2.DATA_DIR / "inis" / "PCSX2.ini"
+    assert pcsx2.SSTATE_DIR == pcsx2.DATA_DIR / "sstates"
+    assert pcsx2.MEMCARD_DIR == pcsx2.DATA_DIR / "memcards"
+
+
+def test_a_launch_sends_pcsx2_to_the_data_root_the_broker_uses(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The launch exports the XDG root PCSX2 resolves its own tree from.
+
+    Nothing on pcsx2-qt's command line names that root, so the ini the broker
+    just patched is only the one PCSX2 loads if the launch hands over the root
+    the broker resolved.
+    """
+    data_dir = tmp_path / "xdg" / "PCSX2"
+    spawned: dict[str, dict[str, str]] = {}
+    monkeypatch.setattr(pcsx2, "DATA_DIR", data_dir)
+    monkeypatch.setattr(pcsx2, "_patch_ini", lambda: None)
+    monkeypatch.setattr(pcsx2.Pcsx2, "_ensure_folder_card", lambda self: None)
+    monkeypatch.setattr(
+        pcsx2.Pcsx2, "_spawn", lambda self, cmd, env: spawned.update(env=env)
+    )
+
+    def mock_thread(
+        target: Callable[..., object], args: tuple[object, ...], daemon: bool
+    ) -> object:
+        """Swallow the boot watchdog thread this launch would start."""
+        return type("MockThread", (), {"start": lambda s: None})()
+
+    monkeypatch.setattr(pcsx2, "Thread", mock_thread)
+
+    pcsx2.Pcsx2().launch(tmp_path / "g.iso", None)
+
+    monkeypatch.setenv("XDG_CONFIG_HOME", spawned["env"]["XDG_CONFIG_HOME"])
+    assert pcsx2._data_root() == data_dir
+
+
 def test_resolve_refuses_a_direct_path_that_is_a_symlink_out_of_the_library(
     rom_root: Path, tmp_path: Path
 ) -> None:

@@ -72,7 +72,7 @@ from typing import Any, Callable, Optional, Union
 
 import httpx
 
-from .base import Emulator, _record_pid, base_launch_env
+from .base import Emulator, _record_pid, base_launch_env, xdg_config_dir
 
 log = logging.getLogger(__name__)
 
@@ -82,10 +82,57 @@ ROM_ROOT = Path(os.environ.get("ROM_ROOT", "/romm"))
 A ROM candidate has to resolve to somewhere under it to be booted.
 """
 
-XDG_DATA_HOME = os.environ.get("XDG_DATA_HOME") or str(Path.home() / ".local/share")
-"""The user's data home, from `XDG_DATA_HOME` (default `~/.local/share`)."""
-RA_CONFIG_DIR = Path(os.environ.get("RETROARCH_CONFIG_DIR", str(Path.home() / ".config" / "retroarch")))
-"""The user's RetroArch config directory, from `RETROARCH_CONFIG_DIR` (default `~/.config/retroarch`)."""
+RA_BASE_DIR = xdg_config_dir("retroarch")
+"""RetroArch's own directory root: `$XDG_CONFIG_HOME/retroarch`, else `$HOME/.config/retroarch`.
+
+Every directory RetroArch has no explicit setting for hangs off this one root
+on Linux, whatever that directory holds. Probed against the container's build
+(1.22.2): started on a config naming none of them, RetroArch saved
+`libretro_directory` and `libretro_info_path` as `cores` under this root, and
+`system_directory`, `savefile_directory` and `savestate_directory` as
+`system`, `saves` and `states` under it.
+"""
+
+
+def _resolve_config_path() -> Path:
+    """Work out which `retroarch.cfg` the broker and RetroArch should share.
+
+    `RETROARCH_CONFIG_DIR` wins when it is set, because the launch names the
+    result with `--config`: RetroArch loads that file whether or not it exists
+    yet, having probed that a missing one is created from the skeleton config.
+    Without the knob, RetroArch's own search order is followed instead of
+    assuming the first candidate, so a container carrying only the legacy
+    `~/.retroarch.cfg` keeps being read out of it rather than being handed a
+    fresh file the user has never seen.
+
+    Returns:
+        The config file to read the directory settings out of and to name on
+        the command line. When none of the candidates exists yet, the first is
+        returned, which is the one RetroArch would create for itself.
+    """
+    configured = os.environ.get("RETROARCH_CONFIG_DIR")
+    if configured:
+        return Path(configured) / "retroarch.cfg"
+    home = Path(os.environ.get("HOME", "/config"))
+    candidates = [
+        RA_BASE_DIR / "retroarch.cfg",
+        home / ".config" / "retroarch" / "retroarch.cfg",
+        home / ".retroarch.cfg",
+    ]
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    return candidates[0]
+
+
+RA_CONFIG_PATH = _resolve_config_path()
+"""The user's `retroarch.cfg`, under `RETROARCH_CONFIG_DIR` when that is set.
+
+Safe to move, because the launch states it: `--config` names this file on
+RetroArch's own command line. Without that the knob would move only the file
+the broker reads the cores and system directories out of, while RetroArch kept
+loading the one its own search order found.
+"""
 
 
 def _configured_dir(setting: str) -> Optional[Path]:
@@ -99,7 +146,7 @@ def _configured_dir(setting: str) -> Optional[Path]:
         unreadable, the key is absent, or it is set to `default`.
     """
     try:
-        text = (RA_CONFIG_DIR / "retroarch.cfg").read_text(errors="replace")
+        text = RA_CONFIG_PATH.read_text(errors="replace")
     except OSError as exc:
         log.debug(
             "retroarch: could not read retroarch.cfg for %s, treating as unconfigured: %s", setting, exc
@@ -117,12 +164,13 @@ def _configured_dir(setting: str) -> Optional[Path]:
 CORES_DIR = Path(
     os.environ.get("RETROARCH_CORES_DIR")
     or _configured_dir("libretro_directory")
-    or Path(XDG_DATA_HOME) / "RetroArch" / "cores"
+    or RA_BASE_DIR / "cores"
 )
 """Where libretro cores are installed and loaded from.
 
 Taken from `RETROARCH_CORES_DIR`, else the `libretro_directory` in the user's
-config, else `$XDG_DATA_HOME/RetroArch/cores`. A core has to land in the dir
+config, else `cores` under `RA_BASE_DIR`, which is both the `libretro_directory`
+and the `libretro_info_path` RetroArch falls back to. A core has to land in the dir
 RetroArch also reads .info files from. Loading one from anywhere else leaves
 its core info unset, and `GET_STATUS` then segfaults RetroArch mid-session
 (1.22.2). Following the user's own `libretro_directory` is also what makes a
@@ -132,12 +180,18 @@ downloader.
 SYSTEM_DIR = Path(
     os.environ.get("RETROARCH_SYSTEM_DIR")
     or _configured_dir("system_directory")
-    or Path(XDG_DATA_HOME) / "RetroArch" / "system"
+    or RA_BASE_DIR / "system"
 )
 """Where cores look for the assets and firmware they cannot ship themselves.
 
 Taken from `RETROARCH_SYSTEM_DIR`, else the `system_directory` in the user's
-config, else `$XDG_DATA_HOME/RetroArch/system`.
+config, else `system` under `RA_BASE_DIR`, which is where RetroArch looks when
+nothing configures it.
+
+Safe to move, because the launch states it: `_write_broker_cfg` puts this path
+in `system_directory`, and `--appendconfig` gives that priority over the user's
+config. Without that the knob would drop the firmware and the linked core
+assets into a directory no core ever opens.
 """
 CORES_BASE_URL = os.environ.get(
     "RETROARCH_CORES_BASE_URL",
@@ -592,8 +646,8 @@ def _ensure_core_assets(assets: dict[str, str]) -> None:
 def _write_broker_cfg() -> Path:
     """Write the minimal per-launch config, applied *on top of* the user's config.
 
-    The stdin interface, the broker save dirs, and the joypad driver the
-    streamed pads need; nothing else. Save thumbnails are off: the frame RomM
+    The stdin interface, the system dir, the broker save dirs, and the joypad
+    driver the streamed pads need; nothing else. Save thumbnails are off: the frame RomM
     files beside a state comes from the broker's own capture, and the
     framebuffer grab RetroArch would do instead deadlocks GPU-rendered cores.
     The broker data directories are created first, and the file is written
@@ -607,6 +661,10 @@ def _write_broker_cfg() -> Path:
     SAVE_DIR.mkdir(parents=True, exist_ok=True)
     cfg = (
         'stdin_cmd_enable = "true"\n'
+        # Stated, so the firmware and core assets the broker drops in SYSTEM_DIR
+        # are what this run's cores look for. Nothing on the command line names
+        # it, and an --appendconfig key outranks the user's own config.
+        f'system_directory = "{SYSTEM_DIR}"\n'
         f'savestate_directory = "{STATE_DIR}"\n'
         f'savefile_directory = "{SAVE_DIR}"\n'
         'savestate_auto_save = "false"\n'
@@ -1543,6 +1601,10 @@ class Retroarch(Emulator):
             binary,
             "-L",
             str(core),
+            # --config, so the file the cores and system directories were read
+            # out of is the one this run loads; --appendconfig still outranks it.
+            "--config",
+            str(RA_CONFIG_PATH),
             "--appendconfig",
             str(cfg_path),
             "--fullscreen",

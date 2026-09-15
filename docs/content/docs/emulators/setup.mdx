@@ -25,7 +25,7 @@ already mounts (see [Running the container](/docs/container)), is the
 container's home directory, so anything placed on the host at the matching
 path inside it shows up in the container without an upload. This is
 particularly useful for RetroArch: its shared BIOS directory is
-`RETROARCH_SYSTEM_DIR` (default `/config/.local/share/RetroArch/system`, see
+`RETROARCH_SYSTEM_DIR` (default `/config/.config/retroarch/system`, see
 [Configuration](/docs/configuration/emulators)), one folder every libretro
 core reads from, so seeding it on the host covers every RetroArch core at
 once. The per-emulator sections below give the equivalent path for each

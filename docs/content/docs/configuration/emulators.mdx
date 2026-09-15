@@ -26,10 +26,16 @@ Timings are in seconds.
 | `PCSX2_STATE_SLOT` | `10` | The slot PCSX2 works in; 10 is its own autosave slot, which the per-emulator broker also used. |
 | `PCSX2_SLOT1_CARD` | `romm-slot1` | Name of the Slot 1 folder memory card the broker owns (a directory, no `.ps2` extension). |
 | `PCSX2_LOG_PATH` | `/config/pcsx2-qt.log` | Where PCSX2's stdout/stderr is captured. |
-| `SSTATE_DIR` | `/config/.config/PCSX2/sstates` | Where PCSX2 writes save states. |
 | `PINE_WAIT` | `20.0` | How long a save state has to land on disk after the PINE save command. |
 | `RESUME_LOAD_WAIT` | `90.0` | How long a resume load waits for PCSX2 to report a running game. |
 | `RESUME_LOAD_SETTLE` | `3.0` | How long the game has to be running before the resume load fires. |
+
+PCSX2's data root is not configurable. It holds everything (`inis/PCSX2.ini`,
+`sstates/`, `memcards/`) and PCSX2 picks it from `$XDG_CONFIG_HOME/PCSX2`,
+falling back to `$HOME/.config/PCSX2` and then `/config/.config/PCSX2`. Nothing
+on `pcsx2-qt`'s command line names it, so a knob could only ever move the tree
+the broker patches and reads, leaving PCSX2 on the ones it resolves for itself.
+The broker exports the root it resolved to the emulator it launches.
 
 ## DuckStation
 
@@ -150,9 +156,9 @@ emulator it launches.
 | Env var | Default | Purpose |
 | --- | --- | --- |
 | `RETROARCH_BIN` | `retroarch` | RetroArch binary. |
-| `RETROARCH_CONFIG_DIR` | `/config/.config/retroarch` | Where the user's `retroarch.cfg` lives. |
-| `RETROARCH_CORES_DIR` | `libretro_directory` from `retroarch.cfg`, else `/config/.local/share/RetroArch/cores` | Where cores are loaded from and downloaded into. |
-| `RETROARCH_SYSTEM_DIR` | `system_directory` from `retroarch.cfg`, else `/config/.local/share/RetroArch/system` | Where cores look for BIOS files and firmware. |
+| `RETROARCH_CONFIG_DIR` | RetroArch's own search order: `$XDG_CONFIG_HOME/retroarch`, else `$HOME/.config/retroarch`, else the legacy `$HOME/.retroarch.cfg` | Where the user's `retroarch.cfg` lives. Passed to RetroArch as `--config` on every launch, so moving it moves the file both read. |
+| `RETROARCH_CORES_DIR` | `libretro_directory` from `retroarch.cfg`, else `cores` under RetroArch's own root (`/config/.config/retroarch/cores`) | Where cores are loaded from and downloaded into. That default is also RetroArch's `libretro_info_path`, and a core whose `.info` file is not beside it loads without core info. |
+| `RETROARCH_SYSTEM_DIR` | `system_directory` from `retroarch.cfg`, else `system` under RetroArch's own root (`/config/.config/retroarch/system`) | Where cores look for BIOS files and firmware. Written into the `broker.cfg` overlay as `system_directory` on every launch, so moving it moves the directory both use. |
 | `RETROARCH_CORES_BASE_URL` | `https://buildbot.libretro.com/nightly/linux/x86_64/latest` | Where missing cores are downloaded from. |
 | `RETROARCH_CORE_URL_<CORE>` | unset | Pins one core's download URL without editing `retroarch_platforms.json`. |
 | `GITHUB_API_BASE` | `https://api.github.com` | API base for cores whose platform entry names a GitHub release source. |
