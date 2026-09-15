@@ -28,20 +28,40 @@ ROM_ROOT = Path(os.environ.get("ROM_ROOT", "/romm"))
 A resolved disc image must sit under it; candidates resolving outside are discarded.
 """
 
-USER_DIR = Path(os.environ.get("DOLPHIN_USER_DIR", "/config/.local/share/dolphin-emu"))
+def _xdg_dir(var: str, fallback: str) -> str:
+    """Resolve one of Dolphin's XDG directories the way Dolphin itself does.
+
+    Dolphin's Linux layout splits the two: config under
+    `$XDG_CONFIG_HOME/dolphin-emu`, user data (states, memory cards, the NAND)
+    under `$XDG_DATA_HOME/dolphin-emu`. Derived rather than pinned, so both
+    follow the session the desktop launcher runs in instead of drifting from it.
+
+    Args:
+        var: The XDG environment variable to honour when set to an absolute path.
+        fallback: The path under `$HOME` used otherwise, such as `.config`.
+
+    Returns:
+        The `dolphin-emu` directory under the chosen root.
+    """
+    xdg = os.environ.get(var)
+    if xdg and os.path.isabs(xdg):
+        return os.path.join(xdg, "dolphin-emu")
+    return os.path.join(os.environ.get("HOME", "/config"), fallback, "dolphin-emu")
+
+
+USER_DIR = Path(os.environ.get("DOLPHIN_USER_DIR", _xdg_dir("XDG_DATA_HOME", ".local/share")))
 """Dolphin's data directory: states, memory cards and the NAND (env `DOLPHIN_USER_DIR`).
 
-Left to Dolphin's own XDG default rather than pinned with `-u`, because `-u`
-also drags the config into `<dir>/Config` and the desktop launcher, which
-passes no `-u`, would keep its own separate copy. Track `$XDG_DATA_HOME` if
-that ever moves off `/config/.local/share`.
+Left to Dolphin's own default rather than pinned with `-u`, because `-u` also
+drags the config into `<dir>/Config`, where the desktop launcher, which passes
+no `-u`, would never read it.
 """
 STATE_DIR = USER_DIR / "StateSaves"
 """Directory Dolphin writes its `.sNN` save states into."""
-CONFIG_DIR = Path(os.environ.get("DOLPHIN_CONFIG_DIR", "/config/.config/dolphin-emu"))
+CONFIG_DIR = Path(os.environ.get("DOLPHIN_CONFIG_DIR", _xdg_dir("XDG_CONFIG_HOME", ".config")))
 """Dolphin's INI directory, where the pad bindings are seeded (env `DOLPHIN_CONFIG_DIR`).
 
-Dolphin's XDG default, which is what the desktop launcher reads, so a pad a
+Dolphin's own default, which is what the desktop launcher reads, so a pad a
 player rebinds in a desktop session is the same pad a broker launch gets.
 """
 DOLPHIN_LOG_PATH = Path(os.environ.get("DOLPHIN_LOG_PATH", "/config/dolphin.log"))

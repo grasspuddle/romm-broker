@@ -45,8 +45,8 @@ Timings are in seconds.
 | Env var | Default | Purpose |
 | --- | --- | --- |
 | `DOLPHIN_BIN` | `dolphin-emu` | Dolphin binary. |
-| `DOLPHIN_USER_DIR` | `/config/.local/share/dolphin-emu` | Dolphin's data directory (`StateSaves/`, `GC/`, `Wii/`). Mirrors Dolphin's own XDG default; the broker passes no `-u`, so change this only if `$XDG_DATA_HOME` moves. |
-| `DOLPHIN_CONFIG_DIR` | `/config/.config/dolphin-emu` | Dolphin's INI directory, shared with the desktop launcher so a pad rebound in a desktop session applies to broker launches too. |
+| `DOLPHIN_USER_DIR` | `$XDG_DATA_HOME/dolphin-emu` | Dolphin's data directory (`StateSaves/`, `GC/`, `Wii/`). |
+| `DOLPHIN_CONFIG_DIR` | `$XDG_CONFIG_HOME/dolphin-emu` | Dolphin's INI directory, shared with the desktop launcher so a pad rebound in a desktop session applies to broker launches too. |
 | `DOLPHIN_LOG_PATH` | `/config/dolphin.log` | Where Dolphin's stdout/stderr is captured. |
 | `DOLPHIN_STATE_SLOT` | `1` | The slot Dolphin works in (Shift+F`n` saves it, F`n` loads it). |
 | `DOLPHIN_STATE_WAIT` | `20.0` | How long a save state has to land on disk after the save hotkey. |
