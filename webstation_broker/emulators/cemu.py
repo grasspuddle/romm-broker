@@ -26,7 +26,7 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import Any, Optional
 
-from .base import Emulator, base_launch_env
+from .base import Emulator, base_launch_env, xdg_config_dir, xdg_data_dir
 
 log = logging.getLogger(__name__)
 
@@ -34,29 +34,19 @@ ROM_ROOT = Path(os.environ.get("ROM_ROOT", "/romm"))
 """Library root a resolved ROM must live under (env `ROM_ROOT`, default `/romm`)."""
 
 
-def _xdg_dir(var: str, fallback: str) -> str:
-    """One of Cemu's XDG directories.
+# Cemu's Linux layout: config under `$XDG_CONFIG_HOME/Cemu`, user data (the
+# mlc) under `$XDG_DATA_HOME/Cemu`.
+CONFIG_DIR = xdg_config_dir("Cemu")
+"""Cemu's config directory, holding the settings.xml and pad profile the broker writes.
 
-    Cemu's Linux layout: config under `$XDG_CONFIG_HOME/Cemu`, user data
-    (the mlc) under `$XDG_DATA_HOME/Cemu`.
-
-    Args:
-        var: The XDG environment variable to honour when set to an absolute path.
-        fallback: The path under `$HOME` used otherwise, such as `.config`.
-
-    Returns:
-        The `Cemu` directory under the chosen root.
-    """
-    xdg = os.environ.get(var)
-    if xdg and os.path.isabs(xdg):
-        return os.path.join(xdg, "Cemu")
-    return os.path.join(os.environ.get("HOME", "/config"), fallback, "Cemu")
-
-
-CONFIG_DIR = Path(os.environ.get("CEMU_CONFIG_DIR", _xdg_dir("XDG_CONFIG_HOME", ".config")))
-"""Cemu's config directory (env `CEMU_CONFIG_DIR`, default `$XDG_CONFIG_HOME/Cemu`)."""
-DATA_DIR = Path(os.environ.get("CEMU_DATA_DIR", _xdg_dir("XDG_DATA_HOME", ".local/share")))
-"""Cemu's user data directory (env `CEMU_DATA_DIR`, default `$XDG_DATA_HOME/Cemu`)."""
+Not configurable, and deliberately: nothing on Cemu's command line names it,
+so an override would move only the copy the broker patches and leave Cemu
+reading its own, parked on the Getting Started modal. `launch` exports the
+root this resolved to instead. To move save data, use `CEMU_MLC_DIR`, which
+is stated on the command line and so is honoured by both halves.
+"""
+DATA_DIR = xdg_data_dir("Cemu")
+"""Cemu's user data directory, the default home of the MLC. Not configurable; see `CONFIG_DIR`."""
 SETTINGS_PATH = CONFIG_DIR / "settings.xml"
 """The settings.xml patched before every launch."""
 PROFILE_PATH = CONFIG_DIR / "controllerProfiles" / "controller0.xml"
@@ -444,17 +434,22 @@ class Cemu(Emulator):
             )
         self._session_start = time.time()
         binary = os.environ.get("CEMU_BIN", "Cemu")
-        # CEMU_MLC_DIR is only one of three ways MLC_DIR moves: CEMU_DATA_DIR
-        # and XDG_DATA_HOME shift it too, and Cemu resolves neither the same
-        # way. Stating the path every launch is what keeps the emulator
-        # writing saves into the tree the dump reads back.
+        # Stated every launch, not only when CEMU_MLC_DIR is set: the mlc also
+        # moves with XDG_DATA_HOME, and the path on the command line is what
+        # keeps the emulator writing saves into the tree the dump reads back.
         try:
             MLC_DIR.mkdir(parents=True, exist_ok=True)
         except OSError as exc:
             log.warning("cemu: could not create the mlc at %s: %s", MLC_DIR, exc)
         cmd = [binary, "-f", "-m", str(MLC_DIR), "-g", str(rom_path)]
-        log.info("launching cemu (rom=%s, mlc=%s)", rom_path, MLC_DIR)
-        self._spawn(cmd, base_launch_env())
+        # Nothing on the command line names the config, so Cemu resolves that
+        # itself. Export the root the broker resolved so the settings.xml and
+        # pad profile it just wrote are the ones this launch reads.
+        env = base_launch_env()
+        env["XDG_CONFIG_HOME"] = str(CONFIG_DIR.parent)
+        env["XDG_DATA_HOME"] = str(DATA_DIR.parent)
+        log.info("launching cemu (rom=%s, mlc=%s, config=%s)", rom_path, MLC_DIR, CONFIG_DIR)
+        self._spawn(cmd, env)
 
     def _modified_title_saves(self) -> list[Path]:
         """Title save dirs holding a file written while the session ran.

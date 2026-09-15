@@ -263,8 +263,8 @@ def test_launch_always_states_the_mlc_the_dump_reads_back(
 ) -> None:
     """The mlc path must be passed even without CEMU_MLC_DIR set.
 
-    CEMU_DATA_DIR and XDG_DATA_HOME move MLC_DIR too, and Cemu resolves
-    neither of them the way the broker does.
+    XDG_DATA_HOME moves MLC_DIR too, and the dump reads back whichever tree
+    the command line named.
     """
     monkeypatch.delenv("CEMU_MLC_DIR", raising=False)
     spawned: list[list[str]] = []
@@ -294,6 +294,33 @@ def test_launch_creates_the_mlc_cemu_is_pointed_at(
     cemu.Cemu().launch(rom, resume_slot=None)
 
     assert mlc.is_dir()
+
+
+def test_launch_sends_cemu_to_the_config_the_broker_just_patched(
+    save_dir: Path, config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The spawned emulator resolves the same config directory the broker writes into.
+
+    Nothing on Cemu's command line names it, so the exported XDG root is the
+    whole of the agreement: let it drift and the patched settings.xml and the
+    seeded pad profile belong to a Cemu that is not the one running.
+    """
+    monkeypatch.setattr(cemu, "CONFIG_DIR", tmp_path / "cfg" / "Cemu")
+    monkeypatch.setattr(cemu, "DATA_DIR", tmp_path / "data" / "Cemu")
+    spawned: dict[str, dict[str, str]] = {}
+    monkeypatch.setattr(
+        cemu.Cemu,
+        "_spawn",
+        lambda self, cmd, env, stdin_pipe=False: spawned.update(env=env),
+    )
+    rom = tmp_path / "game.wua"
+    rom.write_bytes(b"")
+
+    cemu.Cemu().launch(rom, resume_slot=None)
+
+    env = spawned["env"]
+    assert Path(env["XDG_CONFIG_HOME"]) / "Cemu" == cemu.CONFIG_DIR
+    assert Path(env["XDG_DATA_HOME"]) / "Cemu" == cemu.DATA_DIR
 
 
 def test_exit_refreshes_only_the_title_saves_this_session_wrote(save_dir: Path) -> None:
