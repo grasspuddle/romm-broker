@@ -2778,6 +2778,38 @@ document.addEventListener('DOMContentLoaded', async () => {
     const openInvite = () => inviteTile.classList.add('open');
     const closeInvite = () => inviteTile.classList.remove('open');
 
+    // navigator.clipboard is gated by the clipboard-write Permissions-Policy,
+    // which a cross-origin parent (e.g. RomM iframing this room from another
+    // origin) has to opt this page into and usually does not. execCommand is
+    // deprecated but isn't subject to that policy, so it still works there;
+    // if even that is blocked, hand the link to the user directly rather than
+    // reporting a failure when the link itself was created fine.
+    const copyToClipboard = async (text) => {
+        if (navigator.clipboard && window.isSecureContext) {
+            try {
+                await navigator.clipboard.writeText(text);
+                return true;
+            } catch (err) {
+                console.warn('[Invite] Clipboard API write blocked, falling back:', err);
+            }
+        }
+        const scratch = document.createElement('textarea');
+        scratch.value = text;
+        scratch.style.position = 'fixed';
+        scratch.style.opacity = '0';
+        document.body.appendChild(scratch);
+        scratch.focus();
+        scratch.select();
+        let copied = false;
+        try {
+            copied = document.execCommand('copy');
+        } catch (err) {
+            console.warn('[Invite] execCommand copy blocked:', err);
+        }
+        scratch.remove();
+        return copied;
+    };
+
     const initInviteControls = () => {
         inviteBtn.addEventListener('click', openInvite);
         // The broker hands back the same link for a permission all session,
@@ -2795,6 +2827,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             };
             button.addEventListener('click', async () => {
                 const permission = button.dataset.permission;
+                let url;
                 try {
                     if (!inviteUrls[permission]) {
                         const resp = await fetch(
@@ -2809,14 +2842,20 @@ document.addEventListener('DOMContentLoaded', async () => {
                         const invited = await resp.json();
                         inviteUrls[permission] = new URL(invited.url, window.location.href).href;
                     }
-                    await navigator.clipboard.writeText(inviteUrls[permission]);
+                    url = inviteUrls[permission];
+                } catch (err) {
+                    console.error('[Invite] failed to create link:', err);
+                    flash(t('inviteLinks.failed'));
+                    return;
+                }
+
+                if (await copyToClipboard(url)) {
                     flash(t('inviteLinks.copied'));
                     // Long enough to read the confirmation before the panel goes.
                     setTimeout(closeInvite, INVITE_FLASH_MS);
-                } catch (err) {
-                    console.error('[Invite] failed:', err);
-                    flash(t('inviteLinks.failed'));
+                    return;
                 }
+                window.prompt(t('inviteLinks.copyManually'), url);
             });
         });
     };
@@ -3518,15 +3557,37 @@ document.addEventListener('DOMContentLoaded', async () => {
         const LOCKED_KEYS = ['AltLeft', 'AltRight', 'Tab', 'Escape', 'MetaLeft', 'MetaRight', 'ContextMenu'];
         const LOCK_RETRY_MS = 60;
         const LOCK_RETRIES = 5;
+        // Waiting for a target is not the same wait as waiting out a refusal:
+        // a refusal is the few frames a fullscreen transition takes, while a
+        // missing target is the frame still loading and selkies not having
+        // attached its input element yet, which is a page load away. One
+        // budget for both gave up on the stream before it had come up.
+        const LOCK_TARGET_WAIT_MS = 250;
+        const LOCK_TARGET_WAITS = 20;
         const ESCAPE_PRESSES = 3;
         const ESCAPE_WINDOW_MS = 1000;
         let boundDoc = null;
         let active = false;
         let escapePresses = 0;
         let lastEscapeAt = 0;
-        // Reset at every point the user asks for a lock, so each request gets
-        // the full retry budget rather than inheriting a spent one.
         let lockAttempt = 0;
+        let targetWait = 0;
+        let lockTimer = null;
+        // One retry is ever pending: every entry point below asks for a lock
+        // and refills the budgets, and without this each of them would leave
+        // its own chain running against the same two counters, none of them
+        // able to exhaust a budget the others keep resetting.
+        const scheduleLock = (delay) => {
+            if (lockTimer !== null) clearTimeout(lockTimer);
+            lockTimer = setTimeout(() => { lockTimer = null; requestLock(); }, delay);
+        };
+        // Both budgets are reset at every point the user asks for a lock, so
+        // each request gets a full one rather than inheriting a spent one.
+        const resetLockBudgets = () => {
+            lockAttempt = 0;
+            targetWait = 0;
+            if (lockTimer !== null) { clearTimeout(lockTimer); lockTimer = null; }
+        };
 
         const frame = () => document.getElementById('session-frame');
         const isFullscreen = () => {
@@ -3549,7 +3610,10 @@ document.addEventListener('DOMContentLoaded', async () => {
             if (!isFullscreen()) return;
             const doc = frameDoc();
             const target = lockTarget();
-            if (!doc || !target || typeof target.requestPointerLock !== 'function') return;
+            if (!doc || !target || typeof target.requestPointerLock !== 'function') {
+                waitForTarget();
+                return;
+            }
             if (doc.pointerLockElement === target) return;
             try {
                 // Chromium hands back a promise and rejects it on refusal;
@@ -3560,8 +3624,29 @@ document.addEventListener('DOMContentLoaded', async () => {
                 const request = target.requestPointerLock();
                 if (request && typeof request.catch === 'function') request.catch(() => {});
             } catch (err) {
+                // A synchronous throw is the one case that fires no
+                // pointerlockerror, so the next attempt has to be kicked by
+                // hand. On the target budget, not the refusal one: what throws
+                // here is a document swapped out between lockTarget() and the
+                // call, leaving a detached element, and the replacement is a
+                // page load away just as a target that never existed is.
                 console.warn('[Gaming] Pointer lock threw:', err);
+                waitForTarget();
             }
+        };
+        // Nothing was asked for, so nothing will fire pointerlockerror and the
+        // next attempt has to be kicked by hand. This is the frame between
+        // documents or selkies not having attached its input element yet,
+        // neither of which is over in the time a refusal takes to settle, so
+        // it waits longer and on a budget of its own.
+        const waitForTarget = () => {
+            if (!isFullscreen()) return;
+            if (targetWait >= LOCK_TARGET_WAITS) {
+                console.warn('[Gaming] No pointer lock target in the stream frame; giving up.');
+                return;
+            }
+            targetWait += 1;
+            scheduleLock(LOCK_TARGET_WAIT_MS);
         };
         // Chrome refuses a lock while fullscreen is still settling, so a
         // refusal is retried on a short timer before it is called a failure.
@@ -3572,7 +3657,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                 return;
             }
             lockAttempt += 1;
-            setTimeout(requestLock, LOCK_RETRY_MS);
+            scheduleLock(LOCK_RETRY_MS);
         };
         const releaseLock = () => {
             const doc = frameDoc();
@@ -3593,7 +3678,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         const onFrameMouseDown = (e) => {
             unlockAllAudio();
             if (e.button !== 0) return;
-            lockAttempt = 0;
+            resetLockBudgets();
             requestLock();
         };
         // Selkies escape hatch: three quick Escapes exit, third press swallowed.
@@ -3660,7 +3745,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         document.addEventListener('fullscreenchange', () => {
             if (isFullscreen()) {
                 bindFrame();
-                lockAttempt = 0;
+                resetLockBudgets();
                 requestLock();
                 lockKeyboard();
                 setActive(true);
@@ -3668,12 +3753,25 @@ document.addEventListener('DOMContentLoaded', async () => {
                 unlockKeyboard();
                 releaseLock();
                 setActive(false);
+                // There is nothing to lock outside fullscreen, so a pending
+                // retry would only wake up to find that out.
+                resetLockBudgets();
             }
         });
         // Bind every frame document as it loads; handlers idle outside gaming mode.
         const el = frame();
         if (el) {
-            el.addEventListener('load', bindFrame);
+            el.addEventListener('load', () => {
+                bindFrame();
+                // A reload swaps the document out from under an active lock and
+                // the new one starts unlocked, with nothing left retrying by
+                // then. The load is where the new document first exists, so the
+                // lock is asked for again there with both budgets fresh.
+                if (isFullscreen()) {
+                    resetLockBudgets();
+                    requestLock();
+                }
+            });
             bindFrame();
         }
 

@@ -1,0 +1,90 @@
+---
+title: "Troubleshooting"
+description: "Symptom-first fixes for the failures that come up wiring a container behind a reverse proxy: cross-origin breakage, broker secret mismatches, dead-on-load rooms, and stale sessions."
+---
+
+Start here by symptom. Most of these trace back to the [reverse proxy
+contract](/docs/deployment/reverse-proxy) or the `config.yml` keys covering
+`host`, `broker_host`, `subfolder` and `broker_secret`.
+
+## Camera/microphone denied instantly, or invite links say "Could not create an invite link"
+
+No permission prompt at all, and the invite buttons fall back to a manual
+copy box instead of copying automatically. This is the cross-origin case:
+`host` in `config.yml` is a full URL on its own domain rather than a path
+under RomM's own origin, so the browser treats the room as a different site
+and refuses it `getUserMedia` and clipboard-write outright. There is no
+reverse-proxy setting that fixes this — see the callout at the top of
+[Reverse proxy](/docs/deployment/reverse-proxy) for why, and the RomM-side
+section there for the config change that does fix it (serving the container
+from a subfolder of RomM's own origin).
+
+## Room loads, then just sits there dead
+
+The page and its assets are all arriving fine, so this isn't the prefix
+being stripped — it's the websocket upgrade not making it through. Check:
+
+- The proxy is actually forwarding `Upgrade` / `Connection: upgrade`
+  headers on this specific route, not just the vhost in general. Nginx
+  Proxy Manager in particular: the Proxy Host's **Websockets Support**
+  toggle does not reliably cascade to a Custom Location, so paste the
+  upgrade headers into that location's own **Advanced** box regardless of
+  the toggle. See the [Nginx Proxy Manager
+  tab](/docs/deployment/reverse-proxy#proxy-recipes) for the exact block.
+- `proxy_read_timeout` (or equivalent) is long enough that an idle
+  session's socket isn't being culled mid game.
+
+## Assets 404, or the page loads with a broken layout
+
+The proxy is stripping the mount path before forwarding it. This is the one
+[the contract page](/docs/deployment/reverse-proxy#the-contract) calls out
+by name — most proxies default to strip-prefix mode. On nginx, that means a
+path component snuck into `proxy_pass`; on Traefik, a `stripPrefix`
+middleware; on Caddy, `handle_path` instead of `handle`. Run the `curl`
+checks under [Verifying](/docs/deployment/reverse-proxy#verifying) to
+confirm which end is wrong — the asset `src` attributes tell you whether
+`SUBFOLDER` is unset (paths missing the prefix) or the proxy is stripping it
+(paths have the prefix but 404).
+
+## RomM says "This container's host has no scheme, so it can never be claimed"
+
+`host` is a bare path (`/streaming`) with no scheme or domain in front of
+it. Give it a full URL on RomM's own origin instead —
+`https://romm.example.com/streaming` — which keeps the deployment
+same-origin (so none of the cross-origin breakage above applies) while
+satisfying the check. Leave `subfolder` and `broker_host` as they were;
+this only changes `host`.
+
+## Session looks claimed but nothing responds, even after fixing `config.yml`
+
+Two separate things can cause this, and it's worth ruling out both:
+
+1. RomM reads `config.yml` at startup, not on every request. A restart is
+   what picks up any edit to `host`, `broker_host`, `subfolder` or
+   `broker_secret`.
+2. A session claimed under the old config is still holding state under the
+   old address. End that session from RomM's streaming settings (or wait
+   for it to expire) after restarting, rather than expecting the new config
+   to retroactively fix a session already in progress.
+
+## Activate/join/exit calls fail with 403, and the broker log shows `rejected request: bad or missing broker secret`
+
+`BROKER_SECRET` on the container and `broker_secret` in RomM's `config.yml`
+entry for that container are two separate settings that both have to carry
+the same value — setting one and not the other, or setting them to
+different values, produces this exact log line. If `BROKER_SECRET` isn't
+set on the container at all, this check is skipped entirely, so seeing this
+warning means it *is* set and the two sides disagree. See
+[`BROKER_SECRET`](/docs/configuration) and the `config.yml` example in
+[Wiring it into RomM](/docs/container#wiring-it-into-romm).
+
+## Where to look next
+
+- Broker logs are the source of truth for anything server-to-server
+  (activate, join, exit, the secret check above) — the browser console only
+  sees what reaches it.
+- The browser's network tab, filtered to WS, is the fastest way to tell
+  "the websocket never upgraded" (101 never happens) from "it upgraded and
+  then dropped" (a proxy timeout, usually).
+- [Reverse proxy](/docs/deployment/reverse-proxy) has the full contract and
+  per-proxy recipes if a symptom above doesn't match what you're seeing.

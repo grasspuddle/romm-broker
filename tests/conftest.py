@@ -6,8 +6,13 @@ emulator modules read their paths at import time into module globals, which is
 why the redirect is a monkeypatch of those globals rather than of the env.
 """
 
+import contextlib
+import os
+import signal
 import subprocess
+import sys
 import time
+import uuid
 from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any, Optional
@@ -24,6 +29,9 @@ PREFIX = settings.PREFIX
 
 SLEEPER_CMD = ["/usr/bin/sleep", "60"]
 """Argv every `sleeper` process runs, and what a record naming one has to hold."""
+
+DETACHED_CMD = ["/usr/bin/sleep", "61"]
+"""Argv the stand-in detached app runs, distinct from `SLEEPER_CMD` so the two are told apart."""
 
 
 @pytest.fixture(autouse=True)
@@ -408,3 +416,109 @@ def secret_client(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> TestCl
     """
     monkeypatch.setattr(settings, "BROKER_SECRET", "s3cret")
     return client
+
+
+def shell_with_detached_app(pid_file: Path, tag: str) -> subprocess.Popen[bytes]:
+    """Start a stand-in for the desktop shell that has one app open.
+
+    Mirrors how selkies-desktop runs a `.desktop` entry: fork, `setsid`, fork
+    again, exec, with the intermediate child exiting. What comes out is
+    parented to pid 1, sits in a process group whose leader has already gone,
+    and shares nothing with the shell but the environment it inherited, which
+    is the shape the teardown has to find.
+
+    Args:
+        pid_file: Where the shell writes the detached app's pid, so a test can
+            name it without going through the code under test.
+        tag: The session tag to put in the shell's environment, which the app
+            it starts then inherits.
+
+    Returns:
+        The shell process, running `SLEEPER_CMD`.
+    """
+    script = (
+        "import os\n"
+        "if os.fork() == 0:\n"
+        "    os.setsid()\n"
+        "    pid = os.fork()\n"
+        "    if pid == 0:\n"
+        f"        os.execv({DETACHED_CMD[0]!r}, {DETACHED_CMD!r})\n"
+        f"    tmp = {str(pid_file)!r} + '.tmp'\n"
+        "    open(tmp, 'w').write(str(pid))\n"
+        f"    os.rename(tmp, {str(pid_file)!r})\n"
+        "    os._exit(0)\n"
+        f"os.execv({SLEEPER_CMD[0]!r}, {SLEEPER_CMD!r})\n"
+    )
+    return subprocess.Popen(
+        [sys.executable, "-c", script],
+        env={**os.environ, base.SESSION_TAG_ENV: tag},
+        start_new_session=True,
+    )
+
+
+def await_cmdline(pid: int, cmd: list[str]) -> None:
+    """Block until a pid reports the argv expected of it, or fail the test.
+
+    Args:
+        pid: The process to watch.
+        cmd: The argv it should come to report.
+    """
+    deadline = time.monotonic() + 10.0
+    while base._cmdline(pid) != cmd:
+        if time.monotonic() >= deadline:
+            pytest.fail(f"pid {pid} never reported {cmd}")
+        time.sleep(0.01)
+
+
+def await_gone(pid: int, cmd: list[str], timeout: float = 10.0) -> bool:
+    """Whether a pid stops running an argv within a timeout.
+
+    Args:
+        pid: The process to watch.
+        cmd: The argv that means the process is still the one of interest.
+        timeout: Seconds to wait before giving up.
+
+    Returns:
+        True once the pid no longer reports `cmd`, False if it still does when
+        the time runs out.
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if base._cmdline(pid) != cmd:
+            return True
+        time.sleep(0.05)
+    return base._cmdline(pid) != cmd
+
+
+@pytest.fixture
+def desktop_tree(tmp_path: Path) -> Iterator[tuple[subprocess.Popen[bytes], int, str]]:
+    """A running shell stand-in with one detached app, cleaned up either way.
+
+    Args:
+        tmp_path: The per-test temporary directory.
+
+    Yields:
+        The shell process, the pid of the app it detached, and the session tag
+        both carry. Both processes already report their argv.
+    """
+    pid_file = tmp_path / "detached.pid"
+    tag = uuid.uuid4().hex
+    shell = shell_with_detached_app(pid_file, tag)
+    await_cmdline(shell.pid, SLEEPER_CMD)
+    deadline = time.monotonic() + 10.0
+    while not pid_file.exists():
+        if time.monotonic() >= deadline:
+            pytest.fail("the shell stand-in never reported the pid it detached")
+        time.sleep(0.01)
+    app_pid = int(pid_file.read_text())
+    await_cmdline(app_pid, DETACHED_CMD)
+    try:
+        yield shell, app_pid, tag
+    finally:
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.killpg(os.getpgid(app_pid), signal.SIGKILL)
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.kill(app_pid, signal.SIGKILL)
+        if shell.poll() is None:
+            shell.kill()
+        shell.wait()
