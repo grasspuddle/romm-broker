@@ -311,6 +311,23 @@ def test_a_launch_over_another_games_state_boots_without_it(
     assert spawned and "-s" not in spawned[0]
 
 
+def test_a_launch_leaves_the_config_directory_to_dolphin(
+    state_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No -u, so a launch and the desktop session share one config directory."""
+    rom = _disc(tmp_path / "Game.iso", b"GXCE01")
+    spawned: list[list[str]] = []
+    monkeypatch.setattr(dolphin, "_seed_gcpad", lambda: None)
+    monkeypatch.setattr(dolphin, "Thread", lambda **kwargs: type("T", (), {"start": lambda s: None})())
+    monkeypatch.setattr(dolphin.Dolphin, "_spawn", lambda self, cmd, env: spawned.append(cmd))
+
+    dolphin.Dolphin().launch(rom, 1)
+
+    # -u would move the config under the user dir, where the desktop launcher,
+    # which passes none, would never read the pad a player just rebound.
+    assert spawned and "-u" not in spawned[0]
+
+
 def test_a_state_still_open_by_the_emulator_is_not_a_finished_write(state_dir: Path) -> None:
     """A state whose size sits still while dolphin still holds it open never counts as saved."""
     before = dolphin._snapshot()

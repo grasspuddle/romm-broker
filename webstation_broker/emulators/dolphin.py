@@ -29,11 +29,21 @@ A resolved disc image must sit under it; candidates resolving outside are discar
 """
 
 USER_DIR = Path(os.environ.get("DOLPHIN_USER_DIR", "/config/.local/share/dolphin-emu"))
-"""Dolphin's user directory, passed with `-u` (env `DOLPHIN_USER_DIR`)."""
+"""Dolphin's data directory: states, memory cards and the NAND (env `DOLPHIN_USER_DIR`).
+
+Left to Dolphin's own XDG default rather than pinned with `-u`, because `-u`
+also drags the config into `<dir>/Config` and the desktop launcher, which
+passes no `-u`, would keep its own separate copy. Track `$XDG_DATA_HOME` if
+that ever moves off `/config/.local/share`.
+"""
 STATE_DIR = USER_DIR / "StateSaves"
 """Directory Dolphin writes its `.sNN` save states into."""
-CONFIG_DIR = USER_DIR / "Config"
-"""Directory holding Dolphin's INI files, where the pad bindings are seeded."""
+CONFIG_DIR = Path(os.environ.get("DOLPHIN_CONFIG_DIR", "/config/.config/dolphin-emu"))
+"""Dolphin's INI directory, where the pad bindings are seeded (env `DOLPHIN_CONFIG_DIR`).
+
+Dolphin's XDG default, which is what the desktop launcher reads, so a pad a
+player rebinds in a desktop session is the same pad a broker launch gets.
+"""
 DOLPHIN_LOG_PATH = Path(os.environ.get("DOLPHIN_LOG_PATH", "/config/dolphin.log"))
 """Log file the broker tails for this emulator (env `DOLPHIN_LOG_PATH`, default `/config/dolphin.log`)."""
 
@@ -868,7 +878,6 @@ class Dolphin(Emulator):
         cmd = [
             binary,
             "-b",
-            "-u", str(USER_DIR),
             "-v", VIDEO_BACKEND,
             "-C", "Dolphin.Display.Fullscreen=True",
             "-C", "Dolphin.Interface.ConfirmStop=False",
