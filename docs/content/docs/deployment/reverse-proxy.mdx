@@ -229,8 +229,64 @@ curl -sS https://romm.example.com/streaming/api/health
 The mount path is per container. The app bakes its prefix into asset URLs at
 startup, so there is no wildcard shortcut and no way to share one rule across a
 pool. Each container needs its own `SUBFOLDER` (`/streaming/`, `/streaming-2/`),
-its own proxy rule, and its own `config.yml` entry with the matching `host` and
-`subfolder`.
+its own proxy rule, and its own `config.yml` entry. Copy the proxy recipe you
+used above and change both paths in it.
+
+```yaml
+streaming:
+  containers:
+    - platform: ps2
+      host: /streaming
+      subfolder: /streaming
+      broker_host: http://10.0.1.56:3009
+      # ...remaining keys as above
+    - platform: ps2
+      host: /streaming-2
+      subfolder: /streaming-2
+      broker_host: http://10.0.1.57:3009
+      # ...remaining keys as above
+```
+
+<Callout type="warn" title="host and subfolder both have to be the container's own SUBFOLDER.">
+They are not independent knobs. The browser is sent to `host`, but the broker
+answers the claim with a room URL built from its own `SUBFOLDER`, and that is an
+absolute path, so it replaces whatever path `host` was carrying. A container
+mounted at `/streaming-2` while declaring `subfolder: /streaming` hands the
+player a URL the proxy routes to the container at `/streaming` instead, mid
+session, with nothing written to either log.
+
+RomM refuses such an entry rather than resolve it. It still appears in the fleet
+view, with a warning naming both values, and it cannot be claimed. The usual way
+in is copying an entry for the second container and changing `host` but not
+`subfolder`, which then falls back to its `/streaming` default.
+</Callout>
+
+### How RomM picks one
+
+Entries for the same platform are one pool when they agree on `emulator`,
+`memory_card_sync`, and protocol. Differing `subfolder` values do not split
+them, which is the whole point: same origin pooling puts every container at a
+path of its own.
+
+A claim walks the pool in config order and takes the first container nobody is
+holding. The rest follows from that:
+
+- **One session per container.** Identity comes from `broker_host`, so a
+  container serving three platforms still has a single slot. Claiming it for PS2
+  takes it out of the GameCube pool as well.
+- **A busy container is skipped quietly.** The second player to press play lands
+  on the second container and never learns the first one was taken.
+- **The 409 waits until every member is held.** It names the rom sitting on the
+  container that would have been next.
+- **The player already in a session gets that 409 too**, rather than a second
+  container. Rolling over is for the players who missed out. A second session
+  for the same user would be one nothing could reach, since status, release and
+  save-and-exit all resolve to the first, and under whole-card sync the two
+  halves would be mounting the same card.
+- **Saves follow the player, not the container.** RomM keys them by user,
+  platform and emulator, and the broker clears the working slot before each
+  launch, so landing on a different member next time changes nothing the player
+  can see.
 
 ## What same origin costs you
 
