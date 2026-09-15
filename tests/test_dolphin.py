@@ -649,3 +649,33 @@ def test_exit_reports_the_working_slot_without_a_running_emulator(
 
     assert report == {"state_saved": False, "state_slot": 1, "state_file": None}
     assert not undo.exists()
+
+
+def test_seed_gcpad_binds_all_four_pads_to_the_configured_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Each seeded GCPad section points at the SDL index for the configured pad name."""
+    config_dir = tmp_path / "Config"
+    monkeypatch.setattr(dolphin, "CONFIG_DIR", config_dir)
+    monkeypatch.setattr(dolphin, "_PAD_NAME", "Xbox 360 Controller")
+
+    dolphin._seed_gcpad()
+
+    ini = (config_dir / "GCPadNew.ini").read_text()
+    for i in range(4):
+        assert f"[GCPad{i + 1}]\nDevice = SDL/{i}/Xbox 360 Controller" in ini
+
+
+def test_seed_gcpad_does_not_overwrite_an_existing_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A file already on disk, such as a player's own remapping, is left alone."""
+    config_dir = tmp_path / "Config"
+    config_dir.mkdir()
+    monkeypatch.setattr(dolphin, "CONFIG_DIR", config_dir)
+    path = config_dir / "GCPadNew.ini"
+    path.write_text("custom")
+
+    dolphin._seed_gcpad()
+
+    assert path.read_text() == "custom"

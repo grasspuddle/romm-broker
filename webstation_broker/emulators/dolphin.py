@@ -230,8 +230,18 @@ def _pick_rom_file(candidates: Iterable[Path], base: Path) -> Optional[Path]:
     return min(ranked)[4]
 
 
+_PAD_NAME = os.environ.get("DOLPHIN_PAD_NAME", "Xbox 360 Controller")
+"""The selkies virtual pad's name as Dolphin's SDL backend presents it (env `DOLPHIN_PAD_NAME`).
+
+Dolphin's `SDL/{index}/{name}` binding runs the device through SDL's game
+controller mapping database, which reports `Xbox 360 Controller` for this
+pad's GUID; that differs from the raw joystick name (`Microsoft X-Box 360
+pad`) the interposer's other backends, like evdev, still show, so the two
+must not be confused.
+"""
+
 _GCPAD_TEMPLATE = """[GCPad{n}]
-Device = SDL/{i}/Microsoft X-Box 360 pad
+Device = SDL/{i}/{pad_name}
 Buttons/A = `Button E`
 Buttons/B = `Button S`
 Buttons/X = `Button N`
@@ -277,7 +287,9 @@ def _seed_gcpad() -> None:
     try:
         CONFIG_DIR.mkdir(parents=True, exist_ok=True)
         path.write_text(
-            "".join(_GCPAD_TEMPLATE.format(n=i + 1, i=i) for i in range(4))
+            "".join(
+                _GCPAD_TEMPLATE.format(n=i + 1, i=i, pad_name=_PAD_NAME) for i in range(4)
+            )
         )
         log.info("seeded %s", path)
     except OSError as exc:
