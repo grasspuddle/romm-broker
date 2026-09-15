@@ -25,17 +25,27 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import Any, Optional
 
-from .base import Emulator, base_launch_env
+from .base import Emulator, base_launch_env, xdg_config_dir, xdg_data_dir
 
 log = logging.getLogger(__name__)
 
 ROM_ROOT = Path(os.environ.get("ROM_ROOT", "/romm"))
 """Library root a resolved ROM must live under (env `ROM_ROOT`, default `/romm`)."""
 
-CONFIG_DIR = Path(os.environ.get("EDEN_CONFIG_DIR", "/config/.config/eden"))
-"""Eden's config directory (env `EDEN_CONFIG_DIR`, default `/config/.config/eden`)."""
-DATA_DIR = Path(os.environ.get("EDEN_DATA_DIR", "/config/.local/share/eden"))
-"""Eden's data directory holding the virtual NAND (env `EDEN_DATA_DIR`)."""
+CONFIG_DIR = xdg_config_dir("eden")
+"""Eden's config directory, holding the qt-config.ini the broker patches.
+
+Not configurable, and deliberately: nothing on Eden's command line names it, so
+an override would move only the copy the broker writes and leave Eden reading
+its own. `launch` exports the root this resolved to instead.
+"""
+DATA_DIR = xdg_data_dir("eden")
+"""Eden's data directory holding the virtual NAND, which is also the save root.
+
+Not configurable, for the same reason as `CONFIG_DIR`, and with more at stake:
+an override here would point the save dump and restore at a tree Eden does not
+write to, which loses saves without reporting anything.
+"""
 INI_PATH = CONFIG_DIR / "qt-config.ini"
 """The qt-config.ini patched before every launch."""
 EDEN_LOG_PATH = Path(os.environ.get("EDEN_LOG_PATH", "/config/eden.log"))
@@ -411,8 +421,15 @@ class Eden(Emulator):
             )
         self._session_start = time.time()
         binary = os.environ.get("EDEN_BIN", "eden")
-        log.info("launching eden (rom=%s)", rom_path)
-        self._spawn([binary, "-f", "-g", str(rom_path)], base_launch_env())
+        # The command line names neither directory, so Eden resolves both
+        # itself. Export the roots the broker resolved so it cannot land
+        # anywhere else: the patched qt-config.ini and the dumped saves are
+        # only the ones this launch uses if the two agree.
+        env = base_launch_env()
+        env["XDG_CONFIG_HOME"] = str(CONFIG_DIR.parent)
+        env["XDG_DATA_HOME"] = str(DATA_DIR.parent)
+        log.info("launching eden (rom=%s, config=%s, data=%s)", rom_path, CONFIG_DIR, DATA_DIR)
+        self._spawn([binary, "-f", "-g", str(rom_path)], env)
 
     def _session_save_dirs(self) -> list[Path]:
         """Title save directories holding a file written while the session ran.

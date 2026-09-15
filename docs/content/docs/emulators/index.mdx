@@ -23,7 +23,7 @@ state on demand.
 | `xemu` | Xbox | no | no | extracted from the HDD image into a staging directory |
 | `xenia` | Xbox 360 | no | no | `content/` under `XENIA_DATA_DIR` |
 | `scummvm` | LucasArts and Sierra era adventure games | yes, over the Global Main Menu | no | `saves/` under `SCUMMVM_DATA_DIR` |
-| `flycast` | Sega Dreamcast | no (a resume state is written at exit) | no | the flat `FLYCAST_DATA_DIR` (VMU saves and the savestate) |
+| `flycast` | Sega Dreamcast | no (a resume state is written at exit) | no | the flat `$XDG_DATA_HOME/flycast` (VMU saves and the savestate) |
 | `desktop` | the webstation desktop itself | no | no | none |
 
 "Save states" is what the status response reports as `supports_states`. When
@@ -142,8 +142,8 @@ under `home/1000/savedata/` is the persistence. The binary is picked from
 present (it always trumps releases), otherwise the newest semver release
 folder (`vX.Y.Z - ... - <date>/`, each holding `Shadps4-sdl.AppImage`).
 Override the search with `SHADPS4_BIN` (explicit path), `SHADPS4_VERSIONS_DIR`,
-`SHADPS4_BIN_NAME`, or `SHADPS4_DATA_DIR`. The broker drives shadPS4 through
-its stdin IPC (`SHADPS4_ENABLE_IPC=true`): RUN/START boot the game headlessly,
+or `SHADPS4_BIN_NAME`. The broker drives shadPS4 through its stdin IPC
+(`SHADPS4_ENABLE_IPC=true`): RUN/START boot the game headlessly,
 and exit sends STOP (the SDL quit event) for a graceful teardown before the
 save delta is dumped. shadPS4 has no SIGTERM handler, so SIGTERM is only the
 fallback if STOP doesn't finish in `SHADPS4_STOP_WAIT` (default 20 s).
@@ -204,7 +204,7 @@ whatever state was written on the previous clean exit, and the current
 session's state is written once, on exit.
 
 Save state is a single deterministic file, `<rom>.state`, in the flat
-`FLYCAST_DATA_DIR`. VMU saves live loose in that same directory and travel
+`$XDG_DATA_HOME/flycast`. VMU saves live loose in that same directory and travel
 with it as one save subtree, since nothing separates them from the savestate
 or a first-run onboarding artifact. A RetroArch core also covers Dreamcast
 (`dc` defaults to it), for anyone who prefers RetroArch's shared save-state UI

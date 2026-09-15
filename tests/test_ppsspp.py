@@ -392,6 +392,27 @@ def test_a_launch_whose_config_cannot_be_patched_never_spawns(
         emu.launch(tmp_path / "Game.iso", None)
 
 
+def test_a_launch_sends_ppsspp_to_the_config_root_the_broker_uses(
+    config_inis: tuple[Path, Path], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The spawned emulator resolves the same config root the broker patches and reads back.
+
+    Nothing on PPSSPP's command line names it, so the exported XDG root is the
+    whole of the agreement. The memory stick lives under that root too, so a
+    drift both strands the patched inis and points the save dump at a tree
+    PPSSPP does not write to.
+    """
+    monkeypatch.setattr(ppsspp, "CONFIG_DIR", tmp_path / "cfg" / "ppsspp")
+    spawned: dict[str, dict[str, str]] = {}
+    emu = ppsspp.Ppsspp()
+    emu.stop = lambda: None
+    emu._spawn = lambda cmd, env: spawned.update(env=env)
+
+    emu.launch(tmp_path / "Game.iso", None)
+
+    assert Path(spawned["env"]["XDG_CONFIG_HOME"]) / "ppsspp" == ppsspp.CONFIG_DIR
+
+
 class _FakeProc:
     """Stand-in for a spawned emulator process, carrying only the pid the window search matches on."""
 

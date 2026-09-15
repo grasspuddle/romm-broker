@@ -1061,6 +1061,57 @@ def test_launch_boots_normally_without_a_resume_slot(
     assert spawned["cmd"][-1] == str(eboot)
 
 
+def test_a_launch_sends_rpcs3_to_the_data_root_the_broker_uses(
+    rpcs3_dirs: dict[str, Path],
+    no_boot_watchdog: list[tuple[str, tuple]],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The spawned emulator resolves the same data root the broker patches and dumps.
+
+    RPCS3 keeps dev_hdd0 under the config root, and nothing on its command
+    line names that root, so the exported XDG value is the whole of the
+    agreement. A drift strands the patched config.yml and points the save
+    dump at a dev_hdd0 the running emulator never writes to.
+    """
+    monkeypatch.setattr(rpcs3, "_patch_config", lambda: None)
+    monkeypatch.setattr(rpcs3, "_patch_ipc", lambda: None)
+    monkeypatch.setattr(rpcs3, "DATA_DIR", tmp_path / "cfg" / "rpcs3")
+    spawned = {}
+    monkeypatch.setattr(
+        rpcs3.Rpcs3, "_spawn", lambda self, cmd, env: spawned.setdefault("env", env)
+    )
+    eboot = rpcs3_dirs["game_dir"] / "BLUS30443" / "USRDIR" / "EBOOT.BIN"
+    _touch(eboot)
+
+    rpcs3.Rpcs3().launch(eboot, None)
+
+    assert Path(spawned["env"]["XDG_CONFIG_HOME"]) / "rpcs3" == rpcs3.DATA_DIR
+
+
+def test_a_headless_install_writes_into_the_same_data_root(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The installer CLI resolves the data root the broker later reads the installed title from.
+
+    The headless run is what puts a PKG into dev_hdd0. Send it to a different
+    root than the launch and the install lands where nothing boots it.
+    """
+    monkeypatch.setattr(rpcs3, "DATA_DIR", tmp_path / "cfg" / "rpcs3")
+    monkeypatch.setattr(rpcs3, "RPCS3_LOG_PATH", tmp_path / "rpcs3.log")
+    captured = {}
+
+    def fake_popen(cmd: list[str], **kwargs: object) -> SimpleNamespace:
+        captured["env"] = kwargs["env"]
+        return SimpleNamespace(wait=lambda timeout=None: 0)
+
+    monkeypatch.setattr(rpcs3.subprocess, "Popen", fake_popen)
+
+    rpcs3._run_headless(["--installpkg", str(tmp_path / "title.pkg")], "pkg install")
+
+    assert Path(captured["env"]["XDG_CONFIG_HOME"]) / "rpcs3" == rpcs3.DATA_DIR
+
+
 def test_launch_always_spawns_the_boot_watchdog(
     rpcs3_dirs: dict[str, Path], no_boot_watchdog: list[tuple[str, tuple]], monkeypatch: pytest.MonkeyPatch
 ) -> None:

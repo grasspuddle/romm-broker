@@ -59,26 +59,21 @@ from threading import Lock, Thread
 from typing import Optional
 
 from .. import settings
-from .base import Emulator, base_launch_env
+from .base import Emulator, base_launch_env, xdg_config_dir
 
 log = logging.getLogger(__name__)
 
 ROM_ROOT = Path(os.environ.get("ROM_ROOT", "/romm"))
 
+DATA_DIR = xdg_config_dir("rpcs3")
+"""RPCS3's data root: config.yml, dev_flash, dev_hdd0 and the savestates all sit under it.
 
-def _default_data_dir() -> str:
-    """Resolve RPCS3's Linux data root.
-
-    $XDG_CONFIG_HOME/rpcs3 when set, otherwise ~/.config/rpcs3. Config,
-    dev_flash and dev_hdd0 all live under it.
-    """
-    xdg = os.environ.get("XDG_CONFIG_HOME")
-    if xdg and os.path.isabs(xdg):
-        return os.path.join(xdg, "rpcs3")
-    return os.path.join(os.environ.get("HOME", "/config"), ".config/rpcs3")
-
-
-DATA_DIR = Path(os.environ.get("RPCS3_DATA_DIR", _default_data_dir()))
+RPCS3 keeps its data under the config root on Linux, not the data root. Not
+configurable, and deliberately: nothing on RPCS3's command line names it, so an
+override would move only the tree the broker reads and writes. Since dev_hdd0
+holds the saves, that would point the dump and restore at a tree RPCS3 does not
+write to. `_launch_env` exports the root this resolved to instead.
+"""
 CONFIG_PATH = DATA_DIR / "config.yml"
 IPC_PATH = DATA_DIR / "ipc.yml"
 DEV_HDD0 = DATA_DIR / "dev_hdd0"
@@ -205,6 +200,11 @@ def _launch_env() -> dict[str, str]:
     # The AppImage's desktop entry pins xcb; the Qt wayland platform is not
     # bundled.
     env["QT_QPA_PLATFORM"] = "xcb"
+    # Nothing on the command line names the data root, so RPCS3 resolves it
+    # itself. Export the root the broker resolved so the config it patched,
+    # the dev_hdd0 a headless install writes into, and the saves the dump
+    # reads back are all the same tree.
+    env["XDG_CONFIG_HOME"] = str(DATA_DIR.parent)
     return env
 
 

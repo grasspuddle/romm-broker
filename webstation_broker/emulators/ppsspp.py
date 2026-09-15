@@ -31,7 +31,7 @@ from pathlib import Path
 from threading import Thread
 from typing import Any, Optional
 
-from .base import Emulator, base_launch_env
+from .base import Emulator, base_launch_env, xdg_config_dir
 
 log = logging.getLogger(__name__)
 
@@ -41,8 +41,15 @@ ROM_ROOT = Path(os.environ.get("ROM_ROOT", "/romm"))
 A resolved ROM must sit under it; candidates resolving outside are discarded.
 """
 
-CONFIG_DIR = Path(os.environ.get("PPSSPP_CONFIG_DIR", "/config/.config/ppsspp"))
-"""PPSSPP's config root (env `PPSSPP_CONFIG_DIR`, default `/config/.config/ppsspp`)."""
+CONFIG_DIR = xdg_config_dir("ppsspp")
+"""PPSSPP's config root, which also holds the emulated memory stick.
+
+Not configurable, and deliberately: nothing on PPSSPP's command line names it,
+so an override would move only the copy the broker reads and writes. Since the
+save data and states live under it too, that would point the dump and restore
+at a tree PPSSPP does not write to. `launch` exports the root this resolved to
+instead, which is an agreement the two cannot fall out of.
+"""
 PSP_DIR = CONFIG_DIR / "PSP"
 """The emulated memory stick root, holding save data, states and the system inis."""
 SYSTEM_DIR = PSP_DIR / "SYSTEM"
@@ -754,8 +761,18 @@ class Ppsspp(Emulator):
 
         binary = os.environ.get("PPSSPP_BIN", "PPSSPPQt")
         env = base_launch_env()
+        # Nothing on the command line names the config root, so PPSSPP resolves
+        # it itself. Export the root the broker resolved so the inis it just
+        # patched, and the memory stick the saves are read back from, are the
+        # ones this launch uses.
+        env["XDG_CONFIG_HOME"] = str(CONFIG_DIR.parent)
         cmd = [binary, "--fullscreen", "--", str(rom_path)]
-        log.info("launching ppsspp (rom=%s, resume_slot=%s)", rom_path, resume_slot)
+        log.info(
+            "launching ppsspp (rom=%s, resume_slot=%s, config=%s)",
+            rom_path,
+            resume_slot,
+            CONFIG_DIR,
+        )
         self._spawn(cmd, env)
 
         # PPSSPP has no boot-time state-load flag, so a resume always has to

@@ -101,10 +101,16 @@ emulator it launches so the two always read the same trees.
 | Env var | Default | Purpose |
 | --- | --- | --- |
 | `EDEN_BIN` | `eden` | Eden binary. |
-| `EDEN_CONFIG_DIR` | `/config/.config/eden` | Eden's config directory (`qt-config.ini`). |
-| `EDEN_DATA_DIR` | `/config/.local/share/eden` | Eden's data directory (`nand/`, `sdmc/`). |
 | `EDEN_LOG_PATH` | `/config/eden.log` | Where Eden's stdout/stderr is captured. |
 | `EDEN_STOP_WAIT` | `15` | SIGTERM grace before SIGKILL; a running game takes longer than the base 5 s to tear down. |
+
+Eden's directories are not configurable. Its config (`qt-config.ini`) lives in
+`$XDG_CONFIG_HOME/eden` and its data (the virtual NAND, `sdmc/`) in
+`$XDG_DATA_HOME/eden`, falling back to `$HOME/.config` and `$HOME/.local/share`,
+then to `/config`. Eden's command line names neither, so a knob there would move
+only the config the broker patches and the save tree it dumps, not the ones the
+emulator uses. The broker exports both roots to the emulator it launches so the
+two always read the same trees.
 
 ## shadPS4
 
@@ -113,17 +119,23 @@ emulator it launches so the two always read the same trees.
 | `SHADPS4_BIN` | unset | Explicit shadPS4 binary; skips the version search. |
 | `SHADPS4_VERSIONS_DIR` | `/config/.local/share/shadPS4QtLauncher/versions` | Where the Qt launcher downloads builds, one folder per release; `Pre-release/` trumps the newest semver folder. |
 | `SHADPS4_BIN_NAME` | `Shadps4-sdl.AppImage` | The binary looked for inside each version folder. |
-| `SHADPS4_DATA_DIR` | `/config/.local/share/shadPS4` | shadPS4's data directory (`home/1000/savedata/` is the save subtree). |
 | `SHADPS4_LOG_PATH` | `/config/shadps4.log` | Where shadPS4's stdout/stderr is captured. |
 | `SHADPS4_STOP_WAIT` | `20` | How long the IPC STOP gets to finish before SIGTERM. |
 | `SHADPS4_PKG_EXTRACTOR_BIN` | `pkg_extractor` | The standalone `pkg_extractor` binary a `.pkg` ROM (or a `.7z`/`.zip`/`.rar` archive holding one) is unpacked with; requires `unrar` and `7z` on PATH too when the ROM is an archive. |
 | `SHADPS4_PKG_EXTRACT_TIMEOUT` | `1800` | Seconds a `pkg_extractor` (or archive extraction) run gets before it is considered hung. |
 | `SHADPS4_CACHE_ENABLED` | `false` | Whether `.pkg` and `.7z`/`.zip`/`.rar` ROMs boot at all. On, the first launch extracts one into `SHADPS4_CACHE_DIR` and every later launch reuses that extraction. Off, such a ROM is refused outright rather than re-extracted and thrown away on every launch; only natively bootable formats work. |
-| `SHADPS4_CACHE_DIR` | `/config/.local/share/shadPS4/extracted` | Where a kept extraction is cached, when `SHADPS4_CACHE_ENABLED` is on. |
+| `SHADPS4_CACHE_DIR` | `$XDG_DATA_HOME/shadPS4/extracted` | Where a kept extraction is cached, when `SHADPS4_CACHE_ENABLED` is on. Broker-owned scratch, written and read by the broker alone, so moving it moves the whole of it. |
 | `SHADPS4_CACHE_MAX_GB` | `30` | Ceiling on the cache's total size; the oldest extraction is evicted first once a new one would exceed it. A ROM that still doesn't fit once there is nothing left to evict, or that exceeds the free space on the filesystem, is refused at activate rather than extracted until the disk fills. |
-| `SHADPS4_CONFIG_PATH` | `<SHADPS4_DATA_DIR>/config.json` | shadPS4's own config file, read and rewritten before each launch to pin `Vulkan.gpu_id`. |
 | `SHADPS4_GPU_ID` | `auto` | Which Vulkan device shadPS4 renders on. shadPS4's own `-1` auto-select can land on a software rasterizer, which renders a black screen while the game otherwise runs. `auto` detects the best real GPU; an integer pins that device index directly; `-1` or `KEEP` leaves `config.json` alone. |
 | `SHADPS4_VULKANINFO_BIN` | `vulkaninfo` | The binary `SHADPS4_GPU_ID=auto` enumerates devices with. If it is missing or fails, no pin is written and shadPS4 keeps its own setting. |
+
+shadPS4's data directory is not configurable: it is `$XDG_DATA_HOME/shadPS4`,
+falling back to `$HOME/.local/share/shadPS4` and then `/config/.local/share/shadPS4`.
+Its `config.json`, the file the GPU pin is written into, sits at the root of it.
+Nothing on shadPS4's command line names either, so a knob there could only move
+the config the broker rewrites and the `home/1000/savedata/` tree it dumps, not
+the ones the emulator uses. The broker exports the root it resolved to the
+emulator it launches.
 
 ## RetroArch
 
@@ -161,16 +173,23 @@ emulator it launches so the two always read the same trees.
 | Env var | Default | Purpose |
 | --- | --- | --- |
 | `RPCS3_BIN` | `/opt/rpcs3/AppRun` | RPCS3 binary. |
-| `RPCS3_DATA_DIR` | `/config/.config/rpcs3` | RPCS3's data root (`config.yml`, `dev_hdd0/`). |
 | `RPCS3_LOG_PATH` | `/config/rpcs3.log` | Where RPCS3's stdout/stderr is captured. |
 | `RPCS3_INSTALL_TIMEOUT` | `1800` | How long a PKG install may run; decryption of a multi-GB package takes minutes. |
 | `RPCS3_BOOT_WAIT` | `90.0` | How long the boot watchdog waits for PINE to report a running game before the launch is flagged `boot_failed`. |
 | `RPCS3_STATE_WAIT` | `60.0` | How long the exit-time save-state hotkey has to finish writing before the broker gives up on it; a full state (compressed RAM and VRAM) is a heavier write than the other cores' states. |
 | `RPCS3_SAVE_STATE_KEY` | `ctrl+alt+1` | The save-state hotkey sent to trigger an exit-time save. RPCS3's four save-state shortcuts are equivalent and this one is GUI-rebindable, hence configurable here too. |
 | `RPCS3_CACHE_ENABLED` | `false` | Whether `.7z`/`.zip`/`.rar` ROMs boot at all. On, the first launch extracts one into `RPCS3_CACHE_DIR` and every later launch reuses that extraction. Off, an archive ROM is refused outright rather than re-extracted and thrown away on every launch. `.pkg` is unaffected either way: it always installs through its own always-on installer. |
-| `RPCS3_CACHE_DIR` | `/config/.config/rpcs3/extracted` | Where a kept extraction is cached, when `RPCS3_CACHE_ENABLED` is on. |
+| `RPCS3_CACHE_DIR` | `$XDG_CONFIG_HOME/rpcs3/extracted` | Where a kept extraction is cached, when `RPCS3_CACHE_ENABLED` is on. Broker-owned scratch, written and read by the broker alone, so moving it moves the whole of it. |
 | `RPCS3_CACHE_MAX_GB` | `30` | Ceiling on the cache's total size; the oldest extraction is evicted first once a new one would exceed it. An archive that still doesn't fit once there is nothing left to evict, or that exceeds the free space on the filesystem, is refused at activate rather than extracted until the disk fills. |
 | `RPCS3_STOP_WAIT` | `2` | SIGTERM grace before SIGKILL (no SIGTERM handler, covers the AppImage wrapper teardown). |
+
+RPCS3's data root is not configurable. On Linux it keeps everything (`config.yml`,
+`dev_flash/`, `dev_hdd0/` and the savestates) under `$XDG_CONFIG_HOME/rpcs3`,
+falling back to `$HOME/.config/rpcs3` and then `/config/.config/rpcs3`. Nothing on
+RPCS3's command line names it, so a knob there would move only the config the
+broker patches, the `dev_hdd0/` a PKG install writes into, and the saves the dump
+reads back, not the tree the emulator uses. The broker exports the root it
+resolved to every RPCS3 it runs, the headless installer included.
 
 ## xemu
 
@@ -189,12 +208,19 @@ emulator it launches so the two always read the same trees.
 | Env var | Default | Purpose |
 | --- | --- | --- |
 | `PPSSPP_BIN` | `PPSSPPQt` | PPSSPP binary. |
-| `PPSSPP_CONFIG_DIR` | `/config/.config/ppsspp` | PPSSPP's config root; `PSP/` under it holds `SYSTEM/ppsspp.ini`, `SAVEDATA/` and `PPSSPP_STATE/`. |
 | `PPSSPP_LOG_PATH` | `/config/ppsspp.log` | Where PPSSPP's stdout/stderr is captured. |
 | `PPSSPP_STATE_SLOT` | `1` | The slot PPSSPP works in. |
 | `PPSSPP_STATE_WAIT` | `20.0` | How long a save state has to land on disk after the save hotkey. |
 | `PPSSPP_RESUME_LOAD_WAIT` | `90.0` | How long a resume load waits for the game window. |
 | `PPSSPP_RESUME_LOAD_SETTLE` | `5.0` | How long the window has to be up before the load hotkey is sent. |
+
+PPSSPP's config root is not configurable: it is `$XDG_CONFIG_HOME/ppsspp`, falling
+back to `$HOME/.config/ppsspp` and then `/config/.config/ppsspp`. The emulated
+memory stick lives under it as `PSP/`, so it holds `SYSTEM/ppsspp.ini`,
+`SAVEDATA/` and `PPSSPP_STATE/` alike. Nothing on PPSSPP's command line names it,
+so a knob there would move only the inis the broker patches and the saves it
+dumps, not the ones the emulator uses. The broker exports the root it resolved to
+the emulator it launches.
 
 ## Xenia
 
@@ -209,9 +235,16 @@ emulator it launches so the two always read the same trees.
 | Env var | Default | Purpose |
 | --- | --- | --- |
 | `FLYCAST_BIN` | `/opt/flycast/AppRun` | Flycast binary. |
-| `FLYCAST_DATA_DIR` | `/config/.local/share/flycast` | Flycast's flat data directory (VMU saves and the savestate); `$XDG_DATA_HOME/flycast` when that is set. |
 | `FLYCAST_LOG_PATH` | `/config/flycast.log` | Where Flycast's stdout/stderr is captured. |
 | `FLYCAST_STOP_WAIT` | `20` | How long the Alt+F4 close request gets before escalating to a SIGTERM that Flycast has no handler for, and which skips the save entirely. |
+
+Flycast's data directory is not configurable: it is `$XDG_DATA_HOME/flycast`,
+falling back to `$HOME/.local/share/flycast` and then `/config/.local/share/flycast`.
+It is flat, holding the VMU saves and the savestate together. The `-config`
+options the broker passes carry settings, not paths, so nothing on the command
+line names it and a knob there would move only the tree the broker archives, not
+the one the emulator writes. The broker exports the root it resolved to the
+emulator it launches.
 
 ## ScummVM
 
