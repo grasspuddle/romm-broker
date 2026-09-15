@@ -792,11 +792,6 @@ def test_the_working_slot_is_served_for_the_booted_game(dirs: dict[str, Path]) -
     assert booted().state_path() == dirs["saves"] / "monkey.s01"
 
 
-def test_the_thumbnail_travels_inside_the_state(dirs: dict[str, Path]) -> None:
-    """ScummVM embeds the frame in the save, so there is no file to point at."""
-    assert booted().state_screenshot_path() is None
-
-
 def test_the_working_slot_is_emptied_before_a_session(dirs: dict[str, Path]) -> None:
     """Every game's working slot goes, since a leftover cannot be told apart.
 

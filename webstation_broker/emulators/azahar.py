@@ -27,7 +27,7 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import Any, Optional
 
-from .base import Emulator, base_launch_env
+from .base import Emulator, base_launch_env, xdg_config_dir, xdg_data_dir
 
 log = logging.getLogger(__name__)
 
@@ -35,28 +35,23 @@ ROM_ROOT = Path(os.environ.get("ROM_ROOT", "/romm"))
 """Library root a resolved ROM must live under (env `ROM_ROOT`, default `/romm`)."""
 
 
-def _xdg_dir(var: str, fallback: str) -> str:
-    """One of Azahar's XDG directories.
+# Azahar's Linux layout: one `azahar-emu` directory per XDG root.
+USER_DIR = xdg_data_dir("azahar-emu")
+"""Azahar's data root, which is also the save root.
 
-    Azahar's Linux layout: one `azahar-emu` directory per XDG root.
+Not configurable, and deliberately: nothing on Azahar's command line names
+this directory, so an override here would move only the half of the pair the
+broker dumps and restores. The emulator would keep writing saves where XDG
+puts them, and a session would restore into a tree nothing reads. `launch`
+exports the root this resolved to instead, which is an agreement the two
+cannot fall out of.
+"""
+CONFIG_DIR = xdg_config_dir("azahar-emu")
+"""Azahar's config directory, holding the qt-config.ini patched before each launch.
 
-    Args:
-        var: The XDG environment variable to honour when set to an absolute path.
-        fallback: The path under `$HOME` used otherwise, such as `.config`.
-
-    Returns:
-        The `azahar-emu` directory under the chosen root.
-    """
-    xdg = os.environ.get(var)
-    if xdg and os.path.isabs(xdg):
-        return os.path.join(xdg, "azahar-emu")
-    return os.path.join(os.environ.get("HOME", "/config"), fallback, "azahar-emu")
-
-
-USER_DIR = Path(os.environ.get("AZAHAR_USER_DIR", _xdg_dir("XDG_DATA_HOME", ".local/share")))
-"""Azahar's data root, the save root (env `AZAHAR_USER_DIR`, default `$XDG_DATA_HOME/azahar-emu`)."""
-CONFIG_DIR = Path(os.environ.get("AZAHAR_CONFIG_DIR", _xdg_dir("XDG_CONFIG_HOME", ".config")))
-"""Azahar's config directory (env `AZAHAR_CONFIG_DIR`, default `$XDG_CONFIG_HOME/azahar-emu`)."""
+Not configurable, for the same reason as `USER_DIR`: the patch would land in
+a file Azahar never opens, leaving it parked on its first-run setup.
+"""
 CONFIG_PATH = CONFIG_DIR / "qt-config.ini"
 """The qt-config.ini patched before every launch."""
 AZAHAR_LOG_PATH = Path(os.environ.get("AZAHAR_LOG_PATH", "/config/azahar.log"))
@@ -334,8 +329,15 @@ class Azahar(Emulator):
         # moment the display resizes under it, and the display resizes
         # whenever the player resizes their browser window.
         cmd = [binary, "-w", str(rom_path)]
-        log.info("launching azahar (rom=%s)", rom_path)
-        self._spawn(cmd, base_launch_env())
+        # The command line names neither directory, so the emulator resolves
+        # both itself. Export the roots the broker resolved so it cannot land
+        # anywhere else: the patched config and the dumped saves are only the
+        # ones this launch uses if the two agree.
+        env = base_launch_env()
+        env["XDG_CONFIG_HOME"] = str(CONFIG_DIR.parent)
+        env["XDG_DATA_HOME"] = str(USER_DIR.parent)
+        log.info("launching azahar (rom=%s, config=%s, user=%s)", rom_path, CONFIG_DIR, USER_DIR)
+        self._spawn(cmd, env)
 
     def _modified_title_saves(self) -> list[Path]:
         """Title save dirs holding a file written while the session ran.

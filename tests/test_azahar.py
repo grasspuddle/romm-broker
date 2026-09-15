@@ -26,34 +26,8 @@ def test_class_declares_no_save_state_or_disc_swap_support() -> None:
     assert azahar.Azahar.supports_disc_swap is False
 
 
-# ---- _xdg_dir ----
-
-
-def test_xdg_dir_uses_the_absolute_env_var_when_set(monkeypatch: pytest.MonkeyPatch) -> None:
-    """An absolute XDG env var is used as-is for the azahar-emu subdirectory."""
-    monkeypatch.setenv("XDG_DATA_HOME", "/custom/data")
-    assert azahar._xdg_dir("XDG_DATA_HOME", ".local/share") == "/custom/data/azahar-emu"
-
-
-def test_xdg_dir_falls_back_to_home_relative_path_when_unset(monkeypatch: pytest.MonkeyPatch) -> None:
-    """An unset XDG env var falls back to the home-relative default path."""
-    monkeypatch.delenv("XDG_DATA_HOME", raising=False)
-    monkeypatch.setenv("HOME", "/home/testuser")
-    assert (
-        azahar._xdg_dir("XDG_DATA_HOME", ".local/share")
-        == "/home/testuser/.local/share/azahar-emu"
-    )
-
-
-def test_xdg_dir_ignores_a_relative_env_var(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A relative XDG env var is ignored in favor of the home-relative default."""
-    monkeypatch.setenv("XDG_DATA_HOME", "relative/path")
-    monkeypatch.setenv("HOME", "/home/testuser")
-    assert (
-        azahar._xdg_dir("XDG_DATA_HOME", ".local/share")
-        == "/home/testuser/.local/share/azahar-emu"
-    )
-
+# The XDG resolution these directories are built from is shared with the other
+# launchers and covered in tests/test_emulators.py.
 
 # ---- resolve_rom_file / _pick_rom_file ----
 
@@ -481,6 +455,33 @@ def test_launch_uses_windowed_not_fullscreen(
     assert "-w" in spawned["cmd"]
     assert "-f" not in spawned["cmd"]
     assert "--fullscreen" not in spawned["cmd"]
+
+
+def test_launch_sends_azahar_to_the_directories_the_broker_uses(
+    monkeypatch: pytest.MonkeyPatch, rom_root: Path, config_path: Path, tmp_path: Path
+) -> None:
+    """The spawned emulator resolves the same config and data roots the broker patches and dumps.
+
+    Azahar's command line names neither, so the exported XDG roots are the
+    whole of the agreement: let them drift and the broker patches a config
+    Azahar never opens and dumps saves the session never wrote.
+    """
+    monkeypatch.setattr(azahar, "CONFIG_DIR", tmp_path / "cfg" / "azahar-emu")
+    monkeypatch.setattr(azahar, "USER_DIR", tmp_path / "data" / "azahar-emu")
+    monkeypatch.setattr(azahar.Azahar, "stop", lambda self: None)
+    monkeypatch.setattr(azahar, "_patch_config", lambda: None)
+    spawned: dict[str, dict[str, str]] = {}
+    monkeypatch.setattr(
+        azahar.Azahar, "_spawn", lambda self, cmd, env: spawned.update(env=env)
+    )
+    rom = rom_root / "game.3ds"
+    rom.write_bytes(b"")
+
+    azahar.Azahar().launch(rom, resume_slot=None)
+
+    env = spawned["env"]
+    assert Path(env["XDG_CONFIG_HOME"]) / "azahar-emu" == azahar.CONFIG_DIR
+    assert Path(env["XDG_DATA_HOME"]) / "azahar-emu" == azahar.USER_DIR
 
 
 # ---- prepare_restore ----

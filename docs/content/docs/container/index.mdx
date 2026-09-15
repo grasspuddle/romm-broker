@@ -174,7 +174,12 @@ full diagnosis.
 
 Several launchers pin a renderer that is known to work on the integrated AMD
 parts the image is tested on (`DOLPHIN_VIDEO_BACKEND`, `XEMU_RENDERER`);
-change them if your driver prefers Vulkan.
+change them if your driver prefers Vulkan. PCSX2 has no such pin. Its
+renderer lives in `PCSX2.ini`, picked from its own setup wizard, so a
+"Failed to initialize GS" startup error on an AMD iGPU points to RADV
+(Vulkan) failing to init on that part. Switch PCSX2's renderer to OpenGL
+instead, in **Settings > Graphics**: it uses radeonsi and is confirmed to
+work.
 
 ## First run
 

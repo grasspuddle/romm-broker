@@ -16,6 +16,7 @@ Timings are in seconds.
 | `XDOTOOL_BIN` | `xdotool` | The xdotool used to send save/load hotkeys to Dolphin and PPSSPP. |
 | `XDG_RUNTIME_DIR` | `/config/.XDG` | Where PCSX2's PINE socket (`pcsx2.sock`) is looked for. |
 | `DESKTOP_BIN` | `selkies-desktop` | What the `desktop` type launches. |
+| `DESKTOP_STOP_WAIT` | `15` | SIGTERM grace before SIGKILL for the desktop session, and for every app left open on it. Longer than the base 5 s because it is mostly spent on those apps writing their config and save data on the way out. |
 
 ## PCSX2
 
@@ -44,36 +45,56 @@ Timings are in seconds.
 | Env var | Default | Purpose |
 | --- | --- | --- |
 | `DOLPHIN_BIN` | `dolphin-emu` | Dolphin binary. |
-| `DOLPHIN_USER_DIR` | `/config/.local/share/dolphin-emu` | Dolphin's user directory (`Config/`, `StateSaves/`, `GC/`, `Wii/`). |
 | `DOLPHIN_LOG_PATH` | `/config/dolphin.log` | Where Dolphin's stdout/stderr is captured. |
 | `DOLPHIN_STATE_SLOT` | `1` | The slot Dolphin works in (Shift+F`n` saves it, F`n` loads it). |
 | `DOLPHIN_STATE_WAIT` | `20.0` | How long a save state has to land on disk after the save hotkey. |
 | `DOLPHIN_RESUME_LOAD_WAIT` | `90.0` | How long a resume load waits for the render window. |
 | `DOLPHIN_RESUME_LOAD_SETTLE` | `5.0` | How long the window has to be up before the load hotkey is sent. |
 | `DOLPHIN_VIDEO_BACKEND` | `OGL` | Video backend pinned at launch; OGL over Vulkan because RADV on the integrated AMD parts has been the less reliable one. |
+| `DOLPHIN_PAD_NAME` | `Xbox 360 Controller` | The selkies virtual pad's name as Dolphin's SDL backend presents it, used in the seeded `GCPadNew.ini` bindings. |
+
+Dolphin's directories are not configurable. Its config (`GCPadNew.ini` and the
+rest) lives in `$XDG_CONFIG_HOME/dolphin-emu`, its data (`StateSaves/`, `GC/`,
+`Wii/`) in `$XDG_DATA_HOME/dolphin-emu`, falling back to `$HOME/.config` and
+`$HOME/.local/share` when those are unset, and to `/config` when `HOME` is unset
+too. The broker exports the roots it resolved to the emulator it launches, so
+the two always read the same files. The desktop launcher reads them as well,
+which is why a pad rebound in a desktop Dolphin session applies to broker
+launches too.
 
 ## Cemu
 
 | Env var | Default | Purpose |
 | --- | --- | --- |
 | `CEMU_BIN` | `Cemu` | Cemu binary. |
-| `CEMU_CONFIG_DIR` | `/config/.config/Cemu` | Cemu's config directory (`settings.xml`, `controllerProfiles/`). |
-| `CEMU_DATA_DIR` | `/config/.local/share/Cemu` | Cemu's data directory. |
-| `CEMU_MLC_DIR` | `<CEMU_DATA_DIR>/mlc01` | The mlc01 tree saves are dumped from; only passed to Cemu as `-m` when set explicitly. |
+| `CEMU_MLC_DIR` | `$XDG_DATA_HOME/Cemu/mlc01` | The mlc01 tree saves are dumped from, passed to Cemu as `-m` on every launch. |
 | `CEMU_LOG_PATH` | `/config/cemu.log` | Where Cemu's stdout/stderr is captured. |
 | `CEMU_PAD_NAME` | `Microsoft X-Box 360 pad` | The selkies virtual pad's name as the kernel xpad driver presents it, used to derive the SDL GUIDs the controller profile binds. |
 | `CEMU_PAD_UUIDS` | unset | Comma separated `<index>_<guid>` list to bind instead of the derived ones. |
 | `CEMU_STOP_WAIT` | `5` | SIGTERM grace before SIGKILL (Cemu has no SIGTERM handler, so this only covers process-group teardown). |
+
+Cemu's config directory is not configurable: it is `$XDG_CONFIG_HOME/Cemu`,
+falling back to `$HOME/.config/Cemu` and then `/config/.config/Cemu`. Nothing on
+Cemu's command line names it, so a knob there could only move the `settings.xml`
+and pad profile the broker writes and leave Cemu reading its own copy. The
+broker exports the root it resolved to the emulator it launches. To move save
+data, use `CEMU_MLC_DIR`, which is stated as `-m` and so is honoured by both.
 
 ## Azahar
 
 | Env var | Default | Purpose |
 | --- | --- | --- |
 | `AZAHAR_BIN` | `/opt/azahar/AppRun` | Azahar binary. |
-| `AZAHAR_USER_DIR` | `/config/.local/share/azahar-emu` | Azahar's user data directory (`sdmc/`, `nand/`). |
-| `AZAHAR_CONFIG_DIR` | `/config/.config/azahar-emu` | Azahar's config directory (`qt-config.ini`). |
 | `AZAHAR_LOG_PATH` | `/config/azahar.log` | Where Azahar's stdout/stderr is captured. |
 | `AZAHAR_STOP_WAIT` | `5` | SIGTERM grace before SIGKILL (no SIGTERM handler, process-group teardown only). |
+
+Azahar's directories are not configurable. Its config (`qt-config.ini`) lives in
+`$XDG_CONFIG_HOME/azahar-emu` and its user data (`sdmc/`, `nand/`) in
+`$XDG_DATA_HOME/azahar-emu`, falling back to `$HOME/.config` and
+`$HOME/.local/share`, then to `/config`. Azahar's command line names neither, so
+a knob there would move only the config the broker patches and the saves it
+dumps, not the ones the emulator uses. The broker exports both roots to the
+emulator it launches so the two always read the same trees.
 
 ## Eden
 

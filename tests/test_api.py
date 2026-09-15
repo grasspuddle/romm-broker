@@ -21,7 +21,7 @@ import pytest
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketState
 
-from webstation_broker import api, callback, saves, selkies, session, settings
+from webstation_broker import api, callback, saves, screenshot, selkies, session, settings
 from webstation_broker.app import create_app
 from webstation_broker.emulators import base, rpcs3, shadps4
 
@@ -945,23 +945,111 @@ def test_state_file_read_failure_reports_no_path_or_exception_text(
     assert str(blocker) not in response.text
 
 
-def test_state_screenshot_read_failure_reports_no_path_or_exception_text(
+def test_a_state_save_captures_the_frame_before_the_save_and_serves_it(
     client: TestClient,
     broker_dirs: dict[str, Path],
     fake_emulator: list[FakeEmulator],
-    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A state-screenshot read failure reports no path or exception text."""
+    """The frame is taken before the save is sent and served once the state is confirmed."""
     _activate(client, broker_dirs)
-    blocker = tmp_path / "blocker"
-    blocker.write_bytes(b"not a directory")
-    fake_emulator[0].state_screenshot_path = lambda: blocker / "shot.png"
+    order: list[str] = []
+    monkeypatch.setattr(screenshot, "capture_frame", lambda: order.append("capture") or b"\x89PNG frame")
+    real_save = fake_emulator[0].save_state
+    fake_emulator[0].save_state = lambda slot: order.append("save") or real_save(slot)
 
+    assert client.post(f"{API}/session/save-state", json={"slot": 0}).status_code == 200
     response = client.get(f"{API}/session/state-screenshot")
 
-    assert response.status_code == 500
-    assert response.json()["detail"] == "could not read screenshot"
-    assert str(blocker) not in response.text
+    assert order == ["capture", "save"]
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "image/png"
+    assert response.content == b"\x89PNG frame"
+
+
+def test_a_failed_state_save_keeps_the_previous_frame(
+    client: TestClient,
+    broker_dirs: dict[str, Path],
+    fake_emulator: list[FakeEmulator],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A save that fails leaves the frame of the state actually on disk in place."""
+    _activate(client, broker_dirs)
+    fake_emulator[0].state_screenshot = b"earlier frame"
+    monkeypatch.setattr(screenshot, "capture_frame", lambda: b"new frame")
+    fake_emulator[0].save_state = lambda slot: False
+
+    assert client.post(f"{API}/session/save-state", json={"slot": 0}).json()["saved"] is False
+
+    assert client.get(f"{API}/session/state-screenshot").content == b"earlier frame"
+
+
+def test_a_save_whose_capture_failed_serves_no_frame(
+    client: TestClient,
+    broker_dirs: dict[str, Path],
+    fake_emulator: list[FakeEmulator],
+) -> None:
+    """A confirmed save with no frame answers 404 rather than an older save's frame."""
+    _activate(client, broker_dirs)
+    fake_emulator[0].state_screenshot = b"earlier frame"
+
+    client.post(f"{API}/session/save-state", json={"slot": 0})
+    response = client.get(f"{API}/session/state-screenshot")
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "no state screenshot for slot"
+
+
+def test_exit_with_a_save_captures_the_frame_and_keeps_it_for_the_pull(
+    client: TestClient,
+    broker_dirs: dict[str, Path],
+    fake_emulator: list[FakeEmulator],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The exit save gets a frame too, readable off the retired emulator afterwards."""
+    _activate(client, broker_dirs)
+    monkeypatch.setattr(screenshot, "capture_frame", lambda: b"exit frame")
+
+    client.post(f"{API}/session/exit")
+
+    assert client.get(f"{API}/session/state-screenshot").content == b"exit frame"
+
+
+def test_exit_without_a_save_takes_no_frame(
+    client: TestClient,
+    broker_dirs: dict[str, Path],
+    fake_emulator: list[FakeEmulator],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An exit that writes no state has nothing to picture, so the capture is skipped."""
+    _activate(client, broker_dirs)
+    calls: list[str] = []
+    monkeypatch.setattr(screenshot, "capture_frame", lambda: calls.append("capture") or b"frame")
+
+    client.post(f"{API}/session/exit", params={"save": "0"})
+
+    assert calls == []
+    assert client.get(f"{API}/session/state-screenshot").status_code == 404
+
+
+def test_an_exit_whose_state_save_failed_serves_no_frame(
+    client: TestClient,
+    broker_dirs: dict[str, Path],
+    fake_emulator: list[FakeEmulator],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A frame is only bound to a state that was actually written."""
+    _activate(client, broker_dirs)
+    monkeypatch.setattr(screenshot, "capture_frame", lambda: b"frame")
+    fake_emulator[0].save_and_exit = lambda slot: fake_emulator[0].stop() or {
+        "state_saved": False,
+        "state_slot": None,
+        "state_file": None,
+    }
+
+    client.post(f"{API}/session/exit")
+
+    assert client.get(f"{API}/session/state-screenshot").status_code == 404
 
 
 def test_state_file_write_failure_reports_no_path_or_exception_text(
@@ -2381,18 +2469,13 @@ async def test_the_screenshot_body_is_read_before_the_session_lock_is_released(
     client: TestClient,
     broker_dirs: dict[str, Path],
     fake_emulator: list[FakeEmulator],
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The state screenshot is read under the lock the same way the state is."""
+    """The state screenshot is served under the lock the same way the state is."""
     _activate(client, broker_dirs)
-    shot = tmp_path / "GAME.03.png"
-    shot.write_bytes(b"png bytes")
-    monkeypatch.setattr(
-        type(fake_emulator[0]), "state_screenshot_path", lambda self: shot
-    )
+    fake_emulator[0].state_screenshot = b"png bytes"
 
     response = await api.get_state_screenshot()
-    shot.unlink()
 
     assert response.body == b"png bytes"
+    assert api._SESSION_LOCK.acquire(blocking=False)
+    api._SESSION_LOCK.release()

@@ -6,9 +6,6 @@ patch an INI, and `-s` loads a state file by path at boot, so a resume that
 is already on disk never depends on a keystroke landing. What is left is the
 mid-session save, which only the hotkey can reach; the broker runs as the
 same user as the session, so xdotool talks to Xwayland directly.
-
-Save states are not thumbnailed here. The frame comes off the streamed canvas
-in the browser, which is the only capture that cannot stall the emulator.
 """
 
 import logging
@@ -21,7 +18,7 @@ from pathlib import Path
 from threading import Thread
 from typing import Any, Optional
 
-from .base import Emulator, base_launch_env
+from .base import Emulator, base_launch_env, xdg_config_dir, xdg_data_dir
 
 log = logging.getLogger(__name__)
 
@@ -31,12 +28,27 @@ ROM_ROOT = Path(os.environ.get("ROM_ROOT", "/romm"))
 A resolved disc image must sit under it; candidates resolving outside are discarded.
 """
 
-USER_DIR = Path(os.environ.get("DOLPHIN_USER_DIR", "/config/.local/share/dolphin-emu"))
-"""Dolphin's user directory, passed with `-u` (env `DOLPHIN_USER_DIR`)."""
+USER_DIR = xdg_data_dir("dolphin-emu")
+"""Dolphin's data directory: states, memory cards and the NAND.
+
+Dolphin's own XDG default rather than a directory pinned with `-u`, because
+`-u` also drags the config into `<dir>/Config`, where the desktop launcher,
+which passes none, would never read it.
+
+Not configurable, and deliberately: the broker and the emulator have to agree
+on this path or the broker archives a directory nothing writes to, so `launch`
+exports the root it resolved to rather than leaving the child to resolve its
+own. A knob here could only ever break that agreement.
+"""
 STATE_DIR = USER_DIR / "StateSaves"
 """Directory Dolphin writes its `.sNN` save states into."""
-CONFIG_DIR = USER_DIR / "Config"
-"""Directory holding Dolphin's INI files, where the pad bindings are seeded."""
+CONFIG_DIR = xdg_config_dir("dolphin-emu")
+"""Dolphin's INI directory, where the pad bindings are seeded.
+
+Dolphin's own default, which is what the desktop launcher reads, so a pad a
+player rebinds in a desktop session is the same pad a broker launch gets. Not
+configurable, for the same reason as `USER_DIR`.
+"""
 DOLPHIN_LOG_PATH = Path(os.environ.get("DOLPHIN_LOG_PATH", "/config/dolphin.log"))
 """Log file the broker tails for this emulator (env `DOLPHIN_LOG_PATH`, default `/config/dolphin.log`)."""
 
@@ -233,8 +245,30 @@ def _pick_rom_file(candidates: Iterable[Path], base: Path) -> Optional[Path]:
     return min(ranked)[4]
 
 
+_PAD_NAME = os.environ.get("DOLPHIN_PAD_NAME", "Xbox 360 Controller")
+"""The selkies virtual pad's name as Dolphin's SDL backend presents it (env `DOLPHIN_PAD_NAME`).
+
+Dolphin's `SDL/{index}/{name}` binding runs the device through SDL's game
+controller mapping database, which reports `Xbox 360 Controller` for this
+pad's GUID; that differs from the raw joystick name (`Microsoft X-Box 360
+pad`) the interposer's other backends, like evdev, still show, so the two
+must not be confused.
+"""
+
+_STALE_PAD_NAMES = frozenset({"Microsoft X-Box 360 pad"})
+"""Pad names earlier releases seeded that an `SDL/{index}/{name}` binding never matches.
+
+These came from the kernel (the raw `JSIOCGNAME` joystick name), which is what
+the evdev backend shows, not from SDL's controller mapping database, which is
+what the SDL backend binds against. A container carrying one has four pads
+bound to a device that does not exist, and nothing in the UI says so.
+"""
+
+_PAD_DEVICE_RE = re.compile(r"^(Device\s*=\s*SDL/\d+/)(.+?)[ \t]*$", re.MULTILINE)
+"""Matches a `Device = SDL/<index>/<name>` line, capturing the prefix and the name."""
+
 _GCPAD_TEMPLATE = """[GCPad{n}]
-Device = SDL/{i}/Microsoft X-Box 360 pad
+Device = SDL/{i}/{pad_name}
 Buttons/A = `Button E`
 Buttons/B = `Button S`
 Buttons/X = `Button N`
@@ -267,20 +301,53 @@ default binding for one, so an unconfigured container has no usable pad.
 """
 
 
+def _heal_gcpad(path: Path) -> None:
+    """Repoint pads bound to a name SDL never matches at `_PAD_NAME`.
+
+    Only `Device` lines naming one of `_STALE_PAD_NAMES` are rewritten; a
+    device a player picked themselves, and every button mapping, is left
+    alone. Without this the seed-once rule below would strand every container
+    seeded before the name was corrected: the file is there, so nothing
+    rewrites it, and the pads stay dead until someone edits it by hand.
+
+    Args:
+        path: The `GCPadNew.ini` to repair in place.
+    """
+
+    def repoint(match: re.Match[str]) -> str:
+        if match.group(2) in _STALE_PAD_NAMES:
+            return match.group(1) + _PAD_NAME
+        return match.group(0)
+
+    try:
+        text = path.read_text()
+        healed = _PAD_DEVICE_RE.sub(repoint, text)
+        if healed == text:
+            return
+        path.write_text(healed)
+        log.info("repointed the stale pad bindings in %s at %r", path, _PAD_NAME)
+    except OSError as exc:
+        log.warning("could not repair the pad bindings at %s: %s", path, exc)
+
+
 def _seed_gcpad() -> None:
-    """Write the pad bindings for four pads once, if the file is not already there.
+    """Write the pad bindings for four pads, or repair a stale seed already on disk.
 
     Seeded rather than patched so a player's own remapping, which Dolphin
-    writes back to this same file, survives every later launch. A write
-    failure is logged, not raised.
+    writes back to this same file, survives every later launch; the one thing
+    an existing file is touched for is `_heal_gcpad`. A write failure is
+    logged, not raised.
     """
     path = CONFIG_DIR / "GCPadNew.ini"
     if path.exists():
+        _heal_gcpad(path)
         return
     try:
         CONFIG_DIR.mkdir(parents=True, exist_ok=True)
         path.write_text(
-            "".join(_GCPAD_TEMPLATE.format(n=i + 1, i=i) for i in range(4))
+            "".join(
+                _GCPAD_TEMPLATE.format(n=i + 1, i=i, pad_name=_PAD_NAME) for i in range(4)
+            )
         )
         log.info("seeded %s", path)
     except OSError as exc:
@@ -855,11 +922,16 @@ class Dolphin(Emulator):
         env = base_launch_env()
         # Qt would pick Wayland, where the save hotkey could never be injected.
         env["QT_QPA_PLATFORM"] = "xcb"
+        # Nothing on the command line names Dolphin's directories any more, so
+        # the child resolves them itself. Export the roots the broker resolved
+        # so the two cannot land anywhere different: the seeded pad bindings
+        # and the archived states are only in the right place if they agree.
+        env["XDG_DATA_HOME"] = str(USER_DIR.parent)
+        env["XDG_CONFIG_HOME"] = str(CONFIG_DIR.parent)
 
         cmd = [
             binary,
             "-b",
-            "-u", str(USER_DIR),
             "-v", VIDEO_BACKEND,
             "-C", "Dolphin.Display.Fullscreen=True",
             "-C", "Dolphin.Interface.ConfirmStop=False",
@@ -882,7 +954,13 @@ class Dolphin(Emulator):
             cmd += ["-s", str(resume_path)]
 
         cmd += ["-e", str(rom_path)]
-        log.info("launching dolphin (rom=%s, resume_slot=%s)", rom_path, resume_slot)
+        log.info(
+            "launching dolphin (rom=%s, resume_slot=%s, config=%s, user=%s)",
+            rom_path,
+            resume_slot,
+            CONFIG_DIR,
+            USER_DIR,
+        )
         self._spawn(cmd, env)
 
         # RomM pushes its resume pick after activate returns, so a slot that was
