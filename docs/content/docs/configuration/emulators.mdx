@@ -45,8 +45,6 @@ Timings are in seconds.
 | Env var | Default | Purpose |
 | --- | --- | --- |
 | `DOLPHIN_BIN` | `dolphin-emu` | Dolphin binary. |
-| `DOLPHIN_USER_DIR` | `$XDG_DATA_HOME/dolphin-emu` | Dolphin's data directory (`StateSaves/`, `GC/`, `Wii/`). |
-| `DOLPHIN_CONFIG_DIR` | `$XDG_CONFIG_HOME/dolphin-emu` | Dolphin's INI directory, shared with the desktop launcher so a pad rebound in a desktop session applies to broker launches too. |
 | `DOLPHIN_LOG_PATH` | `/config/dolphin.log` | Where Dolphin's stdout/stderr is captured. |
 | `DOLPHIN_STATE_SLOT` | `1` | The slot Dolphin works in (Shift+F`n` saves it, F`n` loads it). |
 | `DOLPHIN_STATE_WAIT` | `20.0` | How long a save state has to land on disk after the save hotkey. |
@@ -54,6 +52,15 @@ Timings are in seconds.
 | `DOLPHIN_RESUME_LOAD_SETTLE` | `5.0` | How long the window has to be up before the load hotkey is sent. |
 | `DOLPHIN_VIDEO_BACKEND` | `OGL` | Video backend pinned at launch; OGL over Vulkan because RADV on the integrated AMD parts has been the less reliable one. |
 | `DOLPHIN_PAD_NAME` | `Xbox 360 Controller` | The selkies virtual pad's name as Dolphin's SDL backend presents it, used in the seeded `GCPadNew.ini` bindings. |
+
+Dolphin's directories are not configurable. Its config (`GCPadNew.ini` and the
+rest) lives in `$XDG_CONFIG_HOME/dolphin-emu`, its data (`StateSaves/`, `GC/`,
+`Wii/`) in `$XDG_DATA_HOME/dolphin-emu`, falling back to `$HOME/.config` and
+`$HOME/.local/share` when those are unset, and to `/config` when `HOME` is unset
+too. The broker exports the roots it resolved to the emulator it launches, so
+the two always read the same files. The desktop launcher reads them as well,
+which is why a pad rebound in a desktop Dolphin session applies to broker
+launches too.
 
 ## Cemu
 

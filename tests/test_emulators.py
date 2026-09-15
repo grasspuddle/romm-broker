@@ -104,6 +104,49 @@ def test_an_emulator_without_a_launcher_core_reports_none() -> None:
     assert emulators.get_emulator("ppsspp").archive_core() is None
 
 
+# ---- xdg_config_dir / xdg_data_dir ----
+
+
+def test_an_absolute_xdg_root_is_used_as_it_stands(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An absolute XDG root takes the app directory directly underneath it."""
+    monkeypatch.setenv("XDG_CONFIG_HOME", "/custom/config")
+    monkeypatch.setenv("XDG_DATA_HOME", "/custom/data")
+
+    assert base.xdg_config_dir("dolphin-emu") == Path("/custom/config/dolphin-emu")
+    assert base.xdg_data_dir("dolphin-emu") == Path("/custom/data/dolphin-emu")
+
+
+def test_an_unset_xdg_root_falls_back_under_home(monkeypatch: pytest.MonkeyPatch) -> None:
+    """With no XDG root set, the spec's `$HOME`-relative defaults are used."""
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    monkeypatch.delenv("XDG_DATA_HOME", raising=False)
+    monkeypatch.setenv("HOME", "/home/testuser")
+
+    assert base.xdg_config_dir("Cemu") == Path("/home/testuser/.config/Cemu")
+    assert base.xdg_data_dir("Cemu") == Path("/home/testuser/.local/share/Cemu")
+
+
+def test_a_relative_xdg_root_is_ignored(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A relative XDG root is ignored, as the spec requires, not resolved against the cwd."""
+    monkeypatch.setenv("XDG_CONFIG_HOME", "relative/path")
+    monkeypatch.setenv("HOME", "/home/testuser")
+
+    assert base.xdg_config_dir("azahar-emu") == Path("/home/testuser/.config/azahar-emu")
+
+
+def test_no_home_at_all_falls_back_to_the_container_home(monkeypatch: pytest.MonkeyPatch) -> None:
+    """With neither the XDG root nor `HOME` set, the container's own `/config` is used.
+
+    s6 hands a service a near-empty environment, so the broker can genuinely
+    start with no `HOME`; resolving to a relative path there would put the
+    seeded config wherever the service happened to be started from.
+    """
+    monkeypatch.delenv("XDG_DATA_HOME", raising=False)
+    monkeypatch.delenv("HOME", raising=False)
+
+    assert base.xdg_data_dir("dolphin-emu") == Path("/config/.local/share/dolphin-emu")
+
+
 @pytest.mark.parametrize("name", sorted(emulators.REGISTRY))
 def test_a_memory_card_comes_with_everything_the_card_routes_need(name: str) -> None:
     """A memory card comes with everything the card routes need."""

@@ -81,6 +81,50 @@ variant, which never starts in Wayland mode.
 """
 
 
+def _xdg_dir(app: str, var: str, fallback: str) -> Path:
+    """Resolve one XDG directory the way a Linux app following the spec does.
+
+    A relative `XDG_*` value is ignored, as the spec requires, rather than
+    resolved against the working directory the broker happens to have.
+
+    Args:
+        app: The application's own directory name under the XDG root.
+        var: The XDG environment variable to honour when set to an absolute path.
+        fallback: The path under `$HOME` used otherwise, such as `.config`.
+
+    Returns:
+        The app's directory under the chosen root.
+    """
+    xdg = os.environ.get(var)
+    if xdg and os.path.isabs(xdg):
+        return Path(xdg) / app
+    return Path(os.environ.get("HOME", "/config")) / fallback / app
+
+
+def xdg_config_dir(app: str) -> Path:
+    """Resolve an app's config directory: `$XDG_CONFIG_HOME/<app>`, else `$HOME/.config/<app>`.
+
+    Args:
+        app: The application's own directory name, such as `dolphin-emu`.
+
+    Returns:
+        The app's config directory.
+    """
+    return _xdg_dir(app, "XDG_CONFIG_HOME", ".config")
+
+
+def xdg_data_dir(app: str) -> Path:
+    """Resolve an app's data directory: `$XDG_DATA_HOME/<app>`, else `$HOME/.local/share/<app>`.
+
+    Args:
+        app: The application's own directory name, such as `dolphin-emu`.
+
+    Returns:
+        The app's data directory.
+    """
+    return _xdg_dir(app, "XDG_DATA_HOME", ".local/share")
+
+
 def base_launch_env() -> dict[str, str]:
     """Build the environment apps are launched into.
 

@@ -311,21 +311,35 @@ def test_a_launch_over_another_games_state_boots_without_it(
     assert spawned and "-s" not in spawned[0]
 
 
-def test_a_launch_leaves_the_config_directory_to_dolphin(
+def test_a_launch_sends_dolphin_to_the_directories_the_broker_uses(
     state_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """No -u, so a launch and the desktop session share one config directory."""
+    """The spawned emulator resolves the same config and data directories the broker seeds and reads.
+
+    Nothing on the command line names them any more, so this is the whole of
+    the agreement: if the exported XDG roots ever stop matching, the pad
+    bindings are seeded into a file Dolphin never opens, which is exactly the
+    bug that made a rebound controller work on the desktop and nowhere else.
+    """
+    monkeypatch.setattr(dolphin, "CONFIG_DIR", tmp_path / "cfg" / "dolphin-emu")
+    monkeypatch.setattr(dolphin, "USER_DIR", tmp_path / "data" / "dolphin-emu")
     rom = _disc(tmp_path / "Game.iso", b"GXCE01")
-    spawned: list[list[str]] = []
+    spawned: list[tuple[list[str], dict[str, str]]] = []
     monkeypatch.setattr(dolphin, "_seed_gcpad", lambda: None)
     monkeypatch.setattr(dolphin, "Thread", lambda **kwargs: type("T", (), {"start": lambda s: None})())
-    monkeypatch.setattr(dolphin.Dolphin, "_spawn", lambda self, cmd, env: spawned.append(cmd))
+    monkeypatch.setattr(
+        dolphin.Dolphin, "_spawn", lambda self, cmd, env: spawned.append((cmd, env))
+    )
 
     dolphin.Dolphin().launch(rom, 1)
 
+    assert spawned
+    cmd, env = spawned[0]
     # -u would move the config under the user dir, where the desktop launcher,
     # which passes none, would never read the pad a player just rebound.
-    assert spawned and "-u" not in spawned[0]
+    assert "-u" not in cmd
+    assert Path(env["XDG_CONFIG_HOME"]) / "dolphin-emu" == dolphin.CONFIG_DIR
+    assert Path(env["XDG_DATA_HOME"]) / "dolphin-emu" == dolphin.USER_DIR
 
 
 def test_a_state_still_open_by_the_emulator_is_not_a_finished_write(state_dir: Path) -> None:
@@ -696,3 +710,46 @@ def test_seed_gcpad_does_not_overwrite_an_existing_file(
     dolphin._seed_gcpad()
 
     assert path.read_text() == "custom"
+
+
+def test_seed_gcpad_repoints_pads_bound_to_a_name_sdl_never_matches(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A container seeded with the old kernel-side pad name has its bindings repaired in place."""
+    config_dir = tmp_path / "Config"
+    config_dir.mkdir()
+    monkeypatch.setattr(dolphin, "CONFIG_DIR", config_dir)
+    monkeypatch.setattr(dolphin, "_PAD_NAME", "Xbox 360 Controller")
+    path = config_dir / "GCPadNew.ini"
+    path.write_text(
+        "[GCPad1]\nDevice = SDL/0/Microsoft X-Box 360 pad\nButtons/A = `Button E`\n"
+        "[GCPad2]\nDevice = SDL/1/Microsoft X-Box 360 pad\n"
+    )
+
+    dolphin._seed_gcpad()
+
+    healed = path.read_text()
+    assert "Device = SDL/0/Xbox 360 Controller" in healed
+    assert "Device = SDL/1/Xbox 360 Controller" in healed
+    # Only the device line is the broker's business; the mapping is the player's.
+    assert "Buttons/A = `Button E`" in healed
+
+
+def test_seed_gcpad_leaves_a_device_the_player_chose_alone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A pad rebound to any other device, on any backend, survives the repair pass."""
+    config_dir = tmp_path / "Config"
+    config_dir.mkdir()
+    monkeypatch.setattr(dolphin, "CONFIG_DIR", config_dir)
+    monkeypatch.setattr(dolphin, "_PAD_NAME", "Xbox 360 Controller")
+    path = config_dir / "GCPadNew.ini"
+    chosen = (
+        "[GCPad1]\nDevice = evdev/0/Microsoft X-Box 360 pad\n"
+        "[GCPad2]\nDevice = SDL/1/8BitDo Pro 2\n"
+    )
+    path.write_text(chosen)
+
+    dolphin._seed_gcpad()
+
+    assert path.read_text() == chosen
