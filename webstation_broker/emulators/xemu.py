@@ -813,7 +813,11 @@ class Xemu(Emulator):
     the activate restored lands in a staging directory next to the image and
     is injected into E:/UDATA and E:/TDATA before boot; after exit the
     launched title's trees are extracted back into the staging directory for
-    the standard dump. There are no save states: the image is kept raw so
+    the standard dump. The image outlives the session, so the launched title's
+    trees on it are emptied before the injection: the injection only writes
+    what the archive names, and anything it does not overwrite would otherwise
+    be the last player's, both readable in game and swept into this player's
+    dump (`_clear_stale_saves`). There are no save states: the image is kept raw so
     pyfatx can read it, and a raw image cannot hold QEMU internal snapshots,
     so `supports_states` stays off and a resume slot is logged and ignored.
 
@@ -827,7 +831,8 @@ class Xemu(Emulator):
         staging_dir: Host-side directory the dump and restore read and write.
         save_root: The image's parent directory, which the save subtrees hang off.
         save_subtrees: The staging directory name, scoping dump and restore to it.
-        clears_stale_saves: True; `prepare_restore` empties the staging dir.
+        clears_stale_saves: True; `prepare_restore` empties the staging dir and
+            `_clear_stale_saves` empties the title's trees on the image.
     """
 
     name = "xemu"
@@ -889,6 +894,95 @@ class Xemu(Emulator):
                       "was not flushed cleanly",
                       proc.pid, self.term_timeout, self.hdd_image)
             self._forced_exit = True
+
+    def _clear_stale_saves(self) -> Optional[int]:
+        """Pre-launch hook: empty the launched title's save trees on the image.
+
+        The HDD image outlives the session. `prepare_restore` empties the host
+        side staging directory, but nothing empties the image itself, and
+        `_inject_saves` only writes the files the incoming archive names. So
+        whatever the last player left under this title survives every file the
+        archive does not overwrite: readable by this player from inside the
+        game, and swept back out by `_extract_saves` at exit into this player's
+        archive, where it overwrites what RomM held for them.
+
+        The sweep is scoped to this title's directory under each top level save
+        directory, which is exactly what the exit extraction reads back, so
+        nothing this session can archive is left holding another session's
+        data. It stops there: another title's directory is not in this
+        session's dump, and the dashboard's own TDATA is what the image needs
+        to boot. Without a title id there is nothing to scope to and nothing is
+        cleared, which is safe here because that session archives nothing
+        either (see `_save_roots`).
+
+        The roots are resolved here rather than through `_save_roots` because
+        the two want opposite answers for the same disk. A top level directory
+        that is missing means the extraction cannot know the save set and has
+        to report a failure, while for a clear it means there is demonstrably
+        no save data to leak, which is a clean zero. Reusing it would make the
+        first session on a freshly formatted image look like a failed clear.
+
+        Only the files go. The directories stay, both because an empty tree
+        contributes nothing to an extraction and because `_inject_saves`
+        matches its path components against the directories already on the
+        disk, which is how an archive whose case differs still lands in place.
+
+        Returns:
+            The number of files removed, 0 when the title has no save tree
+            yet, or None when the partition would not open or a listing
+            failed, meaning the image may still hold another session's saves.
+        """
+        if not self._title_id:
+            log.warning("no disc title id for %s; there is nothing to scope a clear "
+                        "to, and this session archives nothing either", self.hdd_image)
+            return 0
+        fs = _open_fatx_e(self.hdd_image)
+        if fs is None:
+            log.error("could not open %s to clear the previous session's saves",
+                      self.hdd_image)
+            return None
+        removed = 0
+        failed = 0
+        try:
+            roots = []
+            for top in ("UDATA", "TDATA"):
+                if not _fatx_isdir(fs, f"/{top}"):
+                    continue
+                src = _fatx_find_dir(fs, f"/{top}", self._title_id)
+                if src is not None:
+                    roots.append(src)
+            for src in roots:
+                try:
+                    tree = list(fs.walk(src))
+                except (AssertionError, OSError) as exc:
+                    log.error("could not list %s on %s to clear it: %s",
+                              src, self.hdd_image, exc)
+                    return None
+                for root, _dirs, filenames in tree:
+                    for name in filenames:
+                        path = root.rstrip("/") + "/" + name
+                        try:
+                            fs.unlink(path)
+                        except (AssertionError, OSError) as exc:
+                            failed += 1
+                            log.error("could not clear the previous session's %s from "
+                                      "%s: %s", path, self.hdd_image, exc)
+                            continue
+                        removed += 1
+        finally:
+            # pyfatx has no close()/flush(); dropping the handle is the only
+            # way to trigger fatx_close_device and commit these deletes, so an
+            # exception on the way out must not skip it.
+            del fs
+        if failed:
+            log.error("%d of the previous session's save file(s) could not be cleared "
+                      "from %s; they would reach this player and this player's archive",
+                      failed, self.hdd_image)
+            return None
+        if removed:
+            log.info("pre-launch: cleared %d stale save file(s) for title %s from %s",
+                     removed, self._title_id, self.hdd_image)
+        return removed
 
     def _inject_saves(self) -> Optional[int]:
         """Pre-launch hook: write every staged file into the FATX E partition.
@@ -1202,6 +1296,16 @@ class Xemu(Emulator):
                 self._restore_failed = True
                 log.error("pre-launch: HDD image %s is not raw; the restored saves "
                           "were NOT injected", self.hdd_image)
+            elif self._clear_stale_saves() is None:
+                # The image may still hold the last session's saves under this
+                # title, and the exit extraction cannot tell them from this
+                # player's. Archiving that set would write another player's
+                # saves over what RomM holds for this one, so the session runs
+                # without injecting and exits without archiving.
+                self._restore_failed = True
+                log.error("pre-launch: the previous session's saves could not be "
+                          "cleared from %s; this session will not archive over the "
+                          "player's saves at exit", self.hdd_image)
             else:
                 injected = self._inject_saves()
                 if injected is None:
