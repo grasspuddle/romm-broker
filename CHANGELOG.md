@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.8.3](https://github.com/romm-streaming/romm-broker/compare/v0.8.2...v0.8.3) (2026-09-15)
+
+
+### Bug Fixes
+
+* **cemu, azahar:** stop the directory knobs from desyncing broker and emulator ([df18695](https://github.com/romm-streaming/romm-broker/commit/df1869582253b0f3c20ad992a25ad2cb4e39b799))
+* **desktop:** close apps left open when the desktop session ends ([3953ef5](https://github.com/romm-streaming/romm-broker/commit/3953ef564e19054e841cbf851e5da49c4b5bb41f))
+* **desktop:** close tagged apps on every path that drops the pid record ([84cd20a](https://github.com/romm-streaming/romm-broker/commit/84cd20ad589c1758c5c07dbc474f7ff9fe79785d))
+* **dolphin:** repair pad bindings already seeded with the wrong name ([1f21ca7](https://github.com/romm-streaming/romm-broker/commit/1f21ca72630d82a24b6efa8558442fd1d5a9a7f5))
+* **dolphin:** seed GCPad bindings with the SDL-backend pad name ([f1f79a8](https://github.com/romm-streaming/romm-broker/commit/f1f79a89409c27f97deb7c243d682b430a745075))
+* **dolphin:** share one config directory with the desktop launcher ([50e981b](https://github.com/romm-streaming/romm-broker/commit/50e981b6819812f4a21457d08b7345dccd406ffc))
+* **room:** bound the pointer lock retries and split the two waits ([3ccb396](https://github.com/romm-streaming/romm-broker/commit/3ccb39699240b4c285bc4a4f8e7846bdf078fee6))
+* **room:** fall back to a manual copy when clipboard-write is blocked ([c11b1ff](https://github.com/romm-streaming/romm-broker/commit/c11b1ff56b5df7649a75730101bfaa6af768aaa9))
+
+
+### Documentation
+
+* cover pooling rules in the multi-container reverse-proxy section ([9f72079](https://github.com/romm-streaming/romm-broker/commit/9f720798339d6ad85d62dac1c2df8ce67ddbe22b))
+* drop the audio known-issue, fixed upstream in the current image ([691ee58](https://github.com/romm-streaming/romm-broker/commit/691ee582aaf82e2b72c8bbe70b7699660006b570))
+
 ## [0.8.2](https://github.com/romm-streaming/romm-broker/compare/v0.8.1...v0.8.2) (2026-09-14)
 
 
