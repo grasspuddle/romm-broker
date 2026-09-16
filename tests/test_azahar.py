@@ -497,6 +497,47 @@ def test_prepare_restore_stops_the_emulator(monkeypatch: pytest.MonkeyPatch) -> 
     assert stopped == [True]
 
 
+# ---- clear_working_slot ----
+
+
+def test_the_clear_empties_every_declared_save_subtree(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Each of the SD and NAND save trees is emptied before a restore.
+
+    Azahar files a save under the title id alone, so the previous session's
+    saves sit exactly where this one's belong, and the restore only writes the
+    members the incoming archive names.
+    """
+    monkeypatch.setattr(azahar.Azahar, "save_root", tmp_path)
+    stale = []
+    for subtree in azahar.Azahar.save_subtrees:
+        save = tmp_path / subtree / "00040000" / "00081e00" / "save.bin"
+        save.parent.mkdir(parents=True)
+        save.write_bytes(b"last player")
+        stale.append(save)
+
+    azahar.Azahar().clear_working_slot()
+
+    assert not any(s.exists() for s in stale)
+    # The trees themselves are where the restore extracts to.
+    assert all((tmp_path / s).is_dir() for s in azahar.Azahar.save_subtrees)
+
+
+def test_the_clear_leaves_the_rest_of_the_data_root_alone(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Config, cache and system titles are container setup, not one session's data."""
+    monkeypatch.setattr(azahar.Azahar, "save_root", tmp_path)
+    config = tmp_path / "config" / "qt-config.ini"
+    config.parent.mkdir(parents=True)
+    config.write_bytes(b"settings")
+
+    azahar.Azahar().clear_working_slot()
+
+    assert config.exists()
+
+
 # ---- _modified_title_saves / save_and_exit ----
 
 

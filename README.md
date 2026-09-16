@@ -1,11 +1,14 @@
 # romm-broker
 
 Session broker and collaboration interface for the RomM webstation container.
-The container hosts one play session at a time: a game is activated over REST,
-the broker launches the emulator (restoring save data if provided) and returns
-a token URL that lands on a collab room with the selkies stream iframed inside
-it. Exiting saves state, stops the emulator, and archives the session's save
-delta.
+The container runs one game session at a time. RomM activates a game over
+REST (a standard way for programs to talk to each other over the web); the
+broker then launches the emulator, restores your save data if there is any,
+and hands back a link with an access token built into it. That link opens a
+collab room with the selkies stream embedded right in the page (in an
+iframe, a window that shows one web page inside another). Exiting saves your
+game's state, stops the emulator, and archives the session's save delta (the
+save-data changes made during that session).
 
 **Documentation: https://romm-streaming.github.io/romm-broker/**
 
@@ -43,16 +46,18 @@ services:
 docker compose up -d
 ```
 
-`/dev/dri` is GPU passthrough for Intel/AMD. NVIDIA needs the container
-runtime *and* the `/dev/nvidia-modeset` node; without that node emulators
-render but never present, so the stream stays black. BIOS and firmware can
-also be pre-seeded with an optional volume mount instead of dragging files
-into the desktop; see [Running the container](https://romm-streaming.github.io/romm-broker/docs/container).
+`/dev/dri` gives the container access to an Intel or AMD graphics card (this
+is called GPU passthrough). NVIDIA cards need more: the container runtime
+*and* the `/dev/nvidia-modeset` device node. Without that device node, the
+emulator can draw each frame but can't display it, so the stream just stays
+black. You can also pre-load BIOS and firmware files with an optional volume
+mount, instead of copying them in by hand through the desktop; see
+[Running the container](https://romm-streaming.github.io/romm-broker/docs/container).
 
 Then point RomM at it: add a `webstation` container under
-`streaming.containers` in RomM's `config.yml`, matching the `SUBFOLDER` and
-`BROKER_SECRET` above, and open each emulator once from the desktop to
-install its BIOS/firmware and confirm controllers work.
+`streaming.containers` in RomM's `config.yml`, using the same `SUBFOLDER` and
+`BROKER_SECRET` values you set above. Then open each emulator once from the
+desktop to install its BIOS/firmware and make sure your controllers work.
 
 For the full walkthrough, including the `config.yml` example, NVIDIA GPU
 setup, reverse proxying the container behind RomM's own origin, and
@@ -63,6 +68,12 @@ per-emulator setup:
 | [Running the container](https://romm-streaming.github.io/romm-broker/docs/container) | the compose/CLI examples above in full, GPU details, first run |
 | [Reverse proxy](https://romm-streaming.github.io/romm-broker/docs/deployment/reverse-proxy) | serving the container from RomM's origin |
 | [Emulator setup](https://romm-streaming.github.io/romm-broker/docs/emulators/setup) | the one-time BIOS/firmware/controller setup each emulator needs |
+
+Or follow the [Quickstart guide](https://romm-streaming.github.io/romm-broker/docs/quickstart)
+on the docs site: the same walkthrough in order, with the pitfalls people
+actually hit called out as they come up, and a
+[Troubleshooting](https://romm-streaming.github.io/romm-broker/docs/troubleshooting)
+page if something still doesn't work.
 
 ## Documentation
 
@@ -121,13 +132,17 @@ cd docs && npm run generate && npm run dev
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the PR workflow.
 
 A session can stream a full desktop with a real terminal on it. Before
-exposing this beyond your own LAN, read [SECURITY.md](SECURITY.md).
+exposing this beyond your own LAN (your home network), read
+[SECURITY.md](SECURITY.md).
 
 ## Releases
 
-Versions are semver, cut by release-please off `master` from conventional
-commits (`feat:` bumps the minor, `fix:` the patch). Each release is
-consumable as a source tarball at
+Versions follow semver (semantic versioning: three numbers, major.minor.patch,
+where a bigger change bumps a more significant number). release-please cuts
+each release automatically from `master`, based on the commit messages:
+a `feat:` commit bumps the minor number, a `fix:` commit bumps the patch
+number. Each release is also available as a source tarball (a compressed
+download of the source code) at
 `https://github.com/romm-streaming/romm-broker/archive/refs/tags/vX.Y.Z.tar.gz`.
 See [Releases](https://romm-streaming.github.io/romm-broker/docs/releases) and
 [CHANGELOG.md](CHANGELOG.md).

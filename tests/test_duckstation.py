@@ -312,13 +312,43 @@ def test_clear_working_slot_wipes_every_leftover_resume_state(duckstation_dirs: 
     assert duckstation.SSTATE_DIR.is_dir()
 
 
-def test_clear_working_slot_leaves_unrelated_files_alone(duckstation_dirs: dict[str, Path]) -> None:
-    """Clearing the working slot leaves unrelated files alone."""
-    unrelated = _touch(duckstation.SSTATE_DIR / "notes.txt")
+def test_clear_working_slot_wipes_every_leftover_save(duckstation_dirs: dict[str, Path]) -> None:
+    """Nothing in a save subtree is another session's to inherit, whatever it is named."""
+    card = _touch(duckstation_dirs["data_dir"] / "memcards" / "shared_card_1.mcd")
+    unnamed = _touch(duckstation.SSTATE_DIR / "notes.txt")
+    nested = _touch(duckstation.SSTATE_DIR / "backup" / "SLUS-00001_resume.sav")
 
     duckstation.Duckstation().clear_working_slot()
 
-    assert unrelated.exists()
+    assert not card.exists()
+    assert not unnamed.exists()
+    assert not nested.parent.exists()
+
+
+def test_clear_working_slot_keeps_a_card_the_memory_route_just_synced(
+    duckstation_dirs: dict[str, Path],
+) -> None:
+    """The card is hydrated before activate, so a clear that took it would drop it."""
+    card = _touch(duckstation_dirs["data_dir"] / "memcards" / "shared_card_1.mcd")
+    state = _touch(duckstation.SSTATE_DIR / "SLUS-00001_resume.sav")
+
+    duckstation.Duckstation().clear_working_slot(("memcards",))
+
+    assert card.exists()
+    assert not state.exists()
+
+
+def test_clear_working_slot_keeps_a_quarantined_state(duckstation_dirs: dict[str, Path]) -> None:
+    """A state set aside as possibly torn is evidence, and no resume can pick it up."""
+    aside = _touch(duckstation.SSTATE_DIR / "SLUS-00001_resume.sav.untrusted")
+    marker = _touch(duckstation.SSTATE_DIR / "SLUS-00001_resume.sav.untrusted.rom")
+    stale = _touch(duckstation.SSTATE_DIR / "SLUS-00002_resume.sav")
+
+    duckstation.Duckstation().clear_working_slot()
+
+    assert aside.exists()
+    assert marker.exists()
+    assert not stale.exists()
 
 
 def test_clear_working_slot_tolerates_a_file_it_cannot_delete(
@@ -336,7 +366,7 @@ def test_clear_working_slot_tolerates_a_file_it_cannot_delete(
         duckstation.Duckstation().clear_working_slot()  # must not raise
 
     assert stuck.exists()
-    assert "could not clear stale resume state" in caplog.text
+    assert "could not clear stale save data" in caplog.text
 
 
 # ── launch ───────────────────────────────────────────────────────────────
@@ -391,6 +421,63 @@ def test_launch_with_no_resume_slot_omits_statefile(
         "--",
         str(rom),
     ]
+
+
+def test_the_data_root_ignores_the_xdg_data_variable(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """With no XDG_CONFIG_HOME the root is DuckStation's own fallback, not the data home.
+
+    Probed against the container's build: a run with only XDG_DATA_HOME set
+    still wrote to `$HOME/.local/share/duckstation`, so following the data
+    variable would leave the broker patching a settings.ini nothing opens.
+    """
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+
+    assert duckstation._data_root() == tmp_path / "home" / ".local/share" / "duckstation"
+
+
+def test_the_data_root_follows_the_xdg_config_variable(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """DuckStation picks its root from XDG_CONFIG_HOME despite what the tree holds."""
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
+
+    assert duckstation._data_root() == tmp_path / "cfg" / "duckstation"
+
+
+def test_a_launch_sends_duckstation_to_the_data_root_the_broker_uses(
+    duckstation_dirs: dict[str, Path], rom_root: Path,
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The launch env lands DuckStation on the tree the broker patches and reads.
+
+    Nothing on the command line names the data root, so the exported root is
+    the only thing keeping the patched settings.ini and the resume state the
+    exit reads back in the same tree this launch writes.
+    """
+    data_dir = tmp_path / "xdg" / "duckstation"
+    monkeypatch.setattr(duckstation, "DATA_DIR", data_dir)
+    monkeypatch.setattr(duckstation.Duckstation, "stop", lambda self: None)
+    monkeypatch.setattr(duckstation, "_patch_ini", lambda: None)
+    spawned = {}
+
+    def fake_spawn(
+        self: duckstation.Duckstation, cmd: list[str], env: dict[str, str], stdin_pipe: bool = False
+    ) -> None:
+        spawned["env"] = env
+
+    monkeypatch.setattr(duckstation.Duckstation, "_spawn", fake_spawn)
+    rom = rom_root / "game.chd"
+    rom.write_bytes(b"")
+
+    duckstation.Duckstation().launch(rom, resume_slot=None)
+
+    monkeypatch.setenv("XDG_CONFIG_HOME", spawned["env"]["XDG_CONFIG_HOME"])
+    assert duckstation._data_root() == data_dir
 
 
 def test_launch_with_a_resume_slot_boots_the_newest_resume_state(

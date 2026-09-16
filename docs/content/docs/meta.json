@@ -2,6 +2,7 @@
   "title": "Documentation",
   "pages": [
     "index",
+    "quickstart",
     "---Running it---",
     "container",
     "configuration",
@@ -11,6 +12,8 @@
     "using-the-room",
     "api",
     "releases",
+    "---Help---",
+    "troubleshooting",
     "---",
     "developer"
   ]

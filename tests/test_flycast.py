@@ -191,6 +191,33 @@ def test_launch_stops_then_spawns(data_dir: Path, rom_root: Path, monkeypatch: p
     assert order == ["stop", "spawn"]
 
 
+def test_a_launch_sends_flycast_to_the_data_dir_the_broker_dumps(
+    data_dir: Path, rom_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The spawned emulator resolves the same data dir the broker archives and restores.
+
+    -config carries settings, not paths, so nothing on the command line names
+    the tree. The exported XDG root is the whole of the agreement, and a drift
+    means the VMU saves and the savestate are written somewhere the dump never
+    looks, which loses saves without reporting anything.
+    """
+    monkeypatch.setattr(flycast.Flycast, "stop", lambda self: None)
+    spawned: dict[str, dict[str, str]] = {}
+
+    def fake_spawn(
+        self: flycast.Flycast, cmd: list[str], env: dict[str, str], stdin_pipe: bool = False
+    ) -> None:
+        spawned["env"] = env
+
+    monkeypatch.setattr(flycast.Flycast, "_spawn", fake_spawn)
+    rom = rom_root / "game.chd"
+    rom.write_bytes(b"")
+
+    flycast.Flycast().launch(rom, resume_slot=None)
+
+    assert Path(spawned["env"]["XDG_DATA_HOME"]) / "flycast" == flycast.DATA_DIR
+
+
 def test_launch_with_no_resume_slot_omits_autoloadstate(
     data_dir: Path, rom_root: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

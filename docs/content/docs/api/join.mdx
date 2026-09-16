@@ -29,11 +29,14 @@ selkies drops that connection live.
 ## Invite links
 
 ```bash
-curl -k -X POST https://localhost:3001/streaming/api/session/invite \
-  -H 'X-Broker-Secret: <shared secret>' \
+curl -k -X POST 'https://localhost:3001/streaming/api/session/invite?token=<controller token>' \
   -H 'Content-Type: application/json' \
   -d '{ "permission": "participant" }'
 ```
+
+This route is gated by the controller token instead of the broker secret,
+since the room UI (which never holds the broker secret) is what actually
+calls it.
 
 Returns the session's shareable link for that permission (`?invite=...`
 rather than `?token=...`). It is the same link on every call, seats nobody by
@@ -55,8 +58,9 @@ link stop working when the session ends.
 The URL activate and join return is the collab room, a vanilla JS page that
 iframes the selkies stream and connects to the broker's websocket at
 `<SUBFOLDER>/ws/room`. It bootstraps from `GET /api/session/context?token=...`,
-which tells it who the token belongs to, what it may do, and the current
-roster. Over the websocket the room carries chat, webcam and microphone
-fanout, resolution changes, and gamepad and mouse/keyboard reassignment. The
-wire format is documented on the
+which tells it who the token belongs to and what it may do. The roster of
+who's in the room isn't part of that response. It arrives later, over the
+websocket's `state_update` broadcast. Over the websocket the room carries
+chat, webcam and microphone fanout, resolution changes, and gamepad and
+mouse/keyboard reassignment. The wire format is documented on the
 [`room` module](/docs/developer/reference/room) in the Python reference.

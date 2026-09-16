@@ -3,54 +3,60 @@ title: "Exit"
 description: "Ending a session with POST /api/session/exit: the final state, the save delta, and the upload to the callback origin."
 ---
 
-From RomM's stop button, or directly:
+You can trigger this from RomM's stop button, or call it directly:
 
 ```bash
 curl -k -X POST 'https://localhost:3001/streaming/api/session/exit?slot=10' \
   -H 'X-Broker-Secret: <shared secret>'
 ```
 
-Saves state (into the working slot, whatever `slot` says), stops the emulator,
-dumps the save delta, and uploads it to the callback origin as multipart form
-data: `POST {base_url}{BROKER_SAVE_UPLOAD_PATH}` with an `archive` file part
-(zip, `{session_id}-{timestamp}.zip`) plus `session_id`, `emulator`, and
-when the rom carried them `rom_id` / `rom_name` form fields. If activate
-supplied `callback.token`, it is sent as `Authorization: Bearer <token>`.
+This route saves a state (into the working slot, whatever `slot` says),
+stops the emulator, dumps whatever changed in the save data, and uploads it
+to the callback origin (the parent site that started the session, usually
+RomM). The upload is a standard multipart form POST: `POST
+{base_url}{BROKER_SAVE_UPLOAD_PATH}` with an `archive` file part (a zip named
+`{session_id}-{timestamp}.zip`) plus `session_id`, `emulator`, and, when the
+rom carried them, `rom_id` / `rom_name` form fields. If activate supplied a
+`callback.token`, it is sent as `Authorization: Bearer <token>`.
 
 Query parameters:
 
 | Parameter | Default | Purpose |
 | --- | --- | --- |
 | `token` | none | The controller token; lets the room UI exit without the secret. |
-| `slot` | `0` | The state slot to save into. Resolved to the emulator's working slot like everywhere else; the report echoes the one used. |
-| `save` | `true` | `false` (or `0`) stops without writing a state. The game's own save data is still flushed and shipped: not writing a state is the whole of "exit without saving", and discarding an in-game save the player made at a save point would be losing real progress. |
+| `slot` | `0` | The state slot to save into. Mapped to the emulator's working slot the same way other routes do it; the report echoes back the slot actually used. |
+| `save` | `true` | `false` (or `0`) stops without writing a state. The game's own save data is still flushed and shipped either way: skipping the state is the whole of "exit without saving", and discarding an in-game save the player made at a save point would mean losing real progress. |
 
-Slot 0 is a real slot on this broker, which is why `save` is a separate flag:
-there is no slot number left to spend on meaning "do not save".
+Slot 0 counts as a real slot on this broker, which is why `save` is a
+separate flag: there is no slot number left over to mean "do not save".
 
 ## The callback origin
 
-The callback base URL is derived from the activate request (the parent
-origin) unless the activate payload overrides it:
+The callback base URL (where the save archive gets uploaded) is worked out
+from the activate request's own origin, unless the activate payload
+overrides it:
 
 ```json
 "callback": { "base_url": "https://romm.example.com", "token": "<upload token>" }
 ```
 
-Same-origin deployments do not need to send one: the broker sits under the
-parent's `SUBFOLDER`, so the origin that served the activate request is the
-parent. The derivation reads `X-Forwarded-Proto` and `X-Forwarded-Host` when a
-proxy sets them, else `Host`.
+If your broker and RomM share the same origin, you don't need to send a
+`base_url` at all: the broker sits under the parent's `SUBFOLDER`, so the
+origin that served the activate request already is the parent. When a reverse
+proxy is involved, the broker reads that origin from the `X-Forwarded-Proto`
+and `X-Forwarded-Host` headers if the proxy sets them, or from `Host`
+otherwise.
 
 ## Report-only and failed uploads
 
-In dev mode (`BROKER_DEV_MODE=true`) the upload is skipped: the archive is
-written to `BROKER_EXPORT_DIR` and the exit report's `upload` object is
-`mode: "report-only"` with what would have been sent. Outside dev mode a
-failed upload also writes the archive there so nothing is lost, and the
-report's `upload` object carries `mode: "failed"` with the error. Either way the
-[export routes](/docs/api/archives) hand the archive back. The summary is posted
-to the room chat before the room is torn down.
+In dev mode (`BROKER_DEV_MODE=true`) nothing gets uploaded: the archive is
+written to `BROKER_EXPORT_DIR` on disk instead, and the exit report's
+`upload` object is `mode: "report-only"`, showing what would have been sent.
+Outside dev mode, if an upload fails, the archive is still written to that
+same directory so the save data isn't lost, and the report's `upload` object
+carries `mode: "failed"` with the error. Either way, the [export
+routes](/docs/api/archives) can hand the archive back to you. The room chat
+gets a summary message before the room is torn down.
 
 ## The exit report
 
@@ -60,11 +66,12 @@ The response carries everything the parent needs to file the session:
 | --- | --- |
 | `status` | `exited` |
 | `session_id`, `emulator`, `rom` | Echoed from activate. |
-| `state_saved`, `state_slot`, `state_file` | Whether a final state was written, into which slot, and its filename. `state_saved` is `false` with `save=0`; the file is then fetchable through the state-file GET until the next activate. |
-| `save_dump` | The delta that was zipped: the archive name and size and the list of `files` with their paths relative to the save root. |
-| `upload` | `mode` of `uploaded`, `failed` or `report-only`, with the target `url`, the HTTP status, and on failure the `error` and the `path` the archive was written to. |
+| `state_saved`, `state_slot`, `state_file` | Whether a final state was saved, which slot it went into, and its filename. `state_saved` is `false` when you passed `save=0`; you can still fetch that file through the state-file GET route until the next activate. |
+| `save_dump` | What got zipped up: the archive's name and size, plus the list of `files` with their paths relative to the save root. |
+| `upload` | The `mode` (`uploaded`, `failed`, `report-only`, or `skipped` - the last when the save dump succeeded but there were no save changes to upload), the target `url`, the HTTP status, and, if it failed, the `error` message and the `path` the archive was written to. |
 
-After the report the room websocket is closed, the token map pushed to selkies
-is emptied so every stream disconnects, and the session is retired. The
-emulator object outlives it just long enough for the state-file and screenshot
-GETs to answer.
+After the report goes out, the room's websocket connection closes, the token
+map pushed to selkies (the streaming layer) is emptied so every stream
+disconnects, and the session is retired. The emulator object sticks around
+just long enough afterward for the state-file and screenshot GET requests to
+still answer.

@@ -372,7 +372,7 @@ class Xenia(Emulator):
                 targets.extend(_title_save_dirs(title))
         return targets
 
-    def clear_working_slot(self) -> None:
+    def clear_working_slot(self, excluded: tuple[str, ...] = ()) -> None:
         """Drop the previous session's saved games before the archive restore.
 
         The restore only writes the members this player's archive names, so a
@@ -385,6 +385,10 @@ class Xenia(Emulator):
         the save paths are keyed by has to survive for the next launch to sign
         in at all, and config, cache and shader dumps sit beside the content
         tree; none of that is a player's data.
+
+        Args:
+            excluded: Subtrees carried by the whole-card routes. Xenia names no
+                memory card subtree, so this is always empty.
         """
         cleared = 0
         for entry in self._stale_save_dirs():

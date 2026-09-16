@@ -277,6 +277,33 @@ def test_launch_boots_the_rom_fullscreen(
     assert ini_path.exists()
 
 
+def test_a_launch_sends_eden_to_the_directories_the_broker_uses(
+    ini_path: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The spawned emulator resolves the same config and data roots the broker writes and reads.
+
+    Nothing on Eden's command line names either one, so the exported XDG roots
+    are the whole of the agreement. Let them drift and the broker patches a
+    qt-config.ini Eden never opens and dumps a NAND it never wrote to, which
+    loses saves without reporting anything.
+    """
+    monkeypatch.setattr(eden, "CONFIG_DIR", tmp_path / "cfg" / "eden")
+    monkeypatch.setattr(eden, "DATA_DIR", tmp_path / "data" / "eden")
+    spawned: dict[str, dict[str, str]] = {}
+    monkeypatch.setattr(
+        eden.Eden,
+        "_spawn",
+        lambda self, cmd, env, stdin_pipe=False: spawned.update(env=env),
+    )
+    rom = _touch(tmp_path / "game.xci")
+
+    eden.Eden().launch(rom, resume_slot=None)
+
+    env = spawned["env"]
+    assert Path(env["XDG_CONFIG_HOME"]) / "eden" == eden.CONFIG_DIR
+    assert Path(env["XDG_DATA_HOME"]) / "eden" == eden.DATA_DIR
+
+
 def test_launch_records_the_session_baseline(
     ini_path: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

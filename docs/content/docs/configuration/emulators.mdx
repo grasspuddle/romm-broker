@@ -3,11 +3,14 @@ title: "Emulator settings"
 description: "The environment variables each launcher reads, grouped by emulator. Paths default to where the emulator keeps its data inside the container."
 ---
 
-Each launcher reads its own variables at import time. Paths default to where
-the emulator itself keeps its data inside the container (`HOME` is `/config`,
-and `XDG_CONFIG_HOME` / `XDG_DATA_HOME` are honoured where the emulator
-honours them), so none of these need setting unless the image layout changes.
-Timings are in seconds.
+Each emulator reads its settings once, when the broker starts up. Every path
+below defaults to wherever that emulator normally keeps its own data inside
+the container. `HOME` is set to `/config`, and the broker also sets
+`XDG_CONFIG_HOME` and `XDG_DATA_HOME` (the standard Linux folders for an
+app's settings and data) for the emulators that actually use them. That means
+you shouldn't need to change any of these unless you've altered how the
+container's folders are laid out. All the timing values in the tables below
+are in seconds.
 
 ## Shared
 
@@ -26,19 +29,37 @@ Timings are in seconds.
 | `PCSX2_STATE_SLOT` | `10` | The slot PCSX2 works in; 10 is its own autosave slot, which the per-emulator broker also used. |
 | `PCSX2_SLOT1_CARD` | `romm-slot1` | Name of the Slot 1 folder memory card the broker owns (a directory, no `.ps2` extension). |
 | `PCSX2_LOG_PATH` | `/config/pcsx2-qt.log` | Where PCSX2's stdout/stderr is captured. |
-| `SSTATE_DIR` | `/config/.config/PCSX2/sstates` | Where PCSX2 writes save states. |
 | `PINE_WAIT` | `20.0` | How long a save state has to land on disk after the PINE save command. |
 | `RESUME_LOAD_WAIT` | `90.0` | How long a resume load waits for PCSX2 to report a running game. |
 | `RESUME_LOAD_SETTLE` | `3.0` | How long the game has to be running before the resume load fires. |
+
+You can't change where PCSX2 keeps its data. It stores everything
+(`inis/PCSX2.ini`, `sstates/`, `memcards/`) in one folder, and PCSX2 decides
+that folder for itself: `$XDG_CONFIG_HOME/PCSX2` first, then
+`$HOME/.config/PCSX2`, then `/config/.config/PCSX2` as a last resort. There's
+no PCSX2 command-line option for this, so an env var here would only move the
+copy the broker reads and writes, not the folder PCSX2 actually uses. Instead,
+the broker works out which folder PCSX2 will pick and passes that same path to
+it, so both sides always agree.
 
 ## DuckStation
 
 | Env var | Default | Purpose |
 | --- | --- | --- |
 | `DUCKSTATION_BIN` | `/opt/duckstation/AppRun` | DuckStation binary. |
-| `DUCKSTATION_DATA_DIR` | `/config/.local/share/duckstation` | DuckStation's data root (`settings.ini`, `savestates/`, memory cards); `$XDG_CONFIG_HOME/duckstation` when that is set. |
 | `DUCKSTATION_LOG_PATH` | `/config/duckstation.log` | Where DuckStation's stdout/stderr is captured. |
 | `DUCKSTATION_STOP_WAIT` | `30` | SIGTERM grace before SIGKILL; the graceful shutdown serialises the resume state. |
+
+DuckStation's data folder can't be changed either. It keeps everything there
+(`settings.ini`, `savestates/`, the memory cards), and oddly, DuckStation
+picks that folder using `$XDG_CONFIG_HOME/duckstation` even though the folder
+holds far more than just settings. If that variable isn't set, it falls back
+to `$HOME/.local/share/duckstation`, and finally to
+`/config/.local/share/duckstation`. DuckStation has no command-line option for
+this either, so an env var here would only move the `settings.ini` copy the
+broker edits and the resume state it reads back, not the actual folder
+DuckStation writes to. Instead, the broker works out which folder DuckStation
+will use and passes that same path to it, so the two stay in sync.
 
 ## Dolphin
 
@@ -53,14 +74,15 @@ Timings are in seconds.
 | `DOLPHIN_VIDEO_BACKEND` | `OGL` | Video backend pinned at launch; OGL over Vulkan because RADV on the integrated AMD parts has been the less reliable one. |
 | `DOLPHIN_PAD_NAME` | `Xbox 360 Controller` | The selkies virtual pad's name as Dolphin's SDL backend presents it, used in the seeded `GCPadNew.ini` bindings. |
 
-Dolphin's directories are not configurable. Its config (`GCPadNew.ini` and the
-rest) lives in `$XDG_CONFIG_HOME/dolphin-emu`, its data (`StateSaves/`, `GC/`,
-`Wii/`) in `$XDG_DATA_HOME/dolphin-emu`, falling back to `$HOME/.config` and
-`$HOME/.local/share` when those are unset, and to `/config` when `HOME` is unset
-too. The broker exports the roots it resolved to the emulator it launches, so
-the two always read the same files. The desktop launcher reads them as well,
-which is why a pad rebound in a desktop Dolphin session applies to broker
-launches too.
+Dolphin's folders can't be changed either, and there are two of them. Its
+config (`GCPadNew.ini` and the rest) lives in `$XDG_CONFIG_HOME/dolphin-emu`,
+and its data (`StateSaves/`, `GC/`, `Wii/`) lives in
+`$XDG_DATA_HOME/dolphin-emu`. If those variables aren't set, Dolphin falls
+back to `$HOME/.config` and `$HOME/.local/share`, and to `/config` if `HOME`
+itself is unset. The broker works out both folders and passes them to
+Dolphin, so the emulator always reads and writes the same files the broker
+expects. A desktop session opens Dolphin using these same folders, so if you
+rebind a controller there, that change also applies to broker-launched games.
 
 ## Cemu
 
@@ -73,12 +95,14 @@ launches too.
 | `CEMU_PAD_UUIDS` | unset | Comma separated `<index>_<guid>` list to bind instead of the derived ones. |
 | `CEMU_STOP_WAIT` | `5` | SIGTERM grace before SIGKILL (Cemu has no SIGTERM handler, so this only covers process-group teardown). |
 
-Cemu's config directory is not configurable: it is `$XDG_CONFIG_HOME/Cemu`,
-falling back to `$HOME/.config/Cemu` and then `/config/.config/Cemu`. Nothing on
-Cemu's command line names it, so a knob there could only move the `settings.xml`
-and pad profile the broker writes and leave Cemu reading its own copy. The
-broker exports the root it resolved to the emulator it launches. To move save
-data, use `CEMU_MLC_DIR`, which is stated as `-m` and so is honoured by both.
+Cemu's config folder can't be changed. It's `$XDG_CONFIG_HOME/Cemu`, falling
+back to `$HOME/.config/Cemu` and then `/config/.config/Cemu`. Cemu has no
+command-line option for this, so an env var here would only move the
+`settings.xml` file and pad profile the broker writes, while Cemu kept reading
+its own copy elsewhere. The broker works out this folder and passes it to
+Cemu, so both sides agree. If you want to move Cemu's save data instead, use
+`CEMU_MLC_DIR`: that path does get passed to Cemu directly on the command line
+(as `-m`), so both the broker and Cemu actually use it.
 
 ## Azahar
 
@@ -88,23 +112,31 @@ data, use `CEMU_MLC_DIR`, which is stated as `-m` and so is honoured by both.
 | `AZAHAR_LOG_PATH` | `/config/azahar.log` | Where Azahar's stdout/stderr is captured. |
 | `AZAHAR_STOP_WAIT` | `5` | SIGTERM grace before SIGKILL (no SIGTERM handler, process-group teardown only). |
 
-Azahar's directories are not configurable. Its config (`qt-config.ini`) lives in
-`$XDG_CONFIG_HOME/azahar-emu` and its user data (`sdmc/`, `nand/`) in
-`$XDG_DATA_HOME/azahar-emu`, falling back to `$HOME/.config` and
-`$HOME/.local/share`, then to `/config`. Azahar's command line names neither, so
-a knob there would move only the config the broker patches and the saves it
-dumps, not the ones the emulator uses. The broker exports both roots to the
-emulator it launches so the two always read the same trees.
+Azahar's folders can't be changed either. Its config (`qt-config.ini`) lives
+in `$XDG_CONFIG_HOME/azahar-emu`, and its user data (`sdmc/`, `nand/`) lives
+in `$XDG_DATA_HOME/azahar-emu`, falling back to `$HOME/.config` and
+`$HOME/.local/share`, and then to `/config`. Azahar has no command-line option
+for either folder, so an env var here would only move the config copy the
+broker edits and the saves it collects, not the actual files Azahar uses. The
+broker works out both folders and passes them to Azahar, so the emulator
+always reads and writes the same files the broker expects.
 
 ## Eden
 
 | Env var | Default | Purpose |
 | --- | --- | --- |
 | `EDEN_BIN` | `eden` | Eden binary. |
-| `EDEN_CONFIG_DIR` | `/config/.config/eden` | Eden's config directory (`qt-config.ini`). |
-| `EDEN_DATA_DIR` | `/config/.local/share/eden` | Eden's data directory (`nand/`, `sdmc/`). |
 | `EDEN_LOG_PATH` | `/config/eden.log` | Where Eden's stdout/stderr is captured. |
 | `EDEN_STOP_WAIT` | `15` | SIGTERM grace before SIGKILL; a running game takes longer than the base 5 s to tear down. |
+
+Eden's folders can't be changed either. Its config (`qt-config.ini`) lives in
+`$XDG_CONFIG_HOME/eden`, and its data (the virtual NAND, `sdmc/`) lives in
+`$XDG_DATA_HOME/eden`, falling back to `$HOME/.config` and
+`$HOME/.local/share`, and then to `/config`. Eden has no command-line option
+for either folder, so an env var here would only move the config copy the
+broker edits and the save tree it collects, not the actual files Eden uses.
+The broker works out both folders and passes them to Eden, so the emulator
+always reads and writes the same files the broker expects.
 
 ## shadPS4
 
@@ -113,26 +145,33 @@ emulator it launches so the two always read the same trees.
 | `SHADPS4_BIN` | unset | Explicit shadPS4 binary; skips the version search. |
 | `SHADPS4_VERSIONS_DIR` | `/config/.local/share/shadPS4QtLauncher/versions` | Where the Qt launcher downloads builds, one folder per release; `Pre-release/` trumps the newest semver folder. |
 | `SHADPS4_BIN_NAME` | `Shadps4-sdl.AppImage` | The binary looked for inside each version folder. |
-| `SHADPS4_DATA_DIR` | `/config/.local/share/shadPS4` | shadPS4's data directory (`home/1000/savedata/` is the save subtree). |
 | `SHADPS4_LOG_PATH` | `/config/shadps4.log` | Where shadPS4's stdout/stderr is captured. |
 | `SHADPS4_STOP_WAIT` | `20` | How long the IPC STOP gets to finish before SIGTERM. |
 | `SHADPS4_PKG_EXTRACTOR_BIN` | `pkg_extractor` | The standalone `pkg_extractor` binary a `.pkg` ROM (or a `.7z`/`.zip`/`.rar` archive holding one) is unpacked with; requires `unrar` and `7z` on PATH too when the ROM is an archive. |
 | `SHADPS4_PKG_EXTRACT_TIMEOUT` | `1800` | Seconds a `pkg_extractor` (or archive extraction) run gets before it is considered hung. |
 | `SHADPS4_CACHE_ENABLED` | `false` | Whether `.pkg` and `.7z`/`.zip`/`.rar` ROMs boot at all. On, the first launch extracts one into `SHADPS4_CACHE_DIR` and every later launch reuses that extraction. Off, such a ROM is refused outright rather than re-extracted and thrown away on every launch; only natively bootable formats work. |
-| `SHADPS4_CACHE_DIR` | `/config/.local/share/shadPS4/extracted` | Where a kept extraction is cached, when `SHADPS4_CACHE_ENABLED` is on. |
+| `SHADPS4_CACHE_DIR` | `$XDG_DATA_HOME/shadPS4/extracted` | Where a kept extraction is cached, when `SHADPS4_CACHE_ENABLED` is on. Broker-owned scratch, written and read by the broker alone, so moving it moves the whole of it. |
 | `SHADPS4_CACHE_MAX_GB` | `30` | Ceiling on the cache's total size; the oldest extraction is evicted first once a new one would exceed it. A ROM that still doesn't fit once there is nothing left to evict, or that exceeds the free space on the filesystem, is refused at activate rather than extracted until the disk fills. |
-| `SHADPS4_CONFIG_PATH` | `<SHADPS4_DATA_DIR>/config.json` | shadPS4's own config file, read and rewritten before each launch to pin `Vulkan.gpu_id`. |
 | `SHADPS4_GPU_ID` | `auto` | Which Vulkan device shadPS4 renders on. shadPS4's own `-1` auto-select can land on a software rasterizer, which renders a black screen while the game otherwise runs. `auto` detects the best real GPU; an integer pins that device index directly; `-1` or `KEEP` leaves `config.json` alone. |
 | `SHADPS4_VULKANINFO_BIN` | `vulkaninfo` | The binary `SHADPS4_GPU_ID=auto` enumerates devices with. If it is missing or fails, no pin is written and shadPS4 keeps its own setting. |
+
+shadPS4's data folder can't be changed. It's `$XDG_DATA_HOME/shadPS4`, falling
+back to `$HOME/.local/share/shadPS4` and then
+`/config/.local/share/shadPS4`. Its `config.json` file, the one the GPU pin
+above gets written into, sits right at the root of that folder. shadPS4 has
+no command-line option for this either, so an env var here would only move
+the config copy the broker rewrites and the `home/1000/savedata/` tree it
+collects, not the actual files shadPS4 uses. The broker works out this folder
+and passes it to shadPS4, so both sides agree.
 
 ## RetroArch
 
 | Env var | Default | Purpose |
 | --- | --- | --- |
 | `RETROARCH_BIN` | `retroarch` | RetroArch binary. |
-| `RETROARCH_CONFIG_DIR` | `/config/.config/retroarch` | Where the user's `retroarch.cfg` lives. |
-| `RETROARCH_CORES_DIR` | `libretro_directory` from `retroarch.cfg`, else `/config/.local/share/RetroArch/cores` | Where cores are loaded from and downloaded into. |
-| `RETROARCH_SYSTEM_DIR` | `system_directory` from `retroarch.cfg`, else `/config/.local/share/RetroArch/system` | Where cores look for BIOS files and firmware. |
+| `RETROARCH_CONFIG_DIR` | RetroArch's own search order: `$XDG_CONFIG_HOME/retroarch`, else `$HOME/.config/retroarch`, else the legacy `$HOME/.retroarch.cfg` | Where the user's `retroarch.cfg` lives. Passed to RetroArch as `--config` on every launch, so moving it moves the file both read. |
+| `RETROARCH_CORES_DIR` | `libretro_directory` from `retroarch.cfg`, else `cores` under RetroArch's own root (`/config/.config/retroarch/cores`) | Where cores are loaded from and downloaded into. That default is also RetroArch's `libretro_info_path`, and a core whose `.info` file is not beside it loads without core info. |
+| `RETROARCH_SYSTEM_DIR` | `system_directory` from `retroarch.cfg`, else `system` under RetroArch's own root (`/config/.config/retroarch/system`) | Where cores look for BIOS files and firmware. Written into the `broker.cfg` overlay as `system_directory` on every launch, so moving it moves the directory both use. |
 | `RETROARCH_CORES_BASE_URL` | `https://buildbot.libretro.com/nightly/linux/x86_64/latest` | Where missing cores are downloaded from. |
 | `RETROARCH_CORE_URL_<CORE>` | unset | Pins one core's download URL without editing `retroarch_platforms.json`. |
 | `GITHUB_API_BASE` | `https://api.github.com` | API base for cores whose platform entry names a GitHub release source. |
@@ -161,23 +200,32 @@ emulator it launches so the two always read the same trees.
 | Env var | Default | Purpose |
 | --- | --- | --- |
 | `RPCS3_BIN` | `/opt/rpcs3/AppRun` | RPCS3 binary. |
-| `RPCS3_DATA_DIR` | `/config/.config/rpcs3` | RPCS3's data root (`config.yml`, `dev_hdd0/`). |
 | `RPCS3_LOG_PATH` | `/config/rpcs3.log` | Where RPCS3's stdout/stderr is captured. |
 | `RPCS3_INSTALL_TIMEOUT` | `1800` | How long a PKG install may run; decryption of a multi-GB package takes minutes. |
 | `RPCS3_BOOT_WAIT` | `90.0` | How long the boot watchdog waits for PINE to report a running game before the launch is flagged `boot_failed`. |
 | `RPCS3_STATE_WAIT` | `60.0` | How long the exit-time save-state hotkey has to finish writing before the broker gives up on it; a full state (compressed RAM and VRAM) is a heavier write than the other cores' states. |
 | `RPCS3_SAVE_STATE_KEY` | `ctrl+alt+1` | The save-state hotkey sent to trigger an exit-time save. RPCS3's four save-state shortcuts are equivalent and this one is GUI-rebindable, hence configurable here too. |
 | `RPCS3_CACHE_ENABLED` | `false` | Whether `.7z`/`.zip`/`.rar` ROMs boot at all. On, the first launch extracts one into `RPCS3_CACHE_DIR` and every later launch reuses that extraction. Off, an archive ROM is refused outright rather than re-extracted and thrown away on every launch. `.pkg` is unaffected either way: it always installs through its own always-on installer. |
-| `RPCS3_CACHE_DIR` | `/config/.config/rpcs3/extracted` | Where a kept extraction is cached, when `RPCS3_CACHE_ENABLED` is on. |
+| `RPCS3_CACHE_DIR` | `$XDG_CONFIG_HOME/rpcs3/extracted` | Where a kept extraction is cached, when `RPCS3_CACHE_ENABLED` is on. Broker-owned scratch, written and read by the broker alone, so moving it moves the whole of it. |
 | `RPCS3_CACHE_MAX_GB` | `30` | Ceiling on the cache's total size; the oldest extraction is evicted first once a new one would exceed it. An archive that still doesn't fit once there is nothing left to evict, or that exceeds the free space on the filesystem, is refused at activate rather than extracted until the disk fills. |
 | `RPCS3_STOP_WAIT` | `2` | SIGTERM grace before SIGKILL (no SIGTERM handler, covers the AppImage wrapper teardown). |
+
+RPCS3's data folder can't be changed either. On Linux it keeps everything
+(`config.yml`, `dev_flash/`, `dev_hdd0/` and the save states) under
+`$XDG_CONFIG_HOME/rpcs3`, falling back to `$HOME/.config/rpcs3` and then
+`/config/.config/rpcs3`. RPCS3 has no command-line option for this, so an env
+var here would only move the config copy the broker edits, the `dev_hdd0/`
+folder a PKG install writes into, and the saves the broker collects, not the
+actual files RPCS3 uses. The broker works out this folder and passes it to
+every RPCS3 process it runs, including the headless installer (which runs
+without opening a window).
 
 ## xemu
 
 | Env var | Default | Purpose |
 | --- | --- | --- |
 | `XEMU_BIN` | `/opt/xemu/AppRun` | xemu binary. |
-| `XEMU_TOML` | `/config/.local/share/xemu/xemu/xemu.toml` | xemu's config, read for the HDD image path and pinned for the renderer. |
+| `XEMU_TOML` | `/config/.local/share/xemu/xemu/xemu.toml` | xemu's config, read for the HDD image path and pinned for the renderer. Passed to xemu as `-config_path` on every launch, so moving it moves the file both read. |
 | `XEMU_HDD_IMAGE` | `/config/xemu/xbox_hdd.qcow2` | HDD image used only when `xemu.toml` has no usable `hdd_path`. |
 | `XEMU_RENDERER` | `OPENGL` | Renderer pinned in `xemu.toml` before each launch; `VULKAN` where the driver is known good, `KEEP` to leave the file alone. |
 | `XEMU_SOFTWARE_GL` | unset | Truthy renders xemu on the CPU (`LIBGL_ALWAYS_SOFTWARE` for xemu only); slow, for hosts where both GPU paths abort. |
@@ -189,12 +237,20 @@ emulator it launches so the two always read the same trees.
 | Env var | Default | Purpose |
 | --- | --- | --- |
 | `PPSSPP_BIN` | `PPSSPPQt` | PPSSPP binary. |
-| `PPSSPP_CONFIG_DIR` | `/config/.config/ppsspp` | PPSSPP's config root; `PSP/` under it holds `SYSTEM/ppsspp.ini`, `SAVEDATA/` and `PPSSPP_STATE/`. |
 | `PPSSPP_LOG_PATH` | `/config/ppsspp.log` | Where PPSSPP's stdout/stderr is captured. |
 | `PPSSPP_STATE_SLOT` | `1` | The slot PPSSPP works in. |
 | `PPSSPP_STATE_WAIT` | `20.0` | How long a save state has to land on disk after the save hotkey. |
 | `PPSSPP_RESUME_LOAD_WAIT` | `90.0` | How long a resume load waits for the game window. |
 | `PPSSPP_RESUME_LOAD_SETTLE` | `5.0` | How long the window has to be up before the load hotkey is sent. |
+
+PPSSPP's config folder can't be changed either. It's `$XDG_CONFIG_HOME/ppsspp`,
+falling back to `$HOME/.config/ppsspp` and then `/config/.config/ppsspp`.
+PPSSPP's emulated memory stick lives inside it as `PSP/`, so that one folder
+holds `SYSTEM/ppsspp.ini`, `SAVEDATA/`, and `PPSSPP_STATE/` alike. PPSSPP has
+no command-line option for this, so an env var here would only move the ini
+files the broker edits and the saves it collects, not the actual files PPSSPP
+uses. The broker works out this folder and passes it to PPSSPP, so both sides
+agree.
 
 ## Xenia
 
@@ -209,16 +265,25 @@ emulator it launches so the two always read the same trees.
 | Env var | Default | Purpose |
 | --- | --- | --- |
 | `FLYCAST_BIN` | `/opt/flycast/AppRun` | Flycast binary. |
-| `FLYCAST_DATA_DIR` | `/config/.local/share/flycast` | Flycast's flat data directory (VMU saves and the savestate); `$XDG_DATA_HOME/flycast` when that is set. |
 | `FLYCAST_LOG_PATH` | `/config/flycast.log` | Where Flycast's stdout/stderr is captured. |
 | `FLYCAST_STOP_WAIT` | `20` | How long the Alt+F4 close request gets before escalating to a SIGTERM that Flycast has no handler for, and which skips the save entirely. |
+
+Flycast's data folder can't be changed either. It's `$XDG_DATA_HOME/flycast`,
+falling back to `$HOME/.local/share/flycast` and then
+`/config/.local/share/flycast`. It's flat, holding the VMU (memory card)
+saves and the save state together, loose at the top level. The `-config`
+options the broker passes to Flycast carry settings, not folder paths, so
+there's no way to point Flycast at a different folder from the command line
+either. An env var here would only move the tree the broker backs up, not the
+one Flycast actually writes to. The broker works out this folder and passes
+it to Flycast, so both sides agree.
 
 ## ScummVM
 
 | Env var | Default | Purpose |
 | --- | --- | --- |
 | `SCUMMVM_BIN` | probed | ScummVM binary; `/usr/games/scummvm`, `/usr/bin/scummvm` and `/usr/local/bin/scummvm` are tried in that order. |
-| `SCUMMVM_CONFIG_DIR` | `/config/.config/scummvm` | Holds `scummvm.ini`, which the broker pins its settings into and reads game targets back out of. |
+| `SCUMMVM_CONFIG_DIR` | `/config/.config/scummvm` | Holds `scummvm.ini`, which the broker pins its settings into and reads game targets back out of. Its `scummvm.ini` is passed as `--config` on every launch and on every `--add`, so moving it moves the file both read. |
 | `SCUMMVM_DATA_DIR` | `/config/.local/share/scummvm` | ScummVM's data directory; `saves/` under it is the save subtree and the working slot alike. |
 | `SCUMMVM_LOG_PATH` | `/config/scummvm.log` | Where ScummVM's stdout/stderr is captured. |
 | `SCUMMVM_STATE_SLOT` | `1` | The slot the broker saves into. Kept low because the chooser is walked one `Down` per slot, and slot 0 is ScummVM's write-protected autosave. |

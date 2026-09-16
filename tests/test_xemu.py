@@ -585,6 +585,29 @@ def test_launch_pins_the_display_settings_before_spawning(
     assert _fullscreen_of(cfg) is True
 
 
+def test_a_launch_tells_xemu_which_toml_the_broker_pinned(
+    emulator: xemu.Xemu, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The launch names the config the broker read the HDD path out of and pinned.
+
+    Nothing else states it, so without the flag xemu loads the one in its own
+    SDL pref dir: the renderer and fullscreen pins would never reach this run,
+    and the saves would be injected into a different HDD image than the one
+    booting.
+    """
+    monkeypatch.setattr(xemu, "_reap_strays", lambda: None)
+    monkeypatch.setattr(xemu.Xemu, "stop", lambda self: None)
+    spawned: list[list[str]] = []
+    monkeypatch.setattr(xemu.Xemu, "_spawn",
+                        lambda self, cmd, env: spawned.append(cmd))
+
+    emulator.launch(_xiso(tmp_path / "g.iso"), None)
+
+    assert spawned, "launch did not spawn xemu"
+    cmd = spawned[0]
+    assert cmd[cmd.index("-config_path") + 1] == str(xemu.XEMU_TOML)
+
+
 # ── Stray process reaping ────────────────────────────────────────────────────
 
 
@@ -1068,6 +1091,198 @@ def test_a_successful_extraction_replaces_the_staged_files(emulator: xemu.Xemu) 
     assert emulator._extract_saves() == 1
     assert not (emulator.staging_dir / "UDATA/4D530064/stale.dat").exists()
     assert (emulator.staging_dir / "UDATA/4D530064/saved.dat").read_bytes() == b"progress"
+
+
+# ── Stale save clear ─────────────────────────────────────────────────────────
+
+
+def test_the_clear_takes_the_launched_titles_saves_off_the_image(emulator: xemu.Xemu) -> None:
+    """The last session's saves for this title go before the restore is injected.
+
+    The injection only writes the files the incoming archive names, so a save it
+    does not mention would stay readable by this player from inside the game and
+    be swept back into their archive at exit.
+    """
+    _seed(emulator.hdd_image, "/UDATA/4D530064/saved.dat", b"last player")
+    _seed(emulator.hdd_image, "/TDATA/4D530064/settings.dat", b"last player")
+    emulator._title_id = "4D530064"
+
+    assert emulator._clear_stale_saves() == 2
+    fs = _fatx(emulator.hdd_image)
+    with pytest.raises(AssertionError):
+        fs.get_attr("/UDATA/4D530064/saved.dat")
+    with pytest.raises(AssertionError):
+        fs.get_attr("/TDATA/4D530064/settings.dat")
+
+
+def test_the_clear_leaves_another_titles_saves_alone(emulator: xemu.Xemu) -> None:
+    """Another title's directory is not in this session's dump, so it is not cleared."""
+    _seed(emulator.hdd_image, "/UDATA/4D530064/saved.dat", b"mine")
+    _seed(emulator.hdd_image, "/UDATA/DEADBEEF/saved.dat", b"someone else")
+    emulator._title_id = "4D530064"
+
+    assert emulator._clear_stale_saves() == 1
+    fs = _fatx(emulator.hdd_image)
+    assert bytes(fs.read("/UDATA/DEADBEEF/saved.dat")) == b"someone else"
+
+
+def test_the_clear_finds_the_title_directory_whatever_its_case(emulator: xemu.Xemu) -> None:
+    """A title id cased differently from the disk still gets cleared.
+
+    libfatx compares names byte for byte, so a literal lookup would miss and
+    leave the previous session's saves in place with no error.
+    """
+    _seed(emulator.hdd_image, "/UDATA/4D530064/saved.dat", b"last player")
+    emulator._title_id = "4d530064"
+
+    assert emulator._clear_stale_saves() == 1
+
+
+def test_the_clear_keeps_the_directories_the_injection_lands_in(emulator: xemu.Xemu) -> None:
+    """Only the files go; the title's directories stay on the disk.
+
+    `_inject_saves` matches an archive member's path components against the
+    directories already there, which is how a member whose case differs from
+    the disk still lands in place.
+    """
+    _seed(emulator.hdd_image, "/UDATA/4D530064/sub/saved.dat", b"last player")
+    emulator._title_id = "4D530064"
+
+    assert emulator._clear_stale_saves() == 1
+    fs = _fatx(emulator.hdd_image)
+    assert xemu._fatx_isdir(fs, "/UDATA/4D530064/sub")
+
+
+def test_a_freshly_formatted_image_is_a_clean_zero(emulator: xemu.Xemu) -> None:
+    """An image with no save directories at all clears cleanly rather than failing.
+
+    `_save_roots` calls a missing top level directory a failure because the
+    extraction cannot know the save set without it. A clear wants the opposite
+    answer for the same disk: there is demonstrably nothing to leak, and reusing
+    it would make the first session on a new image look like a failed clear.
+    """
+    emulator._title_id = "4D530064"
+
+    assert emulator._clear_stale_saves() == 0
+
+
+def test_the_clear_without_a_title_id_clears_nothing(
+    emulator: xemu.Xemu, caplog: pytest.LogCaptureFixture,
+) -> None:
+    """With no title id there is nothing to scope a clear to, so nothing is removed.
+
+    That session archives nothing either, so what stays on the image cannot
+    reach anyone's dump.
+    """
+    _seed(emulator.hdd_image, "/UDATA/4D530064/saved.dat", b"someone else")
+    emulator._title_id = None
+
+    with caplog.at_level(logging.WARNING):
+        assert emulator._clear_stale_saves() == 0
+    fs = _fatx(emulator.hdd_image)
+    assert bytes(fs.read("/UDATA/4D530064/saved.dat")) == b"someone else"
+    assert any("nothing to scope a clear" in r.message for r in caplog.records)
+
+
+def test_an_image_that_will_not_open_is_a_failed_clear(
+    emulator: xemu.Xemu, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A partition that will not open cannot be confirmed free of the last session."""
+    emulator._title_id = "4D530064"
+    monkeypatch.setattr(xemu, "_open_fatx_e", lambda image: None)
+
+    assert emulator._clear_stale_saves() is None
+
+
+def test_a_listing_failure_is_a_failed_clear(
+    emulator: xemu.Xemu, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A title tree that cannot be walked cannot be confirmed empty either."""
+    _seed(emulator.hdd_image, "/UDATA/4D530064/saved.dat", b"last player")
+    emulator._title_id = "4D530064"
+    _proxy_fatx(monkeypatch, fail="walk")
+
+    assert emulator._clear_stale_saves() is None
+
+
+def test_a_save_that_will_not_delete_is_a_failed_clear(
+    emulator: xemu.Xemu, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A save that survives the clear fails it; it would otherwise reach this player."""
+    _seed(emulator.hdd_image, "/UDATA/4D530064/saved.dat", b"last player")
+    emulator._title_id = "4D530064"
+    _proxy_fatx(monkeypatch, fail="unlink")
+
+    assert emulator._clear_stale_saves() is None
+
+
+def test_a_launch_clears_the_image_before_it_injects(
+    emulator: xemu.Xemu, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    """The clear runs before the injection, not after it.
+
+    The other order would delete the saves the restore just wrote.
+    """
+    order: list[str] = []
+
+    def record(step: str) -> Any:
+        """Build a hook stub that notes it ran and reports nothing to do.
+
+        Args:
+            step: The name recorded when the hook is called.
+
+        Returns:
+            A method stub returning a count of zero.
+        """
+        def hook(self: xemu.Xemu) -> int:
+            order.append(step)
+            return 0
+
+        return hook
+
+    monkeypatch.setattr(xemu.Xemu, "_clear_stale_saves", record("clear"))
+    monkeypatch.setattr(xemu.Xemu, "_inject_saves", record("inject"))
+    monkeypatch.setattr(xemu, "_reap_strays", lambda: None)
+    monkeypatch.setattr(xemu.Xemu, "stop", lambda self: None)
+    emulator.prepare_restore()
+
+    _spawned_env(emulator, monkeypatch, tmp_path)
+
+    assert order == ["clear", "inject"]
+    assert emulator._restore_failed is False
+
+
+def test_a_launch_that_cannot_clear_the_image_neither_injects_nor_archives(
+    emulator: xemu.Xemu, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    """A failed clear runs the session without injecting and exits without archiving.
+
+    The image may still hold the last session's saves under this title, and the
+    exit extraction cannot tell them from this player's, so archiving that set
+    would write another player's saves over what RomM holds for this one.
+    """
+    injected: list[bool] = []
+
+    def inject(self: xemu.Xemu) -> int:
+        """Note that the injection ran, which this session must never do.
+
+        Returns:
+            A count of zero.
+        """
+        injected.append(True)
+        return 0
+
+    monkeypatch.setattr(xemu.Xemu, "_clear_stale_saves", lambda self: None)
+    monkeypatch.setattr(xemu.Xemu, "_inject_saves", inject)
+    monkeypatch.setattr(xemu, "_reap_strays", lambda: None)
+    monkeypatch.setattr(xemu.Xemu, "stop", lambda self: None)
+    emulator.prepare_restore()
+
+    _spawned_env(emulator, monkeypatch, tmp_path)
+
+    assert emulator._restore_failed is True
+    assert not injected
+    assert emulator.save_and_exit(None)["saves_extracted"] == 0
 
 
 # ── Session contract ─────────────────────────────────────────────────────────

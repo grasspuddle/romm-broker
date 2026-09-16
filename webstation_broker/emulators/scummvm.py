@@ -61,7 +61,14 @@ A resolved game folder must sit under it; anything resolving outside is discarde
 """
 
 CONFIG_DIR = Path(os.environ.get("SCUMMVM_CONFIG_DIR", "/config/.config/scummvm"))
-"""ScummVM's config directory (env `SCUMMVM_CONFIG_DIR`, default `/config/.config/scummvm`)."""
+"""ScummVM's config directory (env `SCUMMVM_CONFIG_DIR`, default `/config/.config/scummvm`).
+
+Safe to move, because every ScummVM the broker runs is told where it is:
+`--config` names `INI_PATH` on the launch command line and on `--add`'s.
+Without that the knob would move only the file the broker patches while
+ScummVM kept resolving its own, so the pinned settings and the registered
+game targets would land in a file nothing opens.
+"""
 INI_PATH = CONFIG_DIR / "scummvm.ini"
 """The config the broker pins before every launch and reads game targets back out of."""
 DATA_DIR = Path(os.environ.get("SCUMMVM_DATA_DIR", "/config/.local/share/scummvm"))
@@ -88,6 +95,12 @@ would spend a keystroke per row getting there. Slot 0 is unavailable (see
 """
 STATE_WAIT = float(os.environ.get("SCUMMVM_STATE_WAIT", "10"))
 """Seconds to wait for the save macro's write to land (env `SCUMMVM_STATE_WAIT`)."""
+STATE_STABLE = float(os.environ.get("SCUMMVM_STATE_STABLE", "1.0"))
+"""Seconds size and mtime must both hold still before a save counts as written.
+
+From env `SCUMMVM_STATE_STABLE`, default 1.0. Long enough that a write still
+in progress on a loaded host does not read as a finished one.
+"""
 KEY_DELAY = float(os.environ.get("SCUMMVM_KEY_DELAY", "0.8"))
 """Seconds between the macro's steps (env `SCUMMVM_KEY_DELAY`).
 
@@ -386,6 +399,40 @@ def _pins(gui_language: Optional[str] = None) -> dict[str, dict[str, str]]:
     return {"scummvm": app, "keymapper": {"keymap_global_MENU": MENU_KEY}}
 
 
+def _write_ini(text: str) -> None:
+    """Replace scummvm.ini with `text`, all of it or none of it.
+
+    Written to a sibling and renamed over the original: a plain write truncates
+    the file first, so anything that interrupts it (the container stopping, the
+    disk filling) leaves a half written ini behind. ScummVM reads that file to
+    find `savepath`, and one that stops short of it sends the next session's
+    saves to the default directory, where the dump does not look for them.
+
+    A trailing newline is ensured for the same reason every other config the
+    broker writes gets one: a final line without it is not always parsed.
+
+    Args:
+        text: The full contents of the file.
+
+    Raises:
+        OSError: If the file could not be written or renamed into place.
+    """
+    if not text.endswith("\n"):
+        text += "\n"
+    tmp = INI_PATH.with_suffix(".ini.tmp")
+    try:
+        tmp.write_text(text)
+        os.replace(tmp, INI_PATH)
+    except OSError:
+        # The rename is what publishes the file, so a failure before it leaves
+        # the original untouched and the temp file behind.
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError as exc:
+            log.warning("scummvm: could not remove the partial %s: %s", tmp, exc)
+        raise
+
+
 def patch_ini(gui_language: Optional[str] = None) -> None:
     """Write the broker's pinned settings into scummvm.ini.
 
@@ -419,7 +466,7 @@ def patch_ini(gui_language: Optional[str] = None) -> None:
     )
     if not INI_PATH.exists():
         try:
-            INI_PATH.write_text(rendered)
+            _write_ini(rendered)
         except OSError as exc:
             log.error("scummvm: could not create %s: %s, ini not pinned", INI_PATH, exc)
         else:
@@ -470,7 +517,7 @@ def patch_ini(gui_language: Optional[str] = None) -> None:
             out.extend(f"{k}={v}" for k, v in missing.items())
 
     try:
-        INI_PATH.write_text("\n".join(out) + "\n")
+        _write_ini("\n".join(out) + "\n")
     except OSError as exc:
         log.error("scummvm: could not write %s: %s, ini not pinned", INI_PATH, exc)
     else:
@@ -554,7 +601,9 @@ def _run_add(rom_dir: Path) -> Optional[subprocess.CompletedProcess]:
     Returns:
         The finished process, or None when it could not be run at all.
     """
-    cmd = [scummvm_bin(), "--add", f"--path={rom_dir}"]
+    # --config, because the domain this writes is only there for the launch to
+    # boot if both command lines name the same ini.
+    cmd = [scummvm_bin(), f"--config={INI_PATH}", "--add", f"--path={rom_dir}"]
     try:
         result = subprocess.run(
             cmd,
@@ -677,7 +726,7 @@ def _drop_dead_domains(gameid: str) -> int:
             out.append(line)
 
     try:
-        INI_PATH.write_text("\n".join(out) + "\n")
+        _write_ini("\n".join(out) + "\n")
     except OSError as exc:
         log.error("scummvm: could not rewrite %s: %s", INI_PATH, exc)
         return 0
@@ -782,6 +831,7 @@ class Scummvm(Emulator):
         save_root: ScummVM's data directory, which the save subtree hangs off.
         save_subtrees: `saves`, holding the game's saves and the working slot alike.
         state_subtrees: Empty, because states are not in a subtree of their own.
+        clears_stale_saves: On; activate empties the save directory.
         rom_extensions: The `.scummvm` marker file some libraries use; a game is a folder.
         supports_states: True, over the Global Main Menu.
         state_slot: The one slot the broker works in, echoed back as the effective slot.
@@ -797,6 +847,7 @@ class Scummvm(Emulator):
     state_subtrees = ()
     """Empty on purpose: ScummVM has no state format, so its states are saves
     living beside the game's own, and `save_file_kind` is what tells them apart."""
+    clears_stale_saves = True
     rom_extensions = (".scummvm",)
     """The marker file some libraries put in a game folder.
 
@@ -996,20 +1047,46 @@ class Scummvm(Emulator):
         return self._xdotool("key", "--window", win_id, "--delay", "120", *keys) is not None
 
     def _wait_for_write(self, before: dict[str, tuple[float, int]], deadline: float) -> bool:
-        """Poll the working slot until its file changes, or `deadline` passes.
+        """Poll the working slot until this save's write settles, or `deadline` passes.
+
+        The first change is not the finished save. The caller stops ScummVM as
+        soon as this returns and the broker zips the save directory right after,
+        so returning on the first differing stat sends SIGTERM into a write
+        still in progress and ships whatever landed to RomM as the player's
+        progress. A write therefore only counts once the slot differs from
+        `before`, holds at least one non-empty file, and has held every size and
+        mtime still for `STATE_STABLE`.
 
         Args:
             before: The slot's `(mtime, size)` per filename, from before the macro.
             deadline: A `time.monotonic()` value to give up at.
 
         Returns:
-            True once a slot file appeared or changed.
+            True once a slot file appeared or changed and its write settled,
+            False when nothing was written or the write never settled in time.
         """
-        while time.monotonic() < deadline:
-            if _slot_stamp(self._target, STATE_SLOT) != before:
-                return True
-            time.sleep(0.3)
-        return _slot_stamp(self._target, STATE_SLOT) != before
+        last: Optional[dict[str, tuple[float, int]]] = None
+        stable_since = 0.0
+        while True:
+            cur = _slot_stamp(self._target, STATE_SLOT)
+            if cur != before:
+                if cur != last:
+                    last = cur
+                    stable_since = time.monotonic()
+                elif any(size > 0 for _mtime, size in cur.values()) and (
+                    time.monotonic() - stable_since >= STATE_STABLE
+                ):
+                    return True
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(0.1)
+        if last is not None:
+            log.warning(
+                "scummvm: slot %d was written but never settled within %.1fs; "
+                "treating it as unfinished rather than shipping a torn save",
+                STATE_SLOT, STATE_WAIT,
+            )
+        return False
 
     def launch(self, rom_path: Optional[Path], resume_slot: Optional[int]) -> None:
         """Register the game, pin the ini, and boot ScummVM on its target.
@@ -1072,7 +1149,10 @@ class Scummvm(Emulator):
         # SDL would pick Wayland, where the menu macros could never be injected.
         env["SDL_VIDEODRIVER"] = "x11"
 
-        cmd = [scummvm_bin(), f"--savepath={SAVE_DIR}"]
+        # Both directories are stated, so the ini the broker just pinned and
+        # the saves it dumps afterwards are the ones this run uses, whatever
+        # the env knobs have been set to.
+        cmd = [scummvm_bin(), f"--config={INI_PATH}", f"--savepath={SAVE_DIR}"]
         if language:
             # Authoritative for this run: --add wrote whatever it detected into
             # the game domain, and the flag overrides that for the session.
@@ -1277,24 +1357,26 @@ class Scummvm(Emulator):
         """The working slot's save file for the booted target, or None when empty."""
         return slot_file(self._target, STATE_SLOT)
 
-    def clear_working_slot(self) -> None:
-        """Delete every game's working-slot save before a new session boots.
+    def clear_working_slot(self, excluded: tuple[str, ...] = ()) -> None:
+        """Empty the save directory before a new session boots.
 
         The target only exists once a game has been registered and booted, so
         at activate time a leftover cannot be told apart from the save of the
-        game about to start. Anything still in this slot belongs to a session
-        that has already exited and whose state RomM holds; the incoming
-        archive restores whatever should be here.
+        game about to start. Anything still here belongs to a session that has
+        already exited and whose saves RomM holds; the incoming archive
+        restores whatever should be here.
+
+        The whole directory goes, not just the broker's slot. ScummVM names a
+        save `<target>.<NNN>` for the slot the player chose in the game's own
+        menu, and nothing in that name says whose session wrote it, so
+        clearing only the broker's slot leaves every save the last player made
+        from inside the game readable by this one and swept into their dump.
+
+        Args:
+            excluded: Subtrees carried by the whole-card routes. ScummVM has
+                no memory card, so this is always empty.
         """
-        if not SAVE_DIR.is_dir():
-            return
-        for pattern in (f"*.s{STATE_SLOT:02d}", f"*.{STATE_SLOT:03d}"):
-            for stale in SAVE_DIR.glob(pattern):
-                try:
-                    stale.unlink()
-                    log.info("scummvm: cleared stale save %s", stale.name)
-                except OSError as exc:
-                    log.warning("scummvm: could not clear %s: %s", stale.name, exc)
+        self._clear_save_subtrees(excluded)
 
     def state_target(self, filename: str) -> Optional[Path]:
         """Where a pushed state called `filename` belongs.

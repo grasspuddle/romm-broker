@@ -65,7 +65,7 @@ import time
 from pathlib import Path
 from typing import Optional
 
-from .base import Emulator, base_launch_env
+from .base import Emulator, base_launch_env, xdg_data_dir
 
 log = logging.getLogger(__name__)
 
@@ -73,16 +73,14 @@ ROM_ROOT = Path(os.environ.get("ROM_ROOT", "/romm"))
 
 FLYCAST_BIN = os.environ.get("FLYCAST_BIN", "/opt/flycast/AppRun")
 
+DATA_DIR = xdg_data_dir("flycast")
+"""Flycast's data directory, holding the VMU saves and the savestate.
 
-def _default_data_dir() -> str:
-    """Return Flycast's own data dir: $XDG_DATA_HOME/flycast, or ~/.local/share/flycast if unset."""
-    xdg = os.environ.get("XDG_DATA_HOME")
-    if xdg and os.path.isabs(xdg):
-        return os.path.join(xdg, "flycast")
-    return os.path.join(os.environ.get("HOME", "/config"), ".local/share/flycast")
-
-
-DATA_DIR = Path(os.environ.get("FLYCAST_DATA_DIR", _default_data_dir()))
+Not configurable, and deliberately: nothing on Flycast's command line names it,
+so an override would move only the tree the broker dumps and restores and leave
+Flycast writing its own. That loses saves without reporting anything. `launch`
+exports the root this resolved to instead.
+"""
 FLYCAST_LOG_PATH = Path(os.environ.get("FLYCAST_LOG_PATH", "/config/flycast.log"))
 
 # Discs flycast boots, best first, so a folder holding several candidates
@@ -374,6 +372,7 @@ class Flycast(Emulator):
     # DATA_DIR itself: VMU saves and the savestate both sit loose at its
     # root, with nothing else here to split them into named subtrees.
     save_subtrees = (DATA_DIR.name,)
+    clears_stale_saves = True
     rom_extensions = ROM_EXTENSIONS
     log_path = FLYCAST_LOG_PATH
     # The window-close request goes through the SDL event loop into
@@ -529,11 +528,19 @@ class Flycast(Emulator):
             elif _state_belongs_to(resume_path, rom_path):
                 config_opts.append("config:Dreamcast.AutoLoadState=yes")
 
-        log.info("launching flycast (rom=%s, resume_slot=%s)", rom_path, resume_slot)
-        self._spawn(
-            [FLYCAST_BIN, "-config", ",".join(config_opts), str(rom_path)],
-            base_launch_env(),
+        # -config carries settings, not paths, so nothing on the command line
+        # names the data dir and Flycast resolves it itself. Export the root
+        # the broker resolved so the tree it dumps and restores is the one
+        # this launch writes its VMUs and savestate into.
+        env = base_launch_env()
+        env["XDG_DATA_HOME"] = str(DATA_DIR.parent)
+        log.info(
+            "launching flycast (rom=%s, resume_slot=%s, data=%s)",
+            rom_path,
+            resume_slot,
+            DATA_DIR,
         )
+        self._spawn([FLYCAST_BIN, "-config", ",".join(config_opts), str(rom_path)], env)
 
     def stop(self) -> None:
         """Request a graceful exit via Alt+F4, then escalate if it does not take.
@@ -559,7 +566,7 @@ class Flycast(Emulator):
                     )
         super().stop()
 
-    def clear_working_slot(self) -> None:
+    def clear_working_slot(self, excluded: tuple[str, ...] = ()) -> None:
         """Drop every session-owned file left in DATA_DIR before a restore.
 
         Resume states, their owner markers, VMU images, arcade nvmem and
@@ -577,6 +584,10 @@ class Flycast(Emulator):
         are left: they are container setup, not one session's data. So are
         states set aside under `UNTRUSTED_SUFFIX`, which can be the only copy
         of that progress and which no resume can pick up anyway.
+
+        Args:
+            excluded: Subtrees carried by the whole-card routes. Flycast names
+                no memory card subtree, so this is always empty.
         """
         if not DATA_DIR.is_dir():
             return

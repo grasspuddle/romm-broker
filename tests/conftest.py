@@ -193,6 +193,7 @@ class FakeEmulator(Emulator):
     Attributes:
         launched: The (rom_path, resume_slot) pair of the last launch, or None.
         cleared: Whether clear_working_slot was called.
+        cleared_excluding: The subtrees activate told the last clear to leave alone.
         saved_slots: Every slot passed to save_state, in order.
         loaded_slots: Every slot passed to load_state, in order.
         exit_slots: Every slot passed to save_and_exit, in order.
@@ -216,6 +217,7 @@ class FakeEmulator(Emulator):
         super().__init__()
         self.launched = None
         self.cleared = False
+        self.cleared_excluding: tuple[str, ...] = ()
         self.saved_slots = []
         self.loaded_slots = []
         self.exit_slots = []
@@ -236,9 +238,14 @@ class FakeEmulator(Emulator):
         """Mark the fake as no longer running."""
         self.running = False
 
-    def clear_working_slot(self) -> None:
-        """Record that the working slot was emptied."""
+    def clear_working_slot(self, excluded: tuple[str, ...] = ()) -> None:
+        """Record that the working slot was emptied, and what activate excluded from it.
+
+        Args:
+            excluded: Save subtrees the whole-card routes carry this session.
+        """
         self.cleared = True
+        self.cleared_excluding = excluded
 
     def resolve_rom_file(self, path: Path) -> Optional[Path]:
         """Pick the bootable file for a ROM path.

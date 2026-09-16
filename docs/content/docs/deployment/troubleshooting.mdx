@@ -7,84 +7,97 @@ Start here by symptom. Most of these trace back to the [reverse proxy
 contract](/docs/deployment/reverse-proxy) or the `config.yml` keys covering
 `host`, `broker_host`, `subfolder` and `broker_secret`.
 
+This page is scoped to reverse-proxy and cross-origin failures. For other
+setup problems (the container won't start, the stream stays black, a
+specific game won't launch), see [Troubleshooting](/docs/troubleshooting).
+
 ## Camera/microphone denied instantly, or invite links say "Could not create an invite link"
 
-No permission prompt at all, and the invite buttons fall back to a manual
-copy box instead of copying automatically. This is the cross-origin case:
-`host` in `config.yml` is a full URL on its own domain rather than a path
-under RomM's own origin, so the browser treats the room as a different site
-and refuses it `getUserMedia` and clipboard-write outright. There is no
-reverse-proxy setting that fixes this — see the callout at the top of
-[Reverse proxy](/docs/deployment/reverse-proxy) for why, and the RomM-side
-section there for the config change that does fix it (serving the container
-from a subfolder of RomM's own origin).
+You get no permission prompt at all, and the invite buttons fall back to a
+manual copy box instead of copying the link automatically. This is a
+cross-origin problem: browsers only fully trust a page when it's served
+from the same website address ("origin") as the page around it. Here,
+`host` in `config.yml` is a full URL on its own domain instead of a path
+under RomM's own origin, so the browser treats the room as a different
+website and blocks it from ever asking for camera, microphone, or clipboard
+access. No reverse-proxy setting can fix this. See the callout at the top
+of [Reverse proxy](/docs/deployment/reverse-proxy) for why, and the
+RomM-side section there for the config change that actually fixes it
+(serving the container from a subfolder of RomM's own origin).
 
 ## Room loads, then just sits there dead
 
-The page and its assets are all arriving fine, so this isn't the prefix
-being stripped — it's the websocket upgrade not making it through. Check:
+The page and its assets are all loading fine, so this isn't a URL-prefix
+problem. It's the websocket connection (the live, two-way link the room
+uses for chat and game controls) failing to open. Check:
 
-- The proxy is actually forwarding `Upgrade` / `Connection: upgrade`
-  headers on this specific route, not just the vhost in general. Nginx
-  Proxy Manager in particular: the Proxy Host's **Websockets Support**
-  toggle does not reliably cascade to a Custom Location, so paste the
-  upgrade headers into that location's own **Advanced** box regardless of
-  the toggle. See the [Nginx Proxy Manager
-  tab](/docs/deployment/reverse-proxy#proxy-recipes) for the exact block.
-- `proxy_read_timeout` (or equivalent) is long enough that an idle
-  session's socket isn't being culled mid game.
+- Make sure your proxy is actually forwarding the `Upgrade` and
+  `Connection: upgrade` headers on this specific route, not just for the
+  site as a whole. This trips people up especially in Nginx Proxy Manager:
+  turning on the Proxy Host's **Websockets Support** toggle doesn't
+  reliably carry over to a Custom Location you've added, so paste the
+  upgrade headers into that location's own **Advanced** box too, whether or
+  not the toggle is on. See the [Nginx Proxy Manager
+  tab](/docs/deployment/reverse-proxy#proxy-recipes) for the exact lines to
+  paste.
+- Check that `proxy_read_timeout` (or whatever your proxy calls the same
+  setting) is set long enough that it won't cut off an idle session's
+  connection in the middle of a game.
 
 ## Assets 404, or the page loads with a broken layout
 
-The proxy is stripping the mount path before forwarding it. This is the one
-[the contract page](/docs/deployment/reverse-proxy#the-contract) calls out
-by name — most proxies default to strip-prefix mode. On nginx, that means a
-path component snuck into `proxy_pass`; on Traefik, a `stripPrefix`
-middleware; on Caddy, `handle_path` instead of `handle`. Run the `curl`
-checks under [Verifying](/docs/deployment/reverse-proxy#verifying) to
-confirm which end is wrong — the asset `src` attributes tell you whether
-`SUBFOLDER` is unset (paths missing the prefix) or the proxy is stripping it
-(paths have the prefix but 404).
+Your reverse proxy is stripping off the mount path (the URL prefix, such as
+`/streaming`) before it forwards the request. This is exactly the problem
+[the contract page](/docs/deployment/reverse-proxy#the-contract) warns
+about: most proxies strip that prefix by default. On nginx, that usually
+means an extra path piece got added to `proxy_pass`. On Traefik, it's a
+`stripPrefix` middleware. On Caddy, it's using `handle_path` instead of
+`handle`. Run the `curl` checks under
+[Verifying](/docs/deployment/reverse-proxy#verifying) to see which side is
+wrong: if the asset `src` links on the page are missing the prefix,
+`SUBFOLDER` isn't set; if they have the prefix but still 404, the proxy is
+stripping it.
 
 ## RomM says "This container's host has no scheme, so it can never be claimed"
 
-`host` is a bare path (`/streaming`) with no scheme or domain in front of
-it. Give it a full URL on RomM's own origin instead —
-`https://romm.example.com/streaming` — which keeps the deployment
-same-origin (so none of the cross-origin breakage above applies) while
-satisfying the check. Leave `subfolder` and `broker_host` as they were;
-this only changes `host`.
+This means `host` in `config.yml` is just a bare path (`/streaming`), with
+no `https://` and domain name in front of it. Give it a full URL on RomM's
+own domain instead, for example `https://romm.example.com/streaming`. That
+keeps everything on the same origin, so none of the cross-origin problems
+described above apply, while still satisfying RomM's check. Leave
+`subfolder` and `broker_host` as they were. Only `host` needs to change.
 
 ## Session looks claimed but nothing responds, even after fixing `config.yml`
 
-Two separate things can cause this, and it's worth ruling out both:
+Two separate things can cause this. It's worth ruling out both:
 
-1. RomM reads `config.yml` at startup, not on every request. A restart is
-   what picks up any edit to `host`, `broker_host`, `subfolder` or
-   `broker_secret`.
-2. A session claimed under the old config is still holding state under the
-   old address. End that session from RomM's streaming settings (or wait
-   for it to expire) after restarting, rather than expecting the new config
-   to retroactively fix a session already in progress.
+1. RomM only reads `config.yml` when it starts up, not on every request.
+   You need to restart RomM for it to pick up any edit to `host`,
+   `broker_host`, `subfolder`, or `broker_secret`.
+2. A session that was claimed under the old settings is still using the old
+   address. After restarting, end that session from RomM's streaming
+   settings (or wait for it to expire), instead of expecting the new config
+   to fix a session that's already in progress.
 
 ## Activate/join/exit calls fail with 403, and the broker log shows `rejected request: bad or missing broker secret`
 
 `BROKER_SECRET` on the container and `broker_secret` in RomM's `config.yml`
-entry for that container are two separate settings that both have to carry
-the same value — setting one and not the other, or setting them to
+entry for that container are two separate settings, and they both need to
+be set to the same value. Setting one and not the other, or setting them to
 different values, produces this exact log line. If `BROKER_SECRET` isn't
-set on the container at all, this check is skipped entirely, so seeing this
-warning means it *is* set and the two sides disagree. See
+set on the container at all, this check doesn't run at all, so seeing this
+warning tells you it *is* set, and the two sides just disagree. See
 [`BROKER_SECRET`](/docs/configuration) and the `config.yml` example in
 [Wiring it into RomM](/docs/container#wiring-it-into-romm).
 
 ## Where to look next
 
-- Broker logs are the source of truth for anything server-to-server
-  (activate, join, exit, the secret check above) — the browser console only
-  sees what reaches it.
-- The browser's network tab, filtered to WS, is the fastest way to tell
-  "the websocket never upgraded" (101 never happens) from "it upgraded and
-  then dropped" (a proxy timeout, usually).
+- The broker's own logs are the best source of truth for anything happening
+  server-to-server (activate, join, exit, the secret check above). Your
+  browser's console only shows what actually reaches the browser.
+- In your browser's developer tools, the network tab filtered to WS (short
+  for websocket) is the fastest way to tell two failure modes apart: "the
+  websocket never upgraded" (you never see a 101 response) versus "it
+  upgraded and then dropped" (usually a proxy timeout).
 - [Reverse proxy](/docs/deployment/reverse-proxy) has the full contract and
-  per-proxy recipes if a symptom above doesn't match what you're seeing.
+  per-proxy recipes if none of the symptoms above match what you're seeing.

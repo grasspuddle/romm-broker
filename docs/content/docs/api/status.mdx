@@ -9,24 +9,25 @@ description: "GET /api/session/status for a session summary and GET /api/health 
 curl -k https://localhost:3001/streaming/api/session/status
 ```
 
-No authentication. With no session it answers `{"active": false}`. With one:
+No login needed. If no session is running, it just answers
+`{"active": false}`. If one is running, you get:
 
 | Field | Meaning |
 | --- | --- |
-| `active` | Whether a session is up. |
-| `session_id`, `emulator`, `rom`, `rom_file` | What was activated and the file the broker resolved to boot. |
-| `multiplayer` | The flag fixed at activate. |
+| `active` | Whether a session is currently running. |
+| `session_id`, `emulator`, `rom`, `rom_file` | Which session, emulator, and ROM were activated, and the exact file the broker chose to boot. |
+| `multiplayer` | Whether multiplayer is on. This is set once, when the session is activated, and doesn't change after that. |
 | `emulator_alive` | Whether the emulator process is still running. |
-| `boot_failed` | Set by an emulator that can tell its process is alive but never reached a running game, the boot-error-dialog case. Passive: the broker surfaces it and takes no action of its own. |
-| `extraction_phase` | `null`, `"extracting_archive"`, or `"extracting_pkg"`. Set while shadPS4 or RPCS3 is unpacking a slow `.pkg`/archive ROM, cleared once unpacking ends (the emulator has not started yet at that point, so a `null` phase does not mean the game is up; read `emulator_alive` for that). Passive, like `boot_failed`: poll it to show an indeterminate spinner while non-null, there is no percentage. |
-| `supports_states` | Whether the state routes will work for this emulator, so the parent needs no per-emulator table. |
-| `state_slot` | The one slot this emulator works in; every save and load echoes it. |
-| `started_at` | Unix time the session was created. |
-| `user` | The controller as given to activate. |
-| `viewers` | Everyone who joined: `username`, `permission`, and their input assignment. |
+| `boot_failed` | True when an emulator can tell its own process is alive but never actually reached a running game, for example, it's stuck on a boot-error dialog. This is a passive signal: the broker only reports it and doesn't act on it. |
+| `extraction_phase` | `null`, `"extracting_archive"`, or `"extracting_pkg"`. Set while shadPS4 or RPCS3 is unpacking a slow `.pkg`/archive ROM, and cleared back to `null` once unpacking ends. At that point the emulator still hasn't started yet, so `null` here doesn't mean the game is running; check `emulator_alive` for that. Like `boot_failed`, this is a passive signal: poll it to show a plain loading spinner while it isn't `null`. There's no percentage to show. |
+| `supports_states` | Whether save and load states work at all for this emulator, so the parent (usually RomM) doesn't need to keep its own list of which emulators support them. |
+| `state_slot` | The one slot this emulator uses. Every save and load echoes this same number back. |
+| `started_at` | Unix time (seconds since January 1, 1970) marking when the session was created. |
+| `user` | The controller's info (the person playing), exactly as it was given when the session was activated. |
+| `viewers` | Everyone who joined: `username`, `user_id`, and `permission`. |
 
-RomM polls this to know whether a session it launched is still up, to decide
-whether to offer save and load, and to surface a boot failure to the player
+RomM polls this to know whether a session it launched is still running, to
+decide whether to offer save and load, and to show the player a boot failure
 instead of leaving them staring at a frozen frame.
 
 ## Health
@@ -35,9 +36,10 @@ instead of leaving them staring at a frozen frame.
 curl -k https://localhost:3001/streaming/api/health
 ```
 
-Answers `{"status": "ok"}` as soon as the broker is serving. The container's
-`svc-broker` waits for selkies before starting the broker at all, so a healthy
-broker implies a reachable stream control plane.
+Answers `{"status": "ok"}` as soon as the broker is up and serving requests.
+Inside the container, `svc-broker` waits for selkies (the video streaming
+piece) to answer before it starts the broker at all, so a healthy broker also
+means selkies is up and reachable.
 
 ## Room context
 
@@ -45,8 +47,11 @@ broker implies a reachable stream control plane.
 curl -k "https://localhost:3001/streaming/api/session/context?token=<personal token>"
 ```
 
-What the room UI bootstraps from: who the token belongs to, what it may do,
-the session's rom and emulator, and the current roster. Answers `409` with no
-session and `403` for a token that is not part of it. It is documented here
-because it is useful when debugging a room that shows "Session Ended", but it
-is not part of the parent-facing API.
+This is what the room UI reads when it loads: who the token belongs to, what
+that person is allowed to do, and the session's rom and emulator. It doesn't
+say who else is in the room; that roster arrives separately, over the room's
+websocket `state_update` broadcast. It answers `409` when there's no session,
+and `401` for a token that isn't part of it. It's documented here because
+it's useful when you're troubleshooting a room that shows "Session Ended",
+but it isn't part of the parent-facing API (the endpoints meant for the
+parent, usually RomM, to call).

@@ -41,10 +41,10 @@ Everyone in the room has one of three levels of access:
 
 If you're the host, the last tile in the bottom bar is a dashed one with a
 big plus on it. Tap it and it flips over to two buttons, **Player Invite
-Link** and **Viewer Invite Link**; either copies that link to your clipboard,
-ready to send. Each is one link for the whole session: send the same one to
-everyone you want in, and each person who opens it gets their own seat.
-Links stop working when the session ends.
+Link** and **Viewer Invite Link**. Either one copies that link to your
+clipboard, ready to send. Each is one link for the whole session, so you send
+the same one to everyone you want in, and each person who opens it gets their
+own seat. Links stop working when the session ends.
 
 <Callout type="info">
 In a solo session, chat and webcam are hidden until someone else joins, so a
@@ -59,42 +59,48 @@ Everything but the game itself lives in the bar along the bottom (swipe it
 down, or tap the handle at the bottom edge, to hide it and get the whole
 screen back). Left to right:
 
-- **The stream controls** at the left edge: a volume fader for the game with
-  a mute button under it, a **Reload Stream** button for the rare case the
-  stream freezes, and **Gaming Mode**, described below.
+- **The stream controls** at the left edge: a volume fader (a slider) for the
+  game with a mute button under it, a **Reload Stream** button for the rare
+  case the stream freezes, and **Gaming Mode**, described below.
 - **The controller tray** (host only), then **your own tile**, then a tile
   for everyone else in the room.
 - **The invite tile** (host only), described above.
-- **Chat**, on the right: the most recent messages with a box to type into.
-  Tap into the box and it grows up over the bottom half of the game to show
-  the whole history; tap anywhere else (or press Esc) and it drops back
-  down. While it's closed, new messages pop up briefly above it so you don't
-  miss them. On a small screen, once there are enough tiles to need the
-  room, chat folds to a narrow tab at the right edge with a dot for unread
-  messages; tap the tab to open it.
+- **Chat**, on the right: the most recent messages, with a box to type into.
+  Tap into the box and it grows up to cover the bottom half of the game,
+  showing the whole history. Tap anywhere else (or press Esc) and it drops
+  back down. While it's closed, new messages pop up briefly above it so you
+  don't miss them. On a small screen, once there isn't enough space for all
+  the tiles and chat side by side, chat folds down to a narrow tab at the
+  right edge with a dot marking unread messages. Tap the tab to open it.
 
-Saving and stopping the game are RomM's own controls, on the bar RomM shows
-above the stream, not the room's. Volume appears in both places: the room's
-fader is the only one an invite link gets, and inside RomM it sits alongside
-RomM's, each turning the same game down.
+Saving your progress and stopping the game aren't things the room's bar
+does. Those buttons are RomM's own, on the bar RomM shows above the stream.
+Volume shows up in both places. If you joined through an invite link, the
+room's fader is the only volume control you'll see. If you're inside RomM,
+the room's fader sits right alongside RomM's own volume control, and either
+one turns the same game down.
 
 ### Gaming mode
 
-The crosshair button blows the stream up to the whole screen and hands the
-game your mouse the way a native game takes it: the pointer stops being a
-cursor on a page and becomes aim, so mouselook works instead of the mouse
-sliding off the edge of the stream. It only appears while you're the one
-holding mouse and keyboard, since there's nothing to aim with otherwise.
+The crosshair button makes the stream fill your whole screen and takes over
+your mouse the way a game installed on your own PC would. Normally your
+mouse can slide right off the edge of the stream, like it's just another
+window on your screen. Gaming mode stops that: your mouse becomes aim
+instead of a pointer, so mouselook (looking around by moving the mouse)
+works properly. The button only shows up while you're the one holding mouse
+and keyboard, since there's nothing to aim with otherwise.
 
 Press **Esc three times quickly** to come back out. The first two go through
 to the game, so in-game menus still open on them.
 
 <Callout type="warn" title="Esc may drop you out on the first press.">
-Trapping Esc needs a keyboard lock that browsers only grant to the page
-you're actually looking at. On an invite link that's the room, so the three
-press exit works. Inside RomM the room is in a frame and the lock is RomM's
-to ask for, so the first Esc leaves gaming mode. Mouselook still works
-either way.
+Catching the Esc key depends on something browsers call a keyboard lock,
+which they only grant to the page you're actually looking at. Open the room
+from an invite link, and the room is that page, so all three presses work as
+described above. Open it from inside RomM, and the room sits inside RomM's
+page instead (a page within a page), so the keyboard lock belongs to RomM,
+not the room, and the very first Esc press leaves gaming mode. Mouselook
+still works either way.
 </Callout>
 
 ### Your own tile
@@ -118,11 +124,14 @@ someone. Joins, leaves, and username changes show up as system messages so
 the room stays easy to follow.
 
 Turning your webcam or mic on shares them with everyone else in the room, not
-just the host. Each person's video tile has its own mute buttons so anyone
-can locally mute someone else's audio or hide their video without affecting
-what that person is actually sending. The host also has a star icon on each
-tile to highlight one person as the designated speaker, a visual cue for the
-room rather than anything that changes audio.
+just the host. Each person's video tile has its own mute buttons, so you can
+mute someone's audio or hide their video just on your own screen, without
+changing what they're actually sending to the room. The host also has a star
+icon on each tile to name one person as the designated speaker. This does
+more than mark a tile: once a speaker is set, the room stops passing along
+everyone else's microphone audio to any listener, until the host picks
+someone new or clears the star. Video keeps flowing as normal either way, so
+a muted participant's webcam stays visible, just silent.
 
 <Callout type="warn" title="Your browser will ask for camera/mic permission the first time.">
 If it's ever denied by mistake, the button stays available: click it again
@@ -137,7 +146,7 @@ game.
 
 Only the host sees the tray of unassigned controller icons (gamepad icons
 numbered by slot, plus one mouse-and-keyboard icon). The host drags an icon
-from the tray onto someone's video tile to hand them that input; dragging it
+from the tray onto someone's video tile to hand them that input. Dragging it
 back to the tray takes it away again. Whoever currently holds a gamepad slot
 or the mouse and keyboard sees that icon sitting on their own tile, so
 everyone in the room can see at a glance who's driving.
@@ -163,19 +172,19 @@ is instant.
 </Step>
 </Steps>
 
-Spectators are never a valid drop target: the host can watch and chat with
+Spectators are never a valid drop target. The host can watch and chat with
 them, but can't hand them a controller.
 
 ## Resolution and stream layout
 
 The game stream automatically resizes to fit whoever's watching. If you're
-the host, a lock icon on your own tile freezes the current resolution so it
-stops adjusting itself as people join and leave; unlocking it goes back to
+the host, a lock icon on your own tile freezes the current resolution, so it
+stops adjusting itself as people join and leave. Unlocking it goes back to
 automatic. A second icon lets the host manually match the stream's resolution
 to one specific participant's screen.
 
 Video tiles (yours and everyone else's) can be dragged to reorder them in the
-grid, and the whole video row can be collapsed with its own toggle if you'd
+grid. The whole video row can also be collapsed with its own toggle, if you'd
 rather focus on the game.
 
 ## Ending the session
@@ -184,7 +193,7 @@ Only the host can end the session, with the stop button on RomM's own bar
 above the stream. It ends the session for everyone: the game saves, the
 emulator stops, and every link into the room stops working. Guests who
 leave (close the tab, lose signal) keep their seat and can come back on the
-same link; any controller they were holding goes back to the tray.
+same link. Any controller they were holding goes back to the tray.
 
 ## Language
 

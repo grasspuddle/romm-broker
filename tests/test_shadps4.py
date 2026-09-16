@@ -708,6 +708,36 @@ def test_launch_stops_first_then_spawns_with_ipc_enabled(
     assert emu._proc.stdin.written == [b"RUN\n", b"START\n"]
 
 
+def test_a_launch_sends_shadps4_to_the_data_root_the_broker_uses(
+    monkeypatch: pytest.MonkeyPatch, versions_dir: Path, rom_root: Path, tmp_path: Path
+) -> None:
+    """The spawned emulator resolves the same data root the broker pins a GPU in and dumps.
+
+    Nothing on shadPS4's command line names it, so the exported XDG root is
+    the whole of the agreement. A drift both strands the pinned config.json
+    and points the save dump at a savedata tree the running emulator never
+    writes to, which loses saves without reporting anything.
+    """
+    _make_release(versions_dir, "v0.17.0 - Only Release")
+    monkeypatch.setattr(shadps4, "DATA_DIR", tmp_path / "data" / "shadPS4")
+    monkeypatch.setattr(shadps4.Shadps4, "stop", lambda self: None)
+    spawned: dict[str, dict[str, str]] = {}
+
+    def fake_spawn(
+        self: shadps4.Shadps4, cmd: list[str], env: dict[str, str], stdin_pipe: bool = False
+    ) -> None:
+        spawned["env"] = env
+        self._proc = _FakeProc()
+
+    monkeypatch.setattr(shadps4.Shadps4, "_spawn", fake_spawn)
+    rom = rom_root / "game.zar"
+    rom.write_bytes(b"")
+
+    shadps4.Shadps4().launch(rom, resume_slot=None)
+
+    assert Path(spawned["env"]["XDG_DATA_HOME"]) / "shadPS4" == shadps4.DATA_DIR
+
+
 def test_launch_pins_gpu_id_before_spawning(
     monkeypatch: pytest.MonkeyPatch, versions_dir: Path, rom_root: Path
 ) -> None:

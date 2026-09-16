@@ -3,16 +3,22 @@ title: "Running the container"
 description: "The linuxserver/webstation:romm image that ships the broker, how to start it, and what it needs from the host."
 ---
 
-The broker is not run on its own. It ships inside
-[linuxserver/docker-webstation](https://github.com/linuxserver/docker-webstation)
-on the `romm` branch, published as `lscr.io/linuxserver/webstation:romm`. The
-image is a selkies desktop with every supported emulator installed, nginx in
-front, and the broker registered as an s6 service that starts once the selkies
-control plane is up.
+You don't run the broker by itself. It ships inside
+[linuxserver/docker-webstation](https://github.com/linuxserver/docker-webstation),
+on the `romm` branch, as the image `lscr.io/linuxserver/webstation:romm`. That
+image is a full Linux desktop, streamed to your browser with software called
+selkies, with every supported emulator already installed and nginx (a web
+server) in front. The broker is registered as one of the container's
+background services, managed by an init system called s6, and it starts once
+selkies's control plane (the part of selkies it talks to) is ready.
+
+Setting this up for the first time? The [Quickstart](/docs/quickstart) walks
+through this page in order, alongside the rest of the setup.
 
 <Callout type="warn">
-The image only runs in Wayland mode and is meant to be run with a GPU. Software
-rendering works for the desktop but not for most emulators.
+The image only works in Wayland mode (the graphics system newer Linux desktops
+use) and is meant to run with a GPU. Without a GPU, the desktop itself still
+works using software rendering, but most emulators will not.
 </Callout>
 
 ## docker-compose
@@ -33,7 +39,7 @@ services:
       - /path/to/config:/config
       - /path/to/roms:/romm
       # optional: pre-seed RetroArch BIOS/firmware instead of drag-and-drop
-      # - /path/to/bios:/config/.local/share/RetroArch/system
+      # - /path/to/bios:/config/.config/retroarch/system
     ports:
       - 3000:3000
       - 3001:3001
@@ -55,49 +61,52 @@ docker run -d \
   -p 3001:3001 \
   -v /path/to/config:/config \
   -v /path/to/roms:/romm \
-  -v /path/to/bios:/config/.local/share/RetroArch/system \
+  -v /path/to/bios:/config/.config/retroarch/system \
   --shm-size="1gb" \
   --restart unless-stopped \
   lscr.io/linuxserver/webstation:romm
 ```
 
-The BIOS mount is optional and specific to RetroArch's shared system
-directory; drop it (and the commented line in the compose example above) if
-you would rather upload files through the desktop, or see
+The BIOS mount is optional. It only applies to RetroArch's shared system
+directory, where RetroArch looks for BIOS and firmware files. Skip it (and
+remove the commented-out line in the compose example above) if you'd rather
+upload those files through the desktop instead. See
 [Getting files into the container](/docs/emulators/setup#getting-files-into-the-container)
-for the equivalent path to mount for other emulators.
+for the matching path to mount for other emulators.
 
 ## Parameters
 
 | Parameter | Function |
 | --- | --- |
-| `-p 3000` | HTTP. Must be reverse proxied; see [Reverse proxy](/docs/deployment/reverse-proxy). |
-| `-p 3001` | HTTPS with a self-signed certificate, for direct access while testing. |
-| `-v /config` | The user's home directory in the container: emulator configs, BIOS and firmware, save data, the broker's pid record and export directory. |
-| `-v /romm` | The ROM library, mounted read-only if you like. Activate rejects any rom path outside `ROM_ROOT` (default `/romm`), and RomM's `library_path` for the container must point here. |
-| `-v .../RetroArch/system` (optional) | A host directory pre-seeded with BIOS and firmware, mounted at RetroArch's shared system directory (`RETROARCH_SYSTEM_DIR`, default `/config/.local/share/RetroArch/system`) instead of dragging files into the desktop after the fact. See [Getting files into the container](/docs/emulators/setup#getting-files-into-the-container). |
-| `--shm-size=1gb` | Recommended for all desktop images. |
-| `-e PUID` / `-e PGID` | The uid and gid the desktop, the emulators and the broker run as. Match them to the owner of the mounted directories. |
-| `-e SUBFOLDER` | URL prefix the whole app is served under, default `/streaming/`. Must equal the path the reverse proxy mounts the container at, trailing slash included. |
-| `-e BROKER_SECRET` | Shared secret RomM sends as `X-Broker-Secret` on the lifecycle endpoints. Unset disables the check. |
-| `-e BROKER_DEV_MODE` | `true` runs the broker from source mounted at `/broker`; see [Dev mode](/docs/container/dev-mode). |
+| `-p 3000` | Plain, unencrypted web traffic (HTTP). This port must sit behind a reverse proxy. See [Reverse proxy](/docs/deployment/reverse-proxy). |
+| `-p 3001` | HTTPS (encrypted), using a self-signed certificate, for connecting directly to the container while testing. |
+| `-v /config` | The user's home directory inside the container. Holds emulator settings, BIOS and firmware, and save data. It's also where the broker keeps its pid record (a small file it uses to find the running emulator again after a restart) and its export directory. |
+| `-v /romm` | Your ROM library, which you can mount read-only if you like. Activate (the call that launches a game) rejects any ROM path outside `ROM_ROOT` (default `/romm`), so RomM's `library_path` for this container must point here. |
+| `-v .../retroarch/system` (optional) | A host folder already filled with BIOS and firmware, mounted at RetroArch's shared system directory (`RETROARCH_SYSTEM_DIR`, default `/config/.config/retroarch/system`) so you don't have to drag files into the desktop by hand afterward. See [Getting files into the container](/docs/emulators/setup#getting-files-into-the-container). |
+| `--shm-size=1gb` | Sets the container's shared memory size. Recommended for all desktop images like this one. |
+| `-e PUID` / `-e PGID` | The user ID and group ID (uid/gid) that the desktop, the emulators, and the broker all run as. Match them to the owner of your mounted directories so file permissions line up. |
+| `-e SUBFOLDER` | The URL path the whole app is served under, default `/streaming/`. Must exactly match the path your reverse proxy mounts the container at, trailing slash included. |
+| `-e BROKER_SECRET` | A shared password that RomM sends as the `X-Broker-Secret` header on the lifecycle endpoints (the API calls that start and stop sessions), so the broker knows the request really came from RomM. Unset, the broker refuses to start unless `BROKER_DEV_MODE` is also set, in which case it starts with those endpoints unauthenticated. |
+| `-e BROKER_DEV_MODE` | Set to `true` to run the broker from source code mounted at `/broker`. See [Dev mode](/docs/container/dev-mode). |
 
-Every other broker and emulator variable is optional and listed under
+Every other broker and emulator variable is optional. They're listed under
 [Configuration](/docs/configuration).
 
 ### GPU
 
-Mount the GPU into the container and the base image configures it for both
-rendering and encoding on its own; no extra variables are needed. The full
-guide, including multi-GPU pinning, hardware encoders and debugging, is the
-selkies
+Mount your GPU into the container and the base image sets it up automatically,
+for both rendering the desktop and encoding the video stream. No extra
+variables are needed. The full guide, covering multi-GPU pinning (choosing
+which GPU to use when you have more than one), hardware encoders, and
+troubleshooting, is the selkies
 [GPU acceleration page](https://docs.linuxserver.io/selkies/user-guide/gpu/#automatic-configuration).
-The minimal additions to the examples above:
+Here's the minimum you need to add to the examples above:
 
 <Tabs items={['Intel / AMD', 'NVIDIA']}>
 <Tab value="Intel / AMD">
 
-Open source drivers only need the render node passed through.
+Open-source drivers only need the render node (a device file for the GPU)
+passed through.
 
 ```yaml title="docker-compose"
     devices:
@@ -108,7 +117,8 @@ Open source drivers only need the render node passed through.
   --device /dev/dri \
 ```
 
-On a multi-GPU host, pin the node the container should use:
+If your host has more than one GPU, pin (select) the node the container
+should use:
 
 ```yaml
     environment:
@@ -119,7 +129,8 @@ On a multi-GPU host, pin the node the container should use:
 </Tab>
 <Tab value="NVIDIA">
 
-Needs the NVIDIA container runtime on the host (driver 595.80 or newer).
+Needs the NVIDIA container runtime installed on the host, with driver
+version 595.80 or newer.
 
 ```yaml title="docker-compose"
     deploy:
@@ -140,59 +151,65 @@ Needs the NVIDIA container runtime on the host (driver 595.80 or newer).
   --device /dev/nvidia-modeset \
 ```
 
-`/dev/nvidia-modeset` is the part that is easy to miss. The toolkit injects
-`nvidia0`, `nvidiactl` and `uvm`, but not the modeset node, and without it the
-GPU enumerates, computes and encodes while no Vulkan client can create a
-swapchain on the compositor's surfaces. Emulators then render without ever
-reaching the screen and the browser shows a black canvas. If the node does not
-exist on the host, `nvidia-modprobe --modeset` creates it.
+`/dev/nvidia-modeset` is the device file that's easy to miss. The NVIDIA
+container toolkit automatically adds `nvidia0`, `nvidiactl` and `uvm`, but not
+the modeset device. Without it, the GPU can still detect itself, compute and
+encode video, but the graphics system (Vulkan) can't actually display
+anything on screen: emulators run without ever reaching the screen, and the
+browser shows a black canvas. If the node does not exist on the host,
+`nvidia-modprobe --modeset` creates it.
 
-`--gpus all` also defaults `NVIDIA_DRIVER_CAPABILITIES` to `compute,utility`,
-so the cli sets `graphics` explicitly to match the compose `capabilities` list.
+`--gpus all` on its own only turns on `compute,utility` for
+`NVIDIA_DRIVER_CAPABILITIES`. That's why the cli example above sets `graphics`
+explicitly, to match the `capabilities` list in the compose example.
 
 <Callout type="warn" title="Unprivileged LXC needs more than this">
-Proxmox LXC is not a tested or certified target for selkies based images, and
-a dedicated VM running Docker is the supported way to run these containers
-from Proxmox. One confirmed setup (RTX 4060, driver 595.80, Open Kernel
-Module) needed all of the following on top of the device mapping above:
+Proxmox LXC (Proxmox's own lightweight containers, different from Docker) is
+not a tested or certified way to run selkies-based images like this one. The
+supported way to run this on Proxmox is a dedicated VM running Docker. One
+setup that's been confirmed to work (RTX 4060, driver 595.80, Open Kernel
+Module) needed everything below, on top of the device mapping above:
 
-- `chmod 666 /dev/dri/* /dev/nvidia-modeset` from a `/custom-cont-init.d`
-  script. The LXC passes them through at `0660` and the host resets the modes
-  on every reboot, so `abc` cannot open them otherwise.
-- Bind-mounts from the LXC for what the toolkit skips:
+- Run `chmod 666 /dev/dri/* /dev/nvidia-modeset` from a `/custom-cont-init.d`
+  script (a script the image runs automatically at startup). The LXC passes
+  these device files through at permission `0660`, and the host resets that
+  on every reboot, so the container's `abc` user can't open them otherwise.
+- Bind-mount (share directly from the host) what the toolkit skips:
   `/usr/lib/x86_64-linux-gnu/gbm/`, `/usr/share/egl/egl_external_platform.d/`,
   `libnvidia-egl-gbm.so.1*` and `/usr/share/glvnd/egl_vendor.d/10_nvidia.json`.
-  Without these the compositor falls back to Pixman software rendering.
+  Without these, the desktop falls back to software rendering (called Pixman)
+  instead of using the GPU.
 - `PIXELFLUX_WAYLAND=true`.
 
-[Issue #32](https://github.com/romm-streaming/romm-broker/issues/32) has the
-full diagnosis.
+See [Issue #32](https://github.com/romm-streaming/romm-broker/issues/32) for
+the full explanation.
 </Callout>
 
 </Tab>
 </Tabs>
 
-Several launchers pin a renderer that is known to work on the integrated AMD
-parts the image is tested on (`DOLPHIN_VIDEO_BACKEND`, `XEMU_RENDERER`);
-change them if your driver prefers Vulkan. PCSX2 has no such pin. Its
-renderer lives in `PCSX2.ini`, picked from its own setup wizard, so a
-"Failed to initialize GS" startup error on an AMD iGPU points to RADV
-(Vulkan) failing to init on that part. Switch PCSX2's renderer to OpenGL
-instead, in **Settings > Graphics**: it uses radeonsi and is confirmed to
-work.
+Some emulators (`DOLPHIN_VIDEO_BACKEND`, `XEMU_RENDERER`) are pinned to a
+renderer known to work on the integrated AMD graphics this image is tested
+on. Change these if your driver prefers Vulkan instead. PCSX2 has no such
+pin: its renderer setting lives in `PCSX2.ini`, picked by its own setup
+wizard. So a "Failed to initialize GS" startup error on an AMD integrated
+GPU means RADV (AMD's Vulkan driver) failed to start on that hardware.
+Switch PCSX2's renderer to OpenGL instead, in **Settings > Graphics**: it
+uses a different driver (radeonsi) that's confirmed to work.
 
 ## First run
 
-The container boots to the webstation desktop. Before launching games through
-RomM, every emulator you plan to use needs its BIOS, firmware or keys and a
-quick controller check. Launch a `desktop` session from RomM (or open
-`https://yourhost:3001/streaming/` directly) and follow
-[Emulator setup](/docs/emulators/setup).
+The container boots straight to the webstation desktop. Before you launch
+games through RomM, every emulator you plan to use needs its BIOS, firmware,
+or decryption keys set up, plus a quick controller check. Launch a `desktop`
+session from RomM (or open `https://yourhost:3001/streaming/` directly) and
+follow [Emulator setup](/docs/emulators/setup).
 
 ## Wiring it into RomM
 
-RomM talks to the container over REST and embeds its room in an iframe. In
-RomM's `config.yml`:
+RomM talks to the container over REST (a common way for apps to communicate
+over plain HTTP) and embeds its room in an iframe (a webpage shown inside
+another webpage). Add this to RomM's `config.yml`:
 
 ```yaml
 streaming:
@@ -208,7 +225,8 @@ streaming:
       label: WEBSTATION
 ```
 
-`host` is where the browser goes, `broker_host` is where RomM's backend goes
-server to server, and `subfolder` is the container's `SUBFOLDER`. The full
-story, including why `host` is a path, is in
+`host` is the address your browser connects to. `broker_host` is the address
+RomM's backend server uses to reach the broker directly, server to server,
+not through your browser. `subfolder` should match the container's
+`SUBFOLDER`. The full story, including why `host` is written as a path, is in
 [Reverse proxy](/docs/deployment/reverse-proxy).

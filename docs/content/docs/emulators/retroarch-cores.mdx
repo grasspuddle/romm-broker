@@ -3,28 +3,31 @@ title: "RetroArch core manifest"
 description: "Which libretro core each RomM platform maps to, and whether it needs a BIOS, firmware, or key file before it will boot."
 ---
 
-`retroarch_platforms.json` maps every RomM platform slug this repo supports to a
-libretro core. Most cores just work once downloaded, but a number of them need
-a BIOS, firmware, or key file dropped into RetroArch's system directory before
-they will actually boot a game rather than sit on a black screen.
+`retroarch_platforms.json` lists every RomM platform this repo supports and the
+libretro core RetroArch uses to run it. (A libretro core is a plugin that lets
+RetroArch emulate one specific system.) Most cores work as soon as you
+download them. Some need a BIOS, firmware, or key file dropped into
+RetroArch's system directory first, or the game just sits on a black screen
+instead of booting.
 
-This page is a repo-specific summary, not a replacement for libretro's own
-documentation. For anything not covered here, or for exact file names and
-sourcing per core, defer to libretro's
+This page is a summary specific to this repo, not a replacement for
+libretro's own documentation. For anything not covered here, or for exact
+file names and where to get them for each core, check libretro's
 [core-specific BIOS documentation](https://docs.libretro.com/library/bios/#links-to-the-core-specific-bios-information),
-which is the authoritative source this table was cross-referenced against.
+the authoritative source this table was cross-referenced against.
 
 Setup tiers used below:
 
 - **Required**: the core will not boot a real game without this file in place.
-- **Optional**: the core runs on a built-in HLE implementation; a real file
-  only improves accuracy or fixes specific titles.
+- **Optional**: the core runs on a built-in HLE (High-Level Emulation)
+  implementation instead of real firmware; a real file only improves accuracy
+  or fixes specific titles.
 - **None**: nothing to source for this platform.
 
-A few rows are flagged as not confirmed against libretro's hub under the exact
-core name this repo uses (a newer or differently-named core than what the hub
-lists). Treat those as "needs an empirical check the first time you hit them,"
-not as settled.
+A few rows are flagged because libretro's hub doesn't list this repo's exact
+core name (sometimes the core is newer, or just named differently than what
+the hub uses). Treat those as "check it yourself the first time you run into
+that platform," not as settled fact.
 
 ## Nintendo, cartridge and handheld
 
@@ -44,7 +47,7 @@ not as settled.
 | Platform | Core | Setup | Details |
 | --- | --- | --- | --- |
 | GameCube / Wii | `dolphin` | Optional | HLE boot by default; a real `IPL.bin` improves accuracy. Uses a custom save-subtree layout. |
-| 3DS | `azahar` | Optional | Most dumps boot with nothing; encrypted `.3ds`/`.cci` files need decryption keys (`boot9.bin`/`boot11.bin`) in the system dir. Sourced from a GitHub release instead of the buildbot, and uses a custom save-subtree layout. This is the only integration point for 3DS; standalone Azahar has no IPC for the broker to reach it (see [Azahar setup](/docs/emulators/setup#azahar)). |
+| 3DS | `azahar` | Optional | Most dumps boot with nothing extra; encrypted `.3ds`/`.cci` files need decryption keys (`boot9.bin`/`boot11.bin`) in the system dir. This core comes from a GitHub release instead of libretro's usual build server (the buildbot), and it uses a custom save-subtree layout. This is the only way the broker supports 3DS: standalone Azahar has no IPC (a way for another program to send it commands), so there's no way for the broker to control it (see [Azahar setup](/docs/emulators/setup#azahar)). |
 
 ## Sega
 
@@ -60,8 +63,8 @@ not as settled.
 
 | Platform | Core | Setup | Details |
 | --- | --- | --- | --- |
-| PlayStation | `swanstation` | Required | Region BIOS (e.g. `scph5501.bin`). Not listed on libretro's hub under this exact core name (a newer, DuckStation-derived core), but every PS1 core needs a real BIOS. |
-| PSP | `ppsspp` | None | The recommended path for PSP over the standalone PPSSPP module. PPSSPP fully HLEs PSP firmware, no BIOS file to source. The broker auto-symlinks the container's standalone PPSSPP asset tree (`/usr/share/ppsspp/assets`) into RetroArch's system dir, since the core refuses to boot without it; this only works if that package ships in the image. |
+| PlayStation | `swanstation` | Required | Region BIOS (e.g. `scph5501.bin`). This core isn't listed on libretro's hub under this exact name because it's a newer core based on DuckStation, but every PS1 core needs a real BIOS file. |
+| PSP | `ppsspp` | None | The recommended way to run PSP games, better than the standalone PPSSPP module. PPSSPP emulates the PSP's firmware itself (the HLE from above), so there's no BIOS file to find. The broker automatically links the container's standalone PPSSPP asset tree (`/usr/share/ppsspp/assets`) into RetroArch's system directory, because the core won't boot without it. This only works if that package is included in your image. |
 
 ## NEC PC Engine
 
@@ -75,9 +78,9 @@ not as settled.
 
 | Platform | Core | Setup | Details |
 | --- | --- | --- | --- |
-| Neo Geo AES / MVS | `fbneo` | Required | `neogeo.zip` in the system dir, on top of a correct romset. |
-| Arcade, CPS1, CPS2, CPS3 | `fbneo` | Required | Correctly-built, MAME-compatible non-merged romsets, with BIOS regions bundled inside each game's own zip. The fiddliest tier to test: a "working" romset is tied to the exact MAME revision FBNeo targets, not just having the right files present. |
-| Neo Geo CD | `neocd` | Required | Neo Geo CD BIOS plus font ROM. Not on libretro's flat BIOS hub table; worth confirming empirically before assuming a filename. |
+| Neo Geo AES / MVS | `fbneo` | Required | `neogeo.zip` in the system dir, on top of a correct romset (the matching bundle of ROM files the arcade core expects for that game). |
+| Arcade, CPS1, CPS2, CPS3 | `fbneo` | Required | Needs correctly-built, MAME-compatible "non-merged" romsets: each game's own zip file, with the right BIOS files bundled inside it rather than shared across games. This is the hardest platform to get right, because a romset only works if it matches the exact MAME version FBNeo was built against, not just if it has the right files in it. |
+| Neo Geo CD | `neocd` | Required | Neo Geo CD BIOS plus font ROM. Not on libretro's flat BIOS hub table, so double-check the exact filename yourself before assuming one. |
 | Neo Geo Pocket / Color | `mednafen_ngp` | None | Fully HLE'd. |
 
 ## Atari
@@ -85,7 +88,7 @@ not as settled.
 | Platform | Core | Setup | Details |
 | --- | --- | --- | --- |
 | Atari 2600 | `stella` | None | |
-| Atari 5200 | `a5200` | Required | `5200.rom`. Not confirmed by this exact core name on libretro's hub (only the generic Atari800 core is listed there); well-documented elsewhere. |
+| Atari 5200 | `a5200` | Required | `5200.rom`. Libretro's hub doesn't list a core by this exact name (only the generic Atari800 core), but this file is well documented elsewhere. |
 | Atari 7800 | `prosystem` | Optional | Enables cart-encryption and high-score-save support a few games expect; most run fine without it. |
 | Lynx | `handy` | Optional | `lynxboot.img`, only a handful of titles need it. |
 | Jaguar | `virtualjaguar` | None | The only platform in this table with savestates disabled entirely (`savestate: false` in the platform config). |
@@ -96,7 +99,7 @@ not as settled.
 | Platform | Core | Setup | Details |
 | --- | --- | --- | --- |
 | WonderSwan / Color | `mednafen_wswan` | None | Fully HLE'd. |
-| 3DO | `opera` | Required | System boot ROM (e.g. `panafz10.bin`); no HLE path exists for this system. |
+| 3DO | `opera` | Required | System boot ROM (e.g. `panafz10.bin`). This system has no HLE fallback, so you need a real boot ROM to play anything. |
 | ColecoVision | `gearcoleco` | Required | `coleco.rom`. |
 | Intellivision | `freeintv` | Required | `exec.bin` plus `grom.bin`. |
 | Vectrex | `vecx` | Optional | The built-in minimal BIOS works; a real `bios.bin` improves a few titles. |
@@ -109,7 +112,7 @@ not as settled.
 | DOS | `dosbox_pure` | None | DOSBox provides its own virtual BIOS. |
 | Amiga | `puae` | Required | Kickstart ROM matching the emulated model (e.g. `kick13.rom`/`kick31.rom`). |
 | Commodore 64 | `vice_x64` | None | VICE ships open-licensed replacement ROMs by default; real Kernal/Basic ROMs are optional. |
-| MSX / MSX2 | `bluemsx` | Required | Machine-specific system ROMs (e.g. `MSX.ROM`, `MSX2.ROM`, `MSX2EXT.ROM`, `DISK.ROM`), varying by region. |
+| MSX / MSX2 | `bluemsx` | Required | Machine-specific system ROMs (e.g. `MSX.ROM`, `MSX2.ROM`, `MSX2EXT.ROM`, `DISK.ROM`). Which ones you need varies by region. |
 | ZX Spectrum | `fuse` | None | ROM ships bundled with the core. |
 
 ## Source

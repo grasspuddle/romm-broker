@@ -5,9 +5,11 @@ description: "Moving save archives in and out of the container, and syncing a wh
 
 ## Save archive transfer
 
-Activate's `save.archive` is a container path, but the parent is a separate
-service holding bytes, so archives move over these endpoints in both
-directions.
+When you launch a game, the `save.archive` field has to be a file path
+inside the container. But RomM runs as its own separate service: it only
+has the raw save file, not a way to write directly into the container's
+file system. So a save archive has to travel between RomM and the
+container over these endpoints, in both directions.
 
 ```
 PUT    /streaming/api/session/imports/{name}.zip   body: raw zip
@@ -16,16 +18,18 @@ GET    /streaming/api/session/exports/{name}.zip
 DELETE /streaming/api/session/exports/{name}.zip
 ```
 
-All four take `X-Broker-Secret`. The upload returns
+All four routes need the `X-Broker-Secret` header. The upload returns
 `{"status": "stored", "name": ..., "path": ..., "size": ...}`; feed that
-`path` back as `save.archive` on activate. Names must be a bare `.zip`
-basename, the body must start with the zip magic, and the size ceiling is the
-same 256 MB the dump uses.
+`path` back as `save.archive` on activate. The name must be a plain `.zip`
+filename with no folders in it, the uploaded data must actually be a zip
+file (checked by its file signature), and it can't be bigger than the same
+256 MiB limit the exit dump uses.
 
-Pulling covers the two cases the exit push cannot: dev mode, where the upload
-is disabled and the archive only ever lands on disk, and a failed upload,
-where the archive on disk is the only remaining copy of the save data. Delete
-each archive once the parent has stored it.
+Pulling an archive through these routes covers two cases the automatic exit
+upload can't: dev mode, where uploading is turned off and the archive only
+ever ends up on disk, and a failed upload, where the archive on disk is the
+only copy of the save data left. Delete each archive once RomM has stored
+it.
 
 ```bash
 # hand a save archive to the container, then launch with it
@@ -43,19 +47,22 @@ curl -k -X DELETE https://localhost:3001/streaming/api/session/exports/abc123-17
 
 ## What an archive holds
 
-An archive is a zip of the emulator's save subtrees, with member paths
-relative to the emulator's save root (for PCSX2, `memcards/...` and
-`sstates/...`). On restore, members outside the subtrees are skipped, and a
-member is not written over a file that is newer on disk, so an old archive
-never rolls a session back. On dump, only files modified since launch are
-included, so an archive is a delta rather than the whole tree.
+An archive is a zip file of the emulator's save subtrees (the specific
+folders inside its save data that actually hold saves and states). The
+paths inside the zip are relative to the emulator's save root folder: for
+PCSX2, that means paths like `memcards/...` and `sstates/...`. When an
+archive is restored, any file outside those folders is skipped, and a file
+already on disk is never overwritten by an older copy from the archive.
+That's what keeps an old archive from rolling a session backward. When an
+archive is built at exit, only the files that changed since launch go into
+it, so an archive holds just the changes, not a full copy of the save data.
 
 ## The archive manifest
 
 Every emulator lays its save directories out differently, and there are
-fourteen of them. So that RomM does not have to carry a table of those
-layouts, a dump archive also holds `.broker-manifest.json` at its root,
-naming the session and labelling each member:
+fourteen of them. So RomM doesn't have to keep its own table of those
+layouts, an archive built at exit also holds a `.broker-manifest.json` file
+at its root, naming the session and labelling each file:
 
 ```json
 {
@@ -79,21 +86,24 @@ naming the session and labelling each member:
 ```
 
 `kind` is one of `state`, `state_screenshot`, `memcard` or `save`. `core` is
-set only for a launcher that fronts many backends (RetroArch), so a RetroArch
-PSP archive can be told from a standalone PPSSPP one; `state_slot` is null
-when the emulator has no save states.
+only set for a launcher that can run several different emulator cores, like
+RetroArch, so a RetroArch PSP archive can be told apart from a standalone
+PPSSPP one. `state_slot` is `null` when the emulator has no save states at
+all.
 
-The manifest describes the archive, it is not save data: it is absent from the
-`save_dump.files` list, and a restore drops it rather than writing it into the
-save tree. Archives taken before it existed carry no manifest and restore
-exactly as they always did.
+The manifest describes what's in the archive, it isn't save data itself: it
+doesn't appear in the `save_dump.files` list, and when an archive is
+restored, the manifest file is dropped instead of being written into the
+emulator's save data. Archives made before this manifest existed simply
+carry none, and they still restore exactly as they always did.
 
 ## Memory cards
 
-Some emulators keep a memory card the broker owns as a whole file or folder:
-PCSX2's Slot 1 folder card, and Dolphin's GameCube memory card. Rather than
-carrying it inside every save archive, RomM can sync the whole card against
-the player with its own routes:
+Some emulators use a memory card: a single file or folder holding save data,
+the way a real memory card would. The broker manages this file directly for
+PCSX2 (its Slot 1 folder card) and Dolphin (its GameCube memory card).
+Instead of bundling it inside every save archive, RomM can sync the whole
+card against the player using its own routes:
 
 ```
 GET /streaming/api/session/memory-card?emulator=pcsx2
@@ -103,33 +113,39 @@ GET /streaming/api/session/memory-card?emulator=dolphin&platform=ngc
 PUT /streaming/api/session/memory-card?emulator=dolphin&platform=ngc   body: raw zip of the card
 ```
 
-Both take `X-Broker-Secret`. The GET serves the card as a zip with an
-`X-Memory-Card-Slot: 1` header (a fixed value, not a real slot number for
-every emulator). A `404` carrying `X-Memory-Card: absent` is the broker
-confirming the card is empty, which is what tells RomM it is safe to wipe;
-every other failure reads as "could not be captured", so a card RomM never
-managed to read is not destroyed on the next claim.
+Both routes need the `X-Broker-Secret` header. The GET sends the card back
+as a zip file, with an `X-Memory-Card-Slot: 1` header (this is always `1`,
+not a real slot number for every emulator). A `404` response carrying an
+`X-Memory-Card: absent` header is the broker confirming the card is
+genuinely empty, which is what tells RomM it's safe to wipe its own copy.
+Every other kind of failure reads as "could not be captured", so a card
+RomM never managed to read is not mistaken for an empty one and deleted the
+next time it tries.
 
-The PUT wipes the existing card and lays down the one being sent. It is
-refused with `409` while a session is up: the emulator holds the card open
-for as long as the game runs, and swapping it underneath corrupts it. RomM
-hydrates before activate and evacuates after exit, so the card is only ever
-replaced with nothing running.
+The PUT wipes the existing card and writes the one you send in its place.
+It's refused with `409` while a session is running: the emulator keeps the
+card file open for as long as the game runs, and replacing it underneath
+would corrupt it. RomM sends the card down before activate and pulls it
+back out after exit, so the card is only ever swapped while nothing is
+running.
 
-`platform` picks which card an emulator syncs when that depends on the
-platform it is serving. Dolphin is the case that needs it: the same launcher
-covers both GameCube and Wii, but only GameCube has a physical card (Wii's
-NAND has no card equivalent and always travels inside the save archive
-instead), so the route requires `platform=ngc` to confirm which one is meant.
-Leave it off, or pass anything else, and the route answers `400` exactly as
-it would for an emulator with no card at all. The card served is Dolphin's
-whole `GC/` tree rather than one region's Card A folder, since a library can
-mix regions and a sync has to carry all of them. PCSX2 needs no `platform`,
-since its Slot 1 card does not depend on one.
+The `platform` parameter says which card to sync, for an emulator whose card
+depends on which platform it's currently running. Dolphin is the case that
+needs it: the same emulator handles both GameCube and Wii, but only
+GameCube has a physical card (Wii saves to its internal flash storage,
+called NAND, which has no memory-card equivalent and always travels inside
+the regular save archive instead), so this route requires `platform=ngc` to
+say which one you mean. Leave `platform` off, or send anything else, and the
+route answers `400`, the same as it would for an emulator with no card at
+all. The card you get back is Dolphin's whole `GC/` folder rather than one
+region's `Card A` folder, since a game library can mix regions and a sync
+has to cover all of them. PCSX2 needs no `platform` value, since its Slot 1
+card doesn't depend on one.
 
-When a card is synced this way, activate is told with
-`save.memory_card_synced: true`. The card then travels as its own image, so the
-restore passes over a stale card inside an older archive and the exit dump
-leaves the card subtree out. `400` from either route means the named emulator
-has no memory card for the given `platform`, `422` that the emulator is
-unknown.
+When you sync a card this way, tell activate about it with
+`save.memory_card_synced: true`. The card then travels as its own file,
+separate from the save archive: a restore will skip a stale card folder if
+an older archive still has one, and the exit dump leaves the card's subtree
+out entirely. A `400` from either memory-card route means the named
+emulator has no memory card for the given `platform`; a `422` means the
+emulator name itself isn't recognised.

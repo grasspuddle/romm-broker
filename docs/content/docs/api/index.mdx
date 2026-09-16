@@ -9,10 +9,15 @@ directly on its HTTPS port; behind a reverse proxy substitute RomM's origin.
 
 ## Authentication
 
-`BROKER_SECRET` is a shared secret between RomM and the container. When it is
-set, the lifecycle endpoints require it in the `X-Broker-Secret` header and
-answer `403` otherwise. When it is unset nothing is checked, which is only
-sensible on a LAN you control.
+`BROKER_SECRET` is a shared secret between RomM and the container, like a
+password only the two of them know. When it's set, the lifecycle endpoints
+require it in the `X-Broker-Secret` header (an extra field sent along with
+the request) and answer `403` if that check fails. Leaving it unset is not a
+"no auth" mode: the broker refuses to start at all, unless
+[dev mode](/docs/container/dev-mode) (`BROKER_DEV_MODE=true`) is also set. In
+dev mode it does start with `BROKER_SECRET` unset, but then every
+session-lifecycle endpoint is left unauthenticated, so a dev-mode broker
+should never be exposed beyond local development.
 
 Endpoints fall into three groups:
 

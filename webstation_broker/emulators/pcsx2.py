@@ -20,7 +20,7 @@ from threading import Thread
 from typing import Any, Optional
 
 from .. import memcard
-from .base import Emulator, base_launch_env
+from .base import Emulator, base_launch_env, xdg_config_dir
 
 log = logging.getLogger(__name__)
 
@@ -30,10 +30,39 @@ ROM_ROOT = Path(os.environ.get("ROM_ROOT", "/romm"))
 A resolved disc image must sit under it; candidates resolving outside are discarded.
 """
 
-INI_PATH = Path("/config/.config/PCSX2/inis/PCSX2.ini")
-"""The PCSX2.ini the broker patches before every launch."""
-SSTATE_DIR = Path(os.environ.get("SSTATE_DIR", "/config/.config/PCSX2/sstates"))
-"""Directory PCSX2 writes its `.p2s` save states into (env `SSTATE_DIR`)."""
+def _data_root() -> Path:
+    """Work out PCSX2's data root the way PCSX2 works it out.
+
+    PCSX2 keeps its whole tree (`inis/`, `memcards/`, `sstates/`) under one
+    root, and picks that root from `XDG_CONFIG_HOME`, not `XDG_DATA_HOME`,
+    despite what it holds. Probed against the container's build with
+    `-testconfig`: a run with only `XDG_CONFIG_HOME` set built the tree under
+    `$XDG_CONFIG_HOME/PCSX2`, and one with only `XDG_DATA_HOME` set ignored it
+    and built the tree under `$HOME/.config/PCSX2`. Following the data
+    variable because the tree holds save states and memory cards would point
+    the broker at a directory PCSX2 never writes.
+
+    Returns:
+        `$XDG_CONFIG_HOME/PCSX2` when that variable is set to an absolute
+        path, otherwise `$HOME/.config/PCSX2` (`$HOME` default `/config`).
+    """
+    return xdg_config_dir("PCSX2")
+
+
+DATA_DIR = _data_root()
+"""PCSX2's data root, holding `inis/`, `memcards/` and `sstates/`.
+
+Not configurable, and deliberately: nothing on pcsx2-qt's command line names
+it (`-help` offers only `-portable`, which forces the tree next to the
+binary), so an override would move only the ini the broker patches and the
+states it globs, while PCSX2 kept resolving its own. `launch` exports the root
+this resolved to instead.
+"""
+
+INI_PATH = DATA_DIR / "inis" / "PCSX2.ini"
+"""The PCSX2.ini the broker patches before every launch, `inis/PCSX2.ini` under `DATA_DIR`."""
+SSTATE_DIR = DATA_DIR / "sstates"
+"""Directory PCSX2 writes its `.p2s` save states into, `sstates` under `DATA_DIR`."""
 PCSX2_LOG_PATH = Path(os.environ.get("PCSX2_LOG_PATH", "/config/pcsx2-qt.log"))
 """Log file the broker tails for this emulator (env `PCSX2_LOG_PATH`, default `/config/pcsx2-qt.log`)."""
 STATE_SLOT = int(os.environ.get("PCSX2_STATE_SLOT", "10"))
@@ -47,8 +76,8 @@ every state operation reads that instance attribute, so a session can be
 pointed at another slot without moving the whole process.
 """
 
-MEMCARD_DIR = Path("/config/.config/PCSX2/memcards")
-"""Directory PCSX2 keeps its memory cards in."""
+MEMCARD_DIR = DATA_DIR / "memcards"
+"""Directory PCSX2 keeps its memory cards in, `memcards` under `DATA_DIR`."""
 _DEFAULT_SLOT1_CARD = "romm-slot1"
 """Card name used when the environment names none, or names one the broker will not carry."""
 _CARD_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 ._-]{0,63}$")
@@ -745,10 +774,12 @@ class Pcsx2(Emulator):
         state_dir: Where PCSX2 writes `.p2s` files.
         log_path: The pcsx2-qt log the broker exposes.
         boot_failed: Set by the boot watchdog when the VM never reached a running state.
+        clears_stale_saves: On; activate empties the save subtrees this session owns.
     """
 
     name = "pcsx2"
     display_name = "PCSX2"
+    clears_stale_saves = True
     save_root = Path("/config/.config/PCSX2")
     save_subtrees = ("memcards", "sstates")
     state_subtrees = ("sstates",)
@@ -845,10 +876,16 @@ class Pcsx2(Emulator):
         seq = self._launch_seq
 
         binary = os.environ.get("PCSX2_BIN", "pcsx2-qt")
-        log.info("launching pcsx2 (rom=%s, resume_slot=%s)", rom_path, resume_slot)
-        self._spawn(
-            [binary, "-batch", "-fullscreen", "--", str(rom_path)], base_launch_env()
+        # Nothing on the command line names the data root, so PCSX2 resolves
+        # it itself, from XDG_CONFIG_HOME. Export the root the broker resolved
+        # so the ini just patched, the card just prepared and the states this
+        # run writes all belong to the tree the broker reads back.
+        env = base_launch_env()
+        env["XDG_CONFIG_HOME"] = str(DATA_DIR.parent)
+        log.info(
+            "launching pcsx2 (rom=%s, resume_slot=%s, data=%s)", rom_path, resume_slot, DATA_DIR
         )
+        self._spawn([binary, "-batch", "-fullscreen", "--", str(rom_path)], env)
 
         # Always: the watchdog verifies boot, and delivers a state only if one
         # was asked for.
@@ -997,8 +1034,8 @@ class Pcsx2(Emulator):
         """Return the newest state file in the broker's slot, or None when it holds nothing."""
         return newest_state_for_slot(self.state_slot)
 
-    def clear_working_slot(self) -> None:
-        """Delete every state in the broker's slot before a new session boots.
+    def clear_working_slot(self, excluded: tuple[str, ...] = ()) -> None:
+        """Empty the save subtrees this session owns before the archive restore.
 
         A `.p2s` is named for the disc it was taken from, and the serial only
         comes off the running disc, so a leftover cannot be told apart from the
@@ -1006,16 +1043,19 @@ class Pcsx2(Emulator):
         session that has already exited and whose states RomM holds, so
         dropping it is what stops the last player's save being served as this
         one's. The archive restore and the resume push both land afterwards.
+
+        The memory cards go the same way whenever they travel in the archive.
+        A `.ps2` card is named by slot, not by player, so the last player's
+        card would otherwise be mounted for this one and ship back out in
+        their dump.
+
+        Args:
+            excluded: Subtrees carried by the whole-card routes. `memcards`
+                lands here when the caller syncs the card separately, and the
+                card is written before activate runs, so clearing it here
+                would delete what RomM just laid down.
         """
-        if not SSTATE_DIR.is_dir():
-            return
-        for pattern in {f"*.{self.state_slot:02d}.p2s", f"*.{self.state_slot}.p2s"}:
-            for stale in SSTATE_DIR.glob(pattern):
-                try:
-                    stale.unlink()
-                    log.info("cleared stale state %s", stale.name)
-                except OSError as exc:
-                    log.warning("could not clear stale state %s: %s", stale.name, exc)
+        self._clear_save_subtrees(excluded)
 
     def state_target(self, filename: str) -> Optional[Path]:
         """Map a pushed state's filename to where it may be written.

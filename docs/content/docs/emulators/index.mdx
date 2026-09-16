@@ -3,10 +3,14 @@ title: "Supported emulators"
 description: "Every launcher the broker registers, what it can do, and the details of how each one is driven."
 ---
 
-An activate request names its launcher with the `emulator` field. Each launcher
-is a subclass of the broker's `Emulator` base class that knows how to boot a
-game, where the emulator keeps its save data, and whether it can save and load
-state on demand.
+An activate request picks its emulator with the `emulator` field. Each emulator
+has its own launcher in the broker (in Python terms, a subclass of the
+broker's shared `Emulator` code). A launcher knows how to start the game,
+where that emulator keeps its save data, and whether it supports save states:
+saving or loading your exact progress on demand while the game is still
+running, not just when you quit. If you haven't got the container itself
+running yet, see the [docker-compose example](/docs/container#docker-compose)
+and [wiring it into RomM](/docs/container#wiring-it-into-romm).
 
 | `emulator` | System | Save states | Disc swap | Save subtrees shipped in the archive |
 | --- | --- | --- | --- | --- |
@@ -19,297 +23,442 @@ state on demand.
 | `azahar` | 3DS | no | no | the SD `title/` and `extdata/` trees and the NAND `extdata/` and `sysdata/` trees |
 | `eden` | Switch | no | no | `nand/user/save/` plus the profile store under `nand/system/save/` |
 | `shadps4` | PlayStation 4 | no | no | `home/1000/savedata/` |
-| `rpcs3` | PlayStation 3 | no | no | the save directories under `dev_hdd0/` |
+| `rpcs3` | PlayStation 3 | no (a resume state is written at exit) | no | the save directories under `dev_hdd0/` |
 | `xemu` | Xbox | no | no | extracted from the HDD image into a staging directory |
 | `xenia` | Xbox 360 | no | no | `content/` under `XENIA_DATA_DIR` |
 | `scummvm` | LucasArts and Sierra era adventure games | yes, over the Global Main Menu | no | `saves/` under `SCUMMVM_DATA_DIR` |
-| `flycast` | Sega Dreamcast | no (a resume state is written at exit) | no | the flat `FLYCAST_DATA_DIR` (VMU saves and the savestate) |
+| `flycast` | Sega Dreamcast | no (a resume state is written at exit) | no | the flat `$XDG_DATA_HOME/flycast` (VMU saves and the savestate) |
 | `desktop` | the webstation desktop itself | no | no | none |
 
-"Save states" is what the status response reports as `supports_states`. When
-it is off, the state routes answer `400` and `resume_slot` is ignored; the
-game's own save data is the only persistence. The exact paths are the
-`save_subtrees` attribute of each class in the
+The "Save states" column above is what the broker's status response reports
+as `supports_states`. When it's off, the emulator can't save or load state
+while the game is running, and the save-state routes return `400` (an error
+code meaning the request is rejected). DuckStation, Flycast and RPCS3 are
+worth calling out here: `supports_states` is off for all three, but each one
+writes a state when it exits cleanly and can boot straight into that state on
+the next launch, so `resume_slot` still matters for them even though live
+saving and loading doesn't work. For every other "no" in the table,
+`resume_slot` really is ignored and the game's own save data is all that's
+kept. Each emulator's exact save paths are listed as the `save_subtrees`
+attribute of its class in the
 [Python reference](/docs/developer/reference/emulators).
 
 ## RetroArch
 
-`emulator: "retroarch"` is the general purpose launcher: one class covering
-every libretro core, with `rom.platform` picking the core (ngc and wii both
-map to `dolphin`, plus snes, n64, dc, saturn, psp, nds, 3ds, arcade and
-genesis). Missing cores are downloaded from the libretro buildbot into the
-user's own `libretro_directory`, which is where RetroArch also keeps the
-matching `.info` files: a core loaded from anywhere else has no core info and
-`GET_STATUS` then segfaults RetroArch mid-session. The user's config is never
-edited, only layered with `--appendconfig`.
+`emulator: "retroarch"` is the general-purpose launcher. RetroArch itself is
+a front end that can run many different emulator engines, called cores, so
+one RetroArch launcher here covers many systems. The `rom.platform` field
+picks which core to use (ngc and wii both map to `dolphin`, plus snes, n64,
+dc, saturn, psp, nds, 3ds, arcade and genesis). The
+[RetroArch core manifest](/docs/emulators/retroarch-cores) lists the full
+platform-to-core mapping and what BIOS, firmware, or key file each one needs
+before it'll boot. If a core is missing, the broker downloads it from the
+libretro buildbot into your own
+`libretro_directory`. That's also where RetroArch keeps the matching `.info`
+file for each core, so a core placed anywhere else has no matching info file,
+and checking its status (`GET_STATUS`) then crashes RetroArch mid-session (a
+segfault). The broker never edits your RetroArch config directly; it only
+layers extra settings on top with `--appendconfig`.
 
-Save states are real, but RetroArch has no "save to slot n" command, so the
-broker parks the slot instead: it walks down to the -1 floor and back up to
-`RETROARCH_STATE_SLOT` (default 0). That runs once per launch and again only
-when a save lands elsewhere, which means the player moved the slot with their
-own hotkeys. The first save of a session costs about 3 s, the rest under 1 s.
-Loads use `LOAD_STATE_SLOT`, which is already absolute. Tunables:
-`RETROARCH_SLOT_STEP_DELAY` (0.1 s between presses) and
-`RETROARCH_SLOT_HOME_STEPS` (24 presses to reach the floor).
+Save states work, but RetroArch has no direct "save to slot number n"
+command. Instead, the broker steps the slot counter all the way down to -1
+(the floor) and back up to
+[`RETROARCH_STATE_SLOT`](/docs/configuration/emulators#retroarch) (default
+0), to make sure it lands on the right slot. This happens once per launch,
+and again only if a save shows up in a different slot, which means the
+player changed slots with their own hotkeys. The first save of a session
+takes about 3 seconds; later saves take under 1 second. Loading uses
+`LOAD_STATE_SLOT`, which can jump straight to a slot number, so it doesn't
+need the same trick. Two settings control the timing:
+[`RETROARCH_SLOT_STEP_DELAY`](/docs/configuration/emulators#retroarch) (0.1
+seconds between presses, by default) and
+[`RETROARCH_SLOT_HOME_STEPS`](/docs/configuration/emulators#retroarch) (24
+presses to reach the floor, by default).
 
-Not every core serializes, so a platform whose core does not can set
-`"savestate": false` in the table. `supports_states` then reports `false` for
-that platform, the state routes answer `400`, `resume_slot` is ignored and
-exit saves no state. RetroArch also empties its working slot at activate, the
-same as PCSX2 below.
+Not every core can save a state (some can't turn their memory into a save
+file, i.e. "serialize" it). A platform whose core can't do this can be marked
+`"savestate": false` in the table. When that's set, `supports_states` reports
+`false` for that platform, the save-state routes return `400`, `resume_slot`
+is ignored, and exit saves no state. RetroArch also empties its working slot
+when a game activates, the same as PCSX2 does below.
 
-Multi-disc games: `rom.path` may point at an `.m3u` playlist or a folder
-holding one, and the broker prefers the playlist on disc platforms. A running
-core can change discs through the [swap-disc route](/docs/api/activate#swap-discs).
+For multi-disc games, `rom.path` can point at an `.m3u` playlist file, or a
+folder that contains one; on disc-based platforms the broker prefers the
+playlist when one exists. While the game is running, you can switch discs
+through the [swap-disc route](/docs/api/activate#swap-discs).
 
-The platform-to-core table lives in `retroarch_platforms.json` next to the
-launcher; `RETROARCH_CORE_URL_<CORE>` pins a single core's download without
-editing it.
+The full list matching each platform to its core lives in
+`retroarch_platforms.json`, next to the launcher's code. To pin exactly where
+one specific core downloads from, without editing that file, set
+[`RETROARCH_CORE_URL_<CORE>`](/docs/configuration/emulators#retroarch).
 
 ## PCSX2
 
-Driven over its PINE socket (`$XDG_RUNTIME_DIR/pcsx2.sock`) for save, load,
-status and the game serial. PCSX2 works in slot 10, its own autosave slot.
-State files (`.p2s`) are named for the disc they were taken from, and the
-serial only comes off the running disc, so a file left over from an earlier
-session cannot be told apart from the current game's. PCSX2 therefore empties
-its working slot at the start of activate, before the archive is restored;
-RomM already holds those states, and clearing them is what stops the last
-player's save being served as this one's.
+The broker talks to PCSX2 over its PINE socket
+(`$XDG_RUNTIME_DIR/pcsx2.sock`), PCSX2's own interface for letting outside
+programs send it commands, for saving, loading, checking status, and reading
+the game's serial number. PCSX2 saves into slot 10, which is PCSX2's own
+built-in autosave slot. State files (`.p2s`) are named after the disc they
+came from, and the game serial can only be read off the disc that's
+currently running, so a leftover state file from an earlier session can't be
+told apart from the current game's just by looking at it. PCSX2 therefore
+clears its working slot at the very start of activation, before the save
+archive is restored: RomM already keeps its own copies of these states, and
+clearing the slot first is what stops an old player's save from being served
+as if it belonged to the new session.
 
-The Slot 1 memory card is a folder card the broker owns (`PCSX2_SLOT1_CARD`,
-default `romm-slot1`). With `save.memory_card_synced` set, the whole card
-travels on the [memory card routes](/docs/api/archives#memory-cards) instead of
-inside the save archive.
+The Slot 1 memory card is a folder-based card the broker manages itself
+([`PCSX2_SLOT1_CARD`](/docs/configuration/emulators#pcsx2), default
+`romm-slot1`). If `save.memory_card_synced` is
+set, the whole memory card is handled through the
+[memory card routes](/docs/api/archives#memory-cards) instead of being
+bundled inside the regular save archive.
 
 ## DuckStation
 
-No mid-session save states: DuckStation exposes nothing the broker can drive
-while a game runs, so the state routes answer `400`. What it does have is a
-graceful shutdown that serialises a resume state, which exit reports as its
-state file; that is why `DUCKSTATION_STOP_WAIT` is the longest SIGTERM grace
-of the set. Memory cards and that state live under the data root the archive
-carries.
+DuckStation has no mid-session save states: it doesn't give the broker
+anything to hook into while a game is running, so the save-state routes
+return `400`. What it does have is a graceful shutdown: when it closes
+cleanly, it writes a resume state, and the broker reports that file as the
+exit save state. Getting that clean shutdown takes longer than for other
+emulators, which is why
+[`DUCKSTATION_STOP_WAIT`](/docs/configuration/emulators#duckstation), the
+time the broker waits after asking DuckStation to quit (a SIGTERM signal,
+the standard request a program can ignore or handle gracefully) before
+forcing it closed, is the longest of any emulator here. Memory cards and
+that resume state both live
+under the data root that the save archive carries.
 
 ## Dolphin
 
-Save and load go through xdotool hotkeys (Shift+F`n` saves slot `n`, F`n`
-loads it), so the broker waits for the render window before sending them and
-confirms a save by watching `StateSaves/` for the file. The video backend is
-pinned to OpenGL at launch (`DOLPHIN_VIDEO_BACKEND`). GameCube
-Slot A is pinned to the GCI folder card device so the card is a directory the
-archive can carry.
+Save and load are done by sending Dolphin the same keyboard shortcuts a
+player would use, through xdotool, a tool that lets the broker simulate key
+presses inside the container: Shift+F`n` saves slot `n`, and F`n` loads it.
+The broker waits for Dolphin's game window to appear before sending these,
+and confirms a save actually happened by watching the `StateSaves/` folder
+for the new file. The video backend is locked to OpenGL when Dolphin
+launches
+([`DOLPHIN_VIDEO_BACKEND`](/docs/configuration/emulators#dolphin)). For
+GameCube, memory card Slot A is set
+to a folder-based card device, so the card is a normal directory the save
+archive can carry along.
 
 ## PPSSPP
 
-Hotkey driven like Dolphin, working in slot 1. Save data and states live under
-`PSP/` in the config root.
+Like Dolphin, PPSSPP is driven with keyboard hotkeys, and it always saves to
+slot 1. Save data and save states both live under `PSP/` in the config
+folder.
 
-For PSP the RetroArch `ppsspp` core is the better option. It is the same
-emulator core underneath, but it comes with RetroArch's controller handling
-and its real save-state interface, where the standalone is driven by hotkeys
-into its own GUI and has the flakier pad support of the two. PSP is not
-demanding enough for RetroArch's overhead to matter. The standalone stays
-supported for anyone who wants PPSSPP's own UI and settings.
+For PSP games, the RetroArch `ppsspp` core is generally the better choice.
+It's the same emulator engine underneath, but running it through RetroArch
+gets you RetroArch's controller handling and its proper save-state
+interface, instead of the standalone app's hotkeys-into-its-own-menu approach
+and its shakier controller support. PSP games aren't demanding enough for
+RetroArch's extra overhead to matter. The standalone PPSSPP launcher is still
+here and supported, for anyone who prefers PPSSPP's own interface and
+settings.
 
 ## Cemu
 
-No save states; `mlc01/usr/save/` is the persistence. Cemu binds controllers
-by SDL GUID, so the launcher derives the selkies virtual pad's GUIDs from
-`CEMU_PAD_NAME` and writes a controller profile before each launch
-(`CEMU_PAD_UUIDS` overrides the derived list). Cemu has no SIGTERM handler,
-so `CEMU_STOP_WAIT` only covers process-group teardown.
+Cemu has no save states; `mlc01/usr/save/` is where its save data lives.
+Cemu identifies controllers by a GUID, a unique ID string that SDL (the input
+library it uses) generates for each device. So the launcher works out what
+GUID the room's virtual gamepad will report, based on
+[`CEMU_PAD_NAME`](/docs/configuration/emulators#cemu), and writes a matching
+controller profile before each launch
+([`CEMU_PAD_UUIDS`](/docs/configuration/emulators#cemu) can override that
+derived list if you need to set the GUIDs yourself). Cemu doesn't respond to
+a SIGTERM shutdown request at all, so
+[`CEMU_STOP_WAIT`](/docs/configuration/emulators#cemu) only covers the time
+the broker allows for tearing down Cemu's process group, not for Cemu to
+shut itself down cleanly.
 
 ## Azahar
 
-No save states and no control interface, so exit is a kill and only what the
-game already wrote survives. Single game launches start it windowed because
-Azahar stops rendering when the display resizes underneath it in fullscreen.
-For 3DS the RetroArch core is the better option and is what a `3ds` launch
-uses by default.
+Azahar has no save states and no way for the broker to send it commands
+while it runs, so quitting it means killing the process outright: only
+whatever the game itself already wrote to disk survives. Single-game
+launches also start it windowed instead of fullscreen, for a reason covered
+in [Azahar setup](/docs/emulators/setup#azahar). For 3DS games, the
+RetroArch core is the better option, and it's what a `3ds` launch uses by
+default.
 
 ## Eden
 
-No save states; `nand/user/save/` is the persistence. A running game takes
-longer than the base grace to tear down, hence `EDEN_STOP_WAIT`.
+Eden has no save states; `nand/user/save/` is where saves persist. A running
+game takes longer than the broker's usual shutdown grace period to close,
+which is why Eden gets its own
+[`EDEN_STOP_WAIT`](/docs/configuration/emulators#eden) setting.
 
 ## shadPS4
 
 `emulator: "shadps4"` launches the shadPS4 PlayStation 4 emulator. shadPS4
-has no save states (`resume_slot` is ignored); the game's save data
-under `home/1000/savedata/` is the persistence. The binary is picked from
-`$HOME/.local/share/shadPS4QtLauncher/versions`: the `Pre-release/` build if
-present (it always trumps releases), otherwise the newest semver release
-folder (`vX.Y.Z - ... - <date>/`, each holding `Shadps4-sdl.AppImage`).
-Override the search with `SHADPS4_BIN` (explicit path), `SHADPS4_VERSIONS_DIR`,
-`SHADPS4_BIN_NAME`, or `SHADPS4_DATA_DIR`. The broker drives shadPS4 through
-its stdin IPC (`SHADPS4_ENABLE_IPC=true`): RUN/START boot the game headlessly,
-and exit sends STOP (the SDL quit event) for a graceful teardown before the
-save delta is dumped. shadPS4 has no SIGTERM handler, so SIGTERM is only the
-fallback if STOP doesn't finish in `SHADPS4_STOP_WAIT` (default 20 s).
+has no save states (`resume_slot` is ignored); the game's own save data,
+under `home/1000/savedata/`, is what persists. The broker picks the shadPS4
+binary from `$HOME/.local/share/shadPS4QtLauncher/versions`: it uses the
+`Pre-release/` build if one is present (a pre-release always wins over a
+numbered release), otherwise the newest release folder by version number
+(`vX.Y.Z - ... - <date>/`, each holding a `Shadps4-sdl.AppImage` file). You
+can override that search with
+[`SHADPS4_BIN`](/docs/configuration/emulators#shadps4) (an exact path to the
+binary), [`SHADPS4_VERSIONS_DIR`](/docs/configuration/emulators#shadps4), or
+[`SHADPS4_BIN_NAME`](/docs/configuration/emulators#shadps4). The broker
+controls shadPS4 through its own IPC, a channel for sending it commands
+while it runs, over stdin (`SHADPS4_ENABLE_IPC=true`): a RUN then START
+command boots the game headlessly, and on exit the broker sends STOP, which
+triggers shadPS4's own
+quit event (the same thing that happens when its window is closed normally),
+for a clean shutdown before the changed save data is written to disk.
+shadPS4 doesn't respond to SIGTERM at all, so SIGTERM is only used as a
+fallback if STOP hasn't finished within
+[`SHADPS4_STOP_WAIT`](/docs/configuration/emulators#shadps4) (default 20
+seconds).
 
-`rom.path` may be a game folder (holding `eboot.bin`), a bare `eboot.bin`, or a
-`.zar`. A `.pkg`, or a `.7z`/`.zip`/`.rar` holding one, boots only with
-`SHADPS4_CACHE_ENABLED` on, since it has to be unpacked into the cache first;
-with the cache off those formats are refused rather than accepted and failed
-later, and are left out of the emulator's advertised extensions entirely.
+`rom.path` can be a game folder that contains `eboot.bin`, a bare
+`eboot.bin` file, or a `.zar` archive. A `.pkg` file, or a
+`.7z`/`.zip`/`.rar` archive containing one, only boots if
+[`SHADPS4_CACHE_ENABLED`](/docs/configuration/emulators#shadps4) is turned
+on, since it first has to be unpacked into a cache folder. With the cache
+turned off, those formats are rejected up front instead of failing partway
+through, and they're left off the emulator's list of supported file types
+entirely. See [shadPS4 setup](/docs/emulators/setup#shadps4) for sizing the
+cache and the disk space an archive needs.
 
 ## RPCS3
 
-No save states; `dev_hdd0/home/` is the persistence. `rom.path` may be a
-PKG, which the launcher installs first (`RPCS3_INSTALL_TIMEOUT` bounds the
-decryption), an extracted game folder, or a disc image.
+Like DuckStation and Flycast, RPCS3 has no live save states: nothing here
+lets a game be saved or loaded while it keeps running. What it has instead
+is an exit-time save. Sending RPCS3 its own save-state hotkey
+([`RPCS3_SAVE_STATE_KEY`](/docs/configuration/emulators#rpcs3), `ctrl+alt+1`
+by default) always closes the game once the state finishes writing, so the
+broker triggers that hotkey and waits for the process to end rather than
+keeping it open. A resume works by pointing the next launch straight at the
+newest saved state instead of the game itself: RPCS3 tells a save state
+apart from a normal boot target by its file contents, not its extension, so
+booting into one works the same way booting a ROM does. States are kept one
+per title, so `resume_slot` always finds the right one. The game's own save
+data, under `dev_hdd0/home/`, persists separately from all of this.
 
-A `.7z`/`.zip`/`.rar` archive of a game folder boots only with
-`RPCS3_CACHE_ENABLED` on, since it has to be extracted first; with the cache
-off it is refused rather than accepted and failed later, and is left out of
-the emulator's advertised extensions. A PKG is unaffected either way: its
-installer is separate from the cache.
+`rom.path` can be a PKG file, which the launcher installs first
+([`RPCS3_INSTALL_TIMEOUT`](/docs/configuration/emulators#rpcs3) limits how
+long decryption is allowed to take), an already-extracted game folder, or a
+disc image.
+
+A `.7z`/`.zip`/`.rar` archive of a game folder only boots if
+[`RPCS3_CACHE_ENABLED`](/docs/configuration/emulators#rpcs3) is turned on,
+since it has to be extracted first. With the cache off, that format is
+rejected up front rather than accepted and failing partway through, and it's
+left off the emulator's list of supported file types. A PKG file isn't
+affected either way, since its installer is separate from the cache. See
+[RPCS3 setup](/docs/emulators/setup#rpcs3) for sizing the cache and the disk
+space an archive needs.
 
 ## xemu
 
-No save states. xemu keeps saves inside the Xbox HDD image, so the launcher
-extracts them from the qcow2 (through the raw image the container prepares on
-first init) after a clean shutdown, and injects them back before launch; the
-save directories are matched on the disk's own case. The renderer is pinned in
-`xemu.toml` before each launch (`XEMU_RENDERER`, `KEEP` to leave it alone) and
-`XEMU_SOFTWARE_GL` forces CPU rendering for hosts where both GPU paths abort.
+xemu has no save states. It keeps its saves inside a single virtual hard
+drive image, in the qcow2 format (a type of virtual disk file), rather than
+as separate files. After a clean shutdown, the launcher pulls the saves out
+of that image (working through the plain raw image the container prepares
+the first time it starts) and puts them back before the next launch; the
+save directories are matched using whatever letter-casing the virtual disk
+itself uses. The renderer is set in `xemu.toml` before each launch
+([`XEMU_RENDERER`](/docs/configuration/emulators#xemu); set it to `KEEP` to
+leave your own choice alone), and
+[`XEMU_SOFTWARE_GL`](/docs/configuration/emulators#xemu) forces rendering on
+the CPU instead of the GPU, for hosts where neither GPU rendering path
+works.
 
 ## Xenia
 
 `emulator: "xenia"` launches the Xenia Edge Xbox 360 emulator. Xenia has no
-save states (`resume_slot` is ignored) and no control interface of any kind
-(no IPC, socket or stdin protocol), so the game's own save data is the
-persistence and exit is a SIGTERM, which Xenia takes as a plain kill. That is
-safe because guest save writes go straight through to host files, so nothing
-is lost in a buffer. The save archive is the whole `content/` tree under
-`XENIA_DATA_DIR`: Xbox 360 save paths embed the profile XUID and the profile
-store lives in that same tree, so the two travel together and line up on a
-restore into a fresh container. `rom.path` may be an XISO (`.iso`), a
-bare `.xex`, an extracted dump (a folder holding `default.xex`), or an XBLA /
-Games on Demand title folder: the broker walks the console's own layout
-(`[Content/<XUID>/]<TITLE_ID>/000D0000` or `00007000/<package>`) and boots the
-STFS package it finds there, checked by magic so DLC, title updates and the
-`.data` payload beside a GoD package are passed over.
+save states (`resume_slot` is ignored) and no way for the broker to send it
+commands at all while it's running, no IPC, socket, or stdin channel of any
+kind. So the game's own save data is what persists, and exiting means
+sending a plain SIGTERM, which Xenia treats as an ordinary kill. That's safe
+here because the game writes its saves straight through to the host's files
+as it plays, so nothing sits in memory waiting to be lost.
+
+The save archive is the entire `content/` folder tree under
+[`XENIA_DATA_DIR`](/docs/configuration/emulators#xenia). Xbox 360 save paths
+are tied to the player's profile ID
+(called an XUID), and the profile data itself lives in that same tree, so
+both travel together and still line up correctly when restored into a fresh
+container.
+
+`rom.path` can be an XISO disc image (`.iso`), a bare `.xex` file, an
+extracted dump (a folder containing `default.xex`), or an XBLA / Games on
+Demand title folder. For that last case, the broker walks the same folder
+layout the console itself uses (`[Content/<XUID>/]<TITLE_ID>/000D0000` or
+`00007000/<package>`) and boots whichever file there is a genuine game
+package in Xbox 360's own STFS format, confirmed by checking the start of
+the file rather than its name. That way DLC, title updates, and the extra
+`.data` file that sits beside a Games on Demand package are correctly
+skipped.
 
 ## Flycast
 
-No control socket, and no SIGTERM handler either, so the only clean shutdown
-path is a graceful window-close request: the broker activates Flycast's own
-window and sends Alt+F4, which reaches Flycast's `SDL_QUIT` handling and is
-the only place a save state gets written (`FLYCAST_STOP_WAIT` gives that room
-before escalating to a SIGTERM that skips the save entirely). Like
-DuckStation, there is no mid-session save/load: a launch resumes from
-whatever state was written on the previous clean exit, and the current
-session's state is written once, on exit.
+Flycast has no control socket and doesn't respond to SIGTERM either, so the
+only way to shut it down cleanly is a graceful window-close request: the
+broker switches focus to Flycast's own window and sends Alt+F4, the same
+shortcut a player would use. That reaches Flycast's own quit handling, and
+it's the only moment a save state gets written
+([`FLYCAST_STOP_WAIT`](/docs/configuration/emulators#flycast) gives it that
+window of time before the broker escalates to a SIGTERM, which skips the
+save entirely). Like DuckStation, there's no saving or loading
+mid-session: a launch resumes from whatever state was written the last time
+it exited cleanly, and the current session's state is written exactly once,
+on exit.
 
-Save state is a single deterministic file, `<rom>.state`, in the flat
-`FLYCAST_DATA_DIR`. VMU saves live loose in that same directory and travel
-with it as one save subtree, since nothing separates them from the savestate
-or a first-run onboarding artifact. A RetroArch core also covers Dreamcast
-(`dc` defaults to it), for anyone who prefers RetroArch's shared save-state UI
-and hotkeys instead.
+The save state is always a single, predictably-named file, `<rom>.state`,
+sitting directly in `$XDG_DATA_HOME/flycast` (no subfolders). VMU saves live
+loose in that same folder and travel with it as one save subtree, since
+nothing separates them from the save state, or from a leftover first-run
+setup file. A RetroArch core also covers the Dreamcast (`dc` uses it by
+default), for anyone who'd rather use RetroArch's shared save-state menu and
+hotkeys instead.
 
 ## ScummVM
 
-`rom.path` is a *folder* of game data rather than a disc image: ScummVM detects
-a game by scanning a directory, so a launch registers it with
-`scummvm --add --path=<folder>` and reads the generated *target* name
-(`monkey`, `gob1-cd-fr`) back out of `scummvm.ini`. That target, not the path,
-is what boots the game and what every save file is named after, and a folder
-that gains no domain is what "nothing bootable here" means: `--add` reports
-success having added nothing, so its exit code settles neither question. A
-`rom.path` pointing at a file, a `.scummvm` marker for instance, registers the
-folder around it.
+For ScummVM, `rom.path` points at a *folder* of game files, not a disc
+image. ScummVM works out what game a folder holds by scanning its contents,
+so launching runs `scummvm --add --path=<folder>` and then reads back the
+*target* name it generated (something like `monkey` or `gob1-cd-fr`) from
+`scummvm.ini`. A target is ScummVM's own internal name for a registered
+game. It's the target, not the folder path, that actually boots the game and
+that every save file is named after. If ScummVM adds nothing for a folder,
+that means it found nothing bootable there, but `--add` still reports
+success even when it added nothing, so its exit code alone can't tell you
+whether it worked. If `rom.path` points at a single file instead, a
+`.scummvm` marker file, for example, ScummVM registers the folder that file
+sits in.
 
-A multilingual game folder registers one target per language ScummVM
-detects in it (`gob1-cd-fr`, `gob1-cd-de`), and the target decides which
-variant's resources the engine loads: `--language` alone does not reroute a
-launch. The `language` on the activate payload is what picks between them, and
-it also goes on the command line so the running game agrees with the domain it
-booted from. Codes are translated to ScummVM's own spellings (`pt-br` becomes
-`br`, `jp` becomes `ja`, `zh-hans` becomes `cn`), a close relative stands in
-when the exact one is absent (a `us` variant answers an `en` request), and a
-code ScummVM would reject is dropped rather than failing the boot. A rom that
-names no language falls back to `gui_language`, the player's own interface
-language: RomM rarely knows what language a game is in, and a multilingual
-folder is exactly the case where it usually does not, so the player's is then
-the only thing saying which variant they want. With neither, the pick is
-alphabetical and stable, which is what keeps the `<target>.sNN` save names from
-moving between relaunches.
+A folder holding a game in multiple languages registers one target per
+language ScummVM detects (`gob1-cd-fr`, `gob1-cd-de`), and it's the target,
+not a command-line flag, that decides which language's files actually get
+loaded: passing `--language` on its own does not switch a launch to a
+different variant. The `language` field on the activate payload is what
+picks between the targets, and the broker also passes it on the command
+line, so the running game agrees with the target it was launched from.
+Language codes get translated into ScummVM's own spellings first (`pt-br`
+becomes `br`, `jp` becomes `ja`, `zh-hans` becomes `cn`); if the exact one
+isn't available, a close match is used instead (a `us` variant will answer
+an `en` request), and a code ScummVM wouldn't recognize is simply dropped
+rather than failing the whole launch. If a ROM entry doesn't specify a
+language at all, the broker falls back to `gui_language`, the player's own
+interface language setting, since RomM usually doesn't know what language a
+game is in, and a multilingual folder is exactly the case where that matters
+most. If neither is available, ScummVM just picks alphabetically, but it does
+so consistently, which keeps the `<target>.sNN` save file names stable
+across relaunches.
 
-There is no control socket and no state hotkeys, so save and load drive the
-Global Main Menu with xdotool: the menu key opens it, the bare-letter Save/Load
-hotkey presses the button, `Down` walks the chooser to the slot and `Return`
-activates it. In save mode the first `Return` starts editing the slot's
-description and a second commits it. Three things are pinned in `scummvm.ini`
-to make that work at all. `gui_saveload_chooser=list`, because the default grid
-chooser has no keyboard path to a numbered slot. `keymap_global_MENU`, bound to
-`SCUMMVM_MENU_KEY` (default `F11`): ScummVM ships the menu on `C+F5`, and a
-modifier does not survive injection into the container's Xwayland, so the key
-arrives without its Ctrl and the menu never opens; the unmodified `F5` that
-does work belongs to the engine keymap, which an engine may take for itself
-(gob answers it with Gobliiins' own panel, which has no Save). And the button
-letters follow the GUI translation (`~S~ave` becomes `~S~auvegarder`), so they
-are read back from `gui_language`, which the activate payload pins when it
-carries one and leaves as the user set it when it does not. Only that
-one keymap action is pinned; any other binding the user set is left alone.
+ScummVM has no control socket and no dedicated save/load hotkeys, so the
+broker drives its Global Main Menu directly using xdotool (the same
+simulated-keypress tool used for Dolphin and PPSSPP): it presses the menu
+key to open the menu, presses the Save or Load button's own letter hotkey,
+presses `Down` to walk the list down to the right slot, and presses `Return`
+to activate it. When saving, the first `Return` starts editing the slot's
+text description, and a second `Return` confirms it.
 
-The macro says nothing about its result, so a save is only reported once the
-slot's file has actually changed on disk. Engines without runtime save support
-put up a message dialog instead, which the broker dismisses rather than leaving
-the game paused behind a menu. Gobliiins is the canonical case: its gob engine
-creates no save handler at all, since passwords are the game's own progression
-system. Those games still ship their own saves in the archive, and a boot-time
-resume still works.
+Three settings are pinned in `scummvm.ini` to make all of this work
+reliably. First, `gui_saveload_chooser=list`, because the default menu shows
+saves as a grid, and there's no way to arrow-key your way to a specific
+numbered slot in a grid. Second, `keymap_global_MENU` is bound to
+[`SCUMMVM_MENU_KEY`](/docs/configuration/emulators#scummvm) (default `F11`).
+ScummVM's own default menu shortcut is
+`C+F5`, but a Ctrl modifier doesn't survive being simulated inside the
+container's Xwayland display server, so the key press arrives without its
+Ctrl and the menu never opens. The plain, unmodified `F5` that does work is
+normally reserved for each game engine's own shortcuts, and some engines
+grab it for themselves (the gob engine, used by the Gobliiins games, opens
+its own panel on `F5` instead, which has no Save option). Third, the Save
+and Load button labels follow ScummVM's own translated menu text (so
+`~S~ave` becomes `~S~auvegarder` in French, for example), matching whatever
+`gui_language` is set to. The activate payload's `gui_language` field pins
+this when the request supplies one, and otherwise leaves it as the user
+already set it themselves. Only that one keymap binding is changed; any
+other keyboard shortcut you've set yourself is left alone.
 
-ScummVM's saves *are* its states: there is no separate state format, so the
-working slot and the game's own saves come out of one directory and are told
-apart by filename. Slot 0 is ScummVM's autosave and its own chooser marks it
-write protected (`MetaEngine::listSaves` sets the flag), so the broker never
-writes there; it works in `SCUMMVM_STATE_SLOT` (default 1). A state pushed back
-in is renamed onto the booted target, because ScummVM finds a save by name
-alone and a multilingual folder registers one target per language.
+The sequence of key presses doesn't report back whether it actually worked,
+so the broker only counts a save as successful once it sees the slot's file
+actually change on disk. Some engines don't support saving while running at
+all; for those, ScummVM pops up a message dialog instead of a save menu, and
+the broker dismisses that dialog rather than leaving the game stuck behind
+it. Gobliiins is the clearest example: its gob engine has no save handler
+whatsoever, because in that game, passwords are how you track progress
+instead of save files. Games like this still have their own saves included
+in the save archive, and resuming them at boot time still works fine.
 
-Two more pins are for the stream rather than for ScummVM's own sake.
-`fullscreen`, pinned **off** whatever the launch. A ScummVM window is its
-game's own resolution, so 640x480 sits as a postage stamp in the middle of the
-stream. ScummVM's own fullscreen is the wrong way to fix that: it makes
-SDL grab the pointer and confine it to a rect (`shouldGrab = ... ||
-fullscreenFlags`, then `SDL_SetWindowMouseRect`) and ask for an explicit
-display mode, and both fight a stack that feeds an absolute pointer and owns
-the display size itself: the pointer stops tracking the stream while clicks
-still land, and these games are nothing but mouse.
+In ScummVM, saves and save states are the same thing: there's no separate
+save-state format, so the broker's working slot and the game's own manual
+saves live in the same folder and are only told apart by their file names.
+Slot 0 is ScummVM's own autosave slot, and ScummVM's own save menu marks it
+write-protected (`MetaEngine::listSaves` sets the flag), so the broker never
+writes there. Instead it uses
+[`SCUMMVM_STATE_SLOT`](/docs/configuration/emulators#scummvm) (default 1).
+When a state
+is loaded back in, it's renamed to match the currently booted target,
+because ScummVM finds a save purely by name, and a multilingual folder can
+register a separate target per language.
 
-So the window manager does it instead. After launch the window is moved to the
-origin and sized to the display (`SCUMMVM_FILL_SCREEN`, on by default). SDL
-reads that as an ordinary resize, scales its output into it and letterboxes to
-keep the game's 4:3 on its own, and never sets the flag that triggers the grab.
-It is best-effort and purely cosmetic: a display size it cannot read, or a
-window that never appears, leaves the game running at its own size rather than
-failing the launch. What it does not remove is the title bar, since no tool in
-the image can (xdotool 3.2016 has no `windowstate`, and there is no wmctrl);
-a labwc window rule would. (ScummVM's `window_maximized` is not used either:
-labwc leaves the window at its own size regardless, so it fills nothing.) And
-`gfx_mode=surfacesdl`, because the OpenGL renderer scales mouse coordinates
-through `SDL_GL_GetDrawableSize`, which means nothing outside a GL window, so
-against an injected absolute pointer the game takes clicks while the cursor
-stops moving. SDL is also forced onto X11 at launch so the macros have an
-Xwayland window to talk to.
+Two more settings are pinned for the sake of the video stream, not because
+ScummVM itself needs them. `fullscreen` is pinned **off**, no matter how the
+game is launched. A ScummVM window always renders at the game's own native
+resolution, so a 640x480 game would otherwise show up as a tiny postage
+stamp in the middle of the stream. Using ScummVM's own fullscreen mode to
+fix that would be the wrong move: internally, going fullscreen makes SDL
+(the graphics and input library ScummVM is built on) grab the mouse pointer
+and confine it to a fixed rectangle (`shouldGrab = ... || fullscreenFlags`,
+then `SDL_SetWindowMouseRect`), and also request a specific display
+resolution. Both of those fight against a video-streaming stack that feeds
+in an absolute mouse position and controls the display size itself: the
+result is a pointer that stops tracking the stream even though clicks still
+register, which is a serious problem since these games are controlled almost
+entirely by mouse.
 
-None of that reaches the one pointer problem a launcher cannot fix. A running
-game holds Xwayland's warp-emulation pointer lock (ScummVM hides the system
-cursor and warps the pointer), and labwc drops the *absolute* motion the
-browser sends while a lock is active yet still forwards relative motion, so
-the in-game cursor freezes with clicks landing. The image has to patch
-selkies' `input_handler.py` to send every absolute move as a relative delta
-followed by the absolute position, and to read the X pointer back after a
-pause (it ships `python-xlib` for that) so a warp issued by the game does not
-leave a lasting offset. Without it the pointer is dead windowed too, whatever
-this launcher pins.
+So instead, the desktop's window manager handles it directly. After launch,
+the game's window is moved to the top-left corner and resized to fill the
+whole display
+([`SCUMMVM_FILL_SCREEN`](/docs/configuration/emulators#scummvm), on by
+default). SDL treats that as a
+normal window resize: it scales its own picture to fit and adds black bars
+(letterboxing) to keep the game's 4:3 shape correct, all without ever
+triggering the pointer-grab behavior that fullscreen mode causes. This is
+best-effort and purely cosmetic: if the display size can't be read, or the
+window never appears, the game just keeps running at its own native size
+instead of the launch failing outright. One thing it doesn't remove is the
+window's title bar, since nothing in the container image is able to (the
+xdotool version shipped, 3.2016, has no window-state command, and there's no
+wmctrl either; a labwc window rule could do it, but isn't set up).
+ScummVM's own `window_maximized` setting isn't used either, since labwc, the
+window manager here, leaves the window at its own size regardless, so that
+setting wouldn't fill anything. The broker also pins `gfx_mode=surfacesdl`
+instead of ScummVM's OpenGL renderer, because the OpenGL renderer scales
+mouse coordinates through a call (`SDL_GL_GetDrawableSize`) that only means
+anything inside a real OpenGL window. Against the stream's injected absolute
+pointer, that mismatch means clicks still land in the game, but the
+on-screen cursor stops moving. Finally, SDL is forced onto X11 at launch, so
+the broker's simulated key presses have an Xwayland window to talk to.
+
+None of the above fixes one deeper pointer problem that isn't something this
+launcher alone can solve. While a game is running, it holds what's called a
+pointer lock: ScummVM hides the normal mouse cursor and moves (warps) it
+itself. Xwayland, the compatibility layer that lets this X11-based software
+run under Wayland, emulates that lock, but the desktop's window manager,
+labwc, drops the *absolute* mouse-position updates the browser sends while a
+lock is active. It still forwards relative movement, though, so the result
+is an in-game cursor that freezes in place while clicks still land where you
+click. To work around this, the container image patches selkies' own input
+handler (`input_handler.py`) so that every absolute mouse move is sent as a
+relative movement followed by the absolute position, and so that it reads
+the actual pointer position back afterward (using the `python-xlib` library)
+to correct for any warp the game just issued. Without that patch, the mouse
+pointer would be unusable even in windowed mode, no matter what this
+launcher pins.
 
 ## Desktop
 
-`emulator: "desktop"` streams the full webstation desktop so emulators can be
-configured through the GUI. No `rom` or `save`; same room interface, same exit
-teardown. This is how you do the one-time [setup](/docs/emulators/setup).
+`emulator: "desktop"` streams the full webstation desktop, so you can
+configure emulators through their own graphical interface. It doesn't use a
+`rom` or `save` field, but everything else, the room interface and how a
+session exits, works the same as any other launcher. This is how you do the
+one-time [setup](/docs/emulators/setup).

@@ -53,9 +53,9 @@ Launchers differ in how they are driven:
 
 | Mechanism | Launchers |
 | --- | --- |
-| A control socket or stdin protocol | PCSX2 (PINE), RetroArch (network commands), shadPS4 (stdin IPC) |
-| xdotool hotkeys against the render window | Dolphin, PPSSPP |
-| Command line flags and config pinning only, SIGTERM to stop | DuckStation, Cemu, Azahar, Eden, RPCS3, xemu, Xenia |
+| A control socket or stdin protocol | PCSX2 (PINE), RetroArch (stdin command protocol), shadPS4 (stdin IPC) |
+| xdotool hotkeys against the render window | Dolphin, PPSSPP, ScummVM (via its Global Main Menu, not a single hotkey), Flycast (Alt+F4 window-close triggers its own autosave, falling back to SIGTERM/SIGKILL) |
+| Command line flags and config pinning only, SIGTERM to stop | DuckStation, Cemu, Azahar, Eden, RPCS3 (opens a PINE socket, but only for boot verification and title-id lookup, not save-state control), xemu, Xenia |
 
 ## Save data flow
 

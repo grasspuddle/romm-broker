@@ -3,57 +3,65 @@ title: "Reverse proxy"
 description: "Serving the container from a subfolder of RomM's origin, with recipes for nginx, Nginx Proxy Manager, Caddy and Traefik."
 ---
 
-The room UI iframes the selkies stream, and RomM in turn iframes the room. When
-that outer iframe is cross origin, the browser stops delivering pointer events
-to the parent document the moment the cursor enters it. RomM's player cannot
-see the mouse at all, so it has to overlay a strip of its own along the bottom
-edge to raise its control bar, and that strip sits on top of the container's own
+The room UI shows the selkies stream in an iframe (a webpage embedded inside
+another webpage), and RomM embeds the whole room the same way. When that outer
+iframe is cross origin, meaning it comes from a different address than RomM
+itself, the browser stops passing mouse movement through to the page around it
+the moment the cursor enters the frame. RomM's player can no longer see the
+mouse at all, so it has to overlay a strip of its own along the bottom edge to
+show its control bar, and that strip sits on top of the container's own
 taskbar.
 
-Serving the container from a subfolder of RomM's origin fixes that: the player
-attaches listeners inside the frame, nothing overlays the stream, and the
-container's desktop is fully clickable.
+Serving the container from a subfolder of RomM's own origin fixes this: the
+player can track the mouse inside the frame, nothing overlays the stream, and
+the whole container desktop becomes clickable.
 
-<Callout type="warn" title="Skipping this also breaks the room's camera, microphone and invite-link copy button — not just pointer tracking.">
-On the cross-origin path (a full URL `host`, not a subfolder), three things
+<Callout type="warn" title="Skipping this also breaks the room's camera, microphone and invite-link copy button, not just pointer tracking.">
+On the cross-origin path (a full URL in `host`, not a subfolder), three things
 fail with no error message pointing back here:
 
-- **Camera and microphone** are refused instantly. `getUserMedia` fails
+- **Camera and microphone** are refused instantly. `getUserMedia`, the
+  browser's built-in API for requesting camera or microphone access, fails
   before the browser ever shows a permission prompt.
 - **The invite buttons** can't copy the link automatically and fall back to
   a manual copy prompt instead.
 - **Pointer tracking** is lost inside the frame, which is what the edge-strip
-  overlay above is compensating for.
+  overlay above works around.
 
-All three have the same root cause and no proxy-side fix: the browser's
-Permissions-Policy for camera, microphone and clipboard-write defaults to
-same-origin only, and RomM's iframe cannot grant those permissions to a
-cross-origin child. Websocket forwarding, exploit blocking, and every other
-proxy setting are irrelevant here — this is the browser treating the room as
-a different site, full stop.
+All three have the same root cause, and there is no proxy-side fix: the
+browser's Permissions-Policy (a built-in browser rule controlling which
+permissions a page can hand to the frames inside it) defaults to same-origin
+only for camera, microphone, and clipboard-write, and RomM's iframe cannot
+grant those permissions to a frame from a different origin.
+Websocket forwarding, exploit blocking, and every other proxy setting are
+irrelevant here. This is the browser treating the room as a different site,
+full stop.
 
 Serving the container from a subfolder of RomM's own origin, below, is the
 only fix, and it removes the restriction entirely.
 </Callout>
 
-Nothing about this is proxied by RomM itself. A reverse proxy in front of both
-services maps a path on RomM's origin to the container, and the container is
-already built for it.
+RomM does not proxy any of this itself. A reverse proxy sitting in front of
+both services maps a path on RomM's origin to the container. The container is
+already built to run behind one.
 
 ## The contract
 
-Three rules, all of them load bearing.
+Three rules. Skip any one of them and the setup breaks.
 
 <Callout type="info" title="SUBFOLDER must equal the mount path exactly, trailing slash included.">
-The app emits absolute asset paths (`/streaming/assets/...`) and builds its
-websocket URL from `window.location.host` plus that prefix. Set them to the
-same value and the whole thing follows the mount with no rewriting anywhere.
+The app writes its own file links (like `/streaming/assets/...`) as absolute
+paths, and builds its websocket address (the live connection the stream and
+room chat run over) from the browser's current address plus that same prefix.
+Set `SUBFOLDER` and your proxy's mount path to the exact same value, and
+everything lines up automatically. Nothing needs rewriting.
 </Callout>
 
 <Callout type="warn" title="The proxy must pass the prefix through, not strip it.">
-This is the one that bites. Most proxies offer a strip-prefix mode and several
-make it the default. Stripping produces a page that loads and then 404s every
-asset it asks for.
+This is the rule that trips people up most. Most reverse proxies offer a
+strip-prefix mode, and several turn it on by default. Strip the prefix here,
+and the page will load, then every asset it asks for comes back as a 404 (a
+"not found" error) instead.
 </Callout>
 
 <Callout type="warn" title="The proxy must forward websocket upgrades.">
@@ -67,11 +75,15 @@ the upgrade headers the room loads and then sits there dead.
 SUBFOLDER=/streaming/
 ```
 
-That is the whole container-side configuration. The container's own nginx serves
-the room UI, the broker API, and the selkies stream under that one prefix, so a
-single proxy rule covers all three. Port 3000 is HTTP, 3001 is HTTPS with a self
-signed certificate. Behind a proxy that terminates TLS already, target 3000 and
-save yourself the certificate exception.
+That is the whole container-side configuration. Inside the container, its own
+nginx (a small web server) serves the room UI, the broker API, and the selkies
+stream, all under that one prefix, so a single proxy rule covers all three.
+Port 3000 serves plain HTTP, and port 3001 serves HTTPS with a self-signed
+certificate, one your browser or `curl` won't trust automatically, since the
+container issued it itself rather than a recognized authority. If your reverse
+proxy already handles HTTPS for you (often called TLS termination), point it
+at port 3000 instead and skip the warning that certificate would otherwise
+trigger.
 
 ## RomM side
 
@@ -96,11 +108,11 @@ streaming:
       label: WEBSTATION
 ```
 
-`host` also still accepts a full URL (`https://webstation.example.com`), which
-is the cross origin deployment. RomM's player falls back to its edge strip
-automatically for the pointer tracking it loses, but camera, microphone and
-automatic invite-link copying stay broken there for the reason above — there
-is no proxy-side fix for those.
+`host` can also be a full URL (`https://webstation.example.com`) instead of a
+path. That is the cross-origin deployment: RomM's player falls back to its
+edge-strip overlay automatically to make up for the lost pointer tracking, but
+camera, microphone, and automatic invite-link copying stay broken there for
+the reason above. There is no proxy-side fix for those.
 
 Session identity is derived from `broker_host`, not `host`, so moving a
 container behind a proxy does not disturb a session it is already holding.
@@ -122,10 +134,11 @@ location /streaming/ {
 }
 ```
 
-`proxy_pass` deliberately has no path component. Adding even a bare `/` makes
-nginx strip `/streaming/` before forwarding, which breaks every asset.
-`proxy_buffering off` matters for the stream, and the long read timeout keeps an
-idle session's websocket from being culled mid game.
+`proxy_pass` deliberately has no path after the address. Adding even a bare
+`/` makes nginx strip `/streaming/` before forwarding the request, which
+breaks every asset the page tries to load. `proxy_buffering off` matters for
+the video stream, and the long read timeout keeps an idle session's websocket
+connection from being closed while a game is still running.
 
 </Tab>
 <Tab value="Nginx Proxy Manager">
@@ -140,14 +153,15 @@ cross-origin embed and brings back everything this page exists to avoid
 Open the Proxy Host for RomM's own domain and, under **Custom Locations** at
 the bottom of its Details tab, add one:
 
-- **Location**: `/streaming/` — same rule as everywhere else on this page,
-  it has to match `SUBFOLDER` exactly, trailing slash included.
+- **Location**: `/streaming/`. Same rule as everywhere else on this page: it
+  has to match `SUBFOLDER` exactly, trailing slash included.
 - **Scheme**: `http`
 - **Forward Hostname/IP**: the container's address, e.g. `10.0.1.56`
 - **Forward Port**: `3009` (or whatever host port maps to the container's 3000)
 
-Custom Locations proxy to that host:port with no path prepended, so the
-prefix isn't stripped by default — that part NPM already gets right.
+Custom Locations send traffic straight to that host and port with no path
+added in front, so the prefix isn't stripped by default. NPM already gets
+that part right.
 
 Click the location's own edit (pencil) icon and paste the rest into its
 **Advanced** config box, since the location-level form has no fields for it:
@@ -161,11 +175,12 @@ proxy_buffering off;
 proxy_read_timeout 3600s;
 ```
 
-The Proxy Host's own **Websockets Support** toggle applies to the whole
-vhost, but paste the upgrade headers into the location's Advanced box
-anyway — Custom Locations don't reliably inherit it. Leave **Block Common
-Exploits** on if you already use it; it only screens query strings for
-exploit patterns and has no effect on any of this.
+The Proxy Host's own **Websockets Support** toggle applies to the whole vhost
+(short for virtual host: everything grouped under that Proxy Host), but paste
+the upgrade headers into the location's Advanced box anyway. Custom Locations
+don't reliably inherit that setting. Leave **Block Common Exploits** on if
+you already use it. It only screens query strings for exploit patterns and
+has no effect on anything described here.
 
 </Tab>
 <Tab value="Caddy">
@@ -177,8 +192,8 @@ handle /streaming/* {
 ```
 
 Use `handle`, never `handle_path`. `handle_path` strips the matched prefix,
-which is the same failure as the nginx one. Caddy forwards websocket
-upgrades on its own, so there is nothing to add for those.
+the same problem as with nginx above. Caddy forwards websocket upgrades on
+its own, so there is nothing to add for those.
 
 </Tab>
 <Tab value="Traefik">
@@ -201,11 +216,12 @@ Do not attach a `stripPrefix` middleware.
 curl -sS -o /dev/null -w '%{http_code}\n' https://romm.example.com/streaming/
 ```
 
-Expect `200`. Keep the trailing slash: the container's nginx answers a bare
-`/streaming` with a 301 to `http://<host>:3000/streaming/`, and that absolute
-redirect carries the container's internal port, which is not reachable from
-wherever the browser is. Every URL handed to a browser should already end in the
-slash, so nothing has to follow that redirect.
+Expect `200` (the standard "it worked" response). Keep the trailing slash:
+the container's nginx answers a bare `/streaming` with a `301` redirect
+("moved here instead") to `http://<host>:3000/streaming/`. That redirect
+carries the container's own internal port, which is not reachable from
+wherever the browser is. Every URL handed to a browser should already end in
+the slash, so nothing has to follow that redirect.
 
 Then fetch the page body and confirm the asset paths it references
 still carry the prefix:
@@ -226,11 +242,11 @@ curl -sS https://romm.example.com/streaming/api/health
 
 ## Running more than one container
 
-The mount path is per container. The app bakes its prefix into asset URLs at
-startup, so there is no wildcard shortcut and no way to share one rule across a
-pool. Each container needs its own `SUBFOLDER` (`/streaming/`, `/streaming-2/`),
-its own proxy rule, and its own `config.yml` entry. Copy the proxy recipe you
-used above and change both paths in it.
+The mount path is set per container. The app builds its prefix into every
+asset URL when it starts up, so there is no wildcard shortcut and no way to
+share one rule across a pool. Each container needs its own `SUBFOLDER`
+(`/streaming/`, `/streaming-2/`), its own proxy rule, and its own `config.yml`
+entry. Copy the proxy recipe you used above and change both paths in it.
 
 ```yaml
 streaming:
@@ -248,12 +264,13 @@ streaming:
 ```
 
 <Callout type="warn" title="host and subfolder both have to be the container's own SUBFOLDER.">
-They are not independent knobs. The browser is sent to `host`, but the broker
-answers the claim with a room URL built from its own `SUBFOLDER`, and that is an
-absolute path, so it replaces whatever path `host` was carrying. A container
-mounted at `/streaming-2` while declaring `subfolder: /streaming` hands the
-player a URL the proxy routes to the container at `/streaming` instead, mid
-session, with nothing written to either log.
+`host` and `subfolder` are not independent settings. The browser is sent to
+`host`, but the broker answers the claim with a room URL built from its own
+`SUBFOLDER`, and that is an absolute path, so it replaces whatever path `host`
+was carrying. A container mounted at `/streaming-2` while declaring
+`subfolder: /streaming` hands the player a URL the proxy routes to the
+container at `/streaming` instead, mid session, with nothing written to
+either log.
 
 RomM refuses such an entry rather than resolve it. It still appears in the fleet
 view, with a warning naming both values, and it cannot be claimed. The usual way
@@ -268,31 +285,36 @@ Entries for the same platform are one pool when they agree on `emulator`,
 them, which is the whole point: same origin pooling puts every container at a
 path of its own.
 
-A claim walks the pool in config order and takes the first container nobody is
-holding. The rest follows from that:
+When a player claims a container, RomM checks the pool in the order the
+entries appear in `config.yml`, and gives them the first one nobody is
+already holding. The rest follows from that:
 
 - **One session per container.** Identity comes from `broker_host`, so a
   container serving three platforms still has a single slot. Claiming it for PS2
   takes it out of the GameCube pool as well.
 - **A busy container is skipped quietly.** The second player to press play lands
   on the second container and never learns the first one was taken.
-- **The 409 waits until every member is held.** It names the rom sitting on the
-  container that would have been next.
+- **The 409 waits until every member is held.** That is RomM's way of saying
+  no container is free, and it names the rom sitting on the container that
+  would have been next.
 - **The player already in a session gets that 409 too**, rather than a second
-  container. Rolling over is for the players who missed out. A second session
-  for the same user would be one nothing could reach, since status, release and
-  save-and-exit all resolve to the first, and under whole-card sync the two
-  halves would be mounting the same card.
-- **Saves follow the player, not the container.** RomM keys them by user,
-  platform and emulator, and the broker clears the working slot before each
-  launch, so landing on a different member next time changes nothing the player
-  can see.
+  container. Falling back to another container in the pool is only for
+  players who missed out on the first one. A second session for the same user
+  would be one nothing could reach, since status, release and save-and-exit
+  all resolve to the first, and under whole-card sync the two halves would be
+  mounting the same card.
+- **Saves follow the player, not the container.** RomM keeps track of them by
+  user, platform and emulator, and the broker clears the working slot before
+  each launch, so landing on a different member next time changes nothing the
+  player can see.
 
 ## What same origin costs you
 
-RomM's session cookie is scoped to its origin, so once the container lives at a
-path under that origin the cookie is sent to the container on every request for
-`/streaming/*`. The container has no use for it and does not read it, but it does
-cross the boundary. On a LAN deployment where the container is already trusted
-enough to be handed the ROM library this is not a meaningful change. It is worth
-knowing before pointing this at anything you do not control.
+Browsers send a site's cookies to every path under that site's own origin.
+RomM's session cookie works the same way, so once the container lives at a
+path under RomM's origin, that cookie is sent to the container on every
+request for `/streaming/*` too. The container has no use for it and does not
+read it, but it does cross the boundary. On a LAN deployment where the
+container is already trusted enough to be handed the ROM library, this is not
+a meaningful change. It is worth knowing before pointing this at anything you
+do not control.

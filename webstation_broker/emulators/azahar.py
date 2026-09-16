@@ -234,10 +234,12 @@ class Azahar(Emulator):
         rom_extensions: Bootable formats, best first.
         log_path: The emulator log file.
         term_timeout: SIGTERM grace before SIGKILL (env `AZAHAR_STOP_WAIT`, default 5).
+        clears_stale_saves: On; activate empties every declared save subtree.
     """
 
     name = "azahar"
     display_name = "Azahar"
+    clears_stale_saves = True
     save_root = USER_DIR
     save_subtrees = (
         f"sdmc/Nintendo 3DS/{SYSTEM_ID}/{SDCARD_ID}/title",
@@ -271,6 +273,23 @@ class Azahar(Emulator):
         every title in the container would read as touched this session and
         `save_and_exit` would restamp and ship all of them.
         """
+
+    def clear_working_slot(self, excluded: tuple[str, ...] = ()) -> None:
+        """Empty the SD and NAND save trees before the archive restore.
+
+        Azahar files a save under the title id alone, with nothing in the path
+        naming the player, so the previous session's saves sit exactly where
+        this one's belong. The restore only writes the members the incoming
+        archive carries: a title the last player saved and this one's archive
+        does not name would stay readable, and the exit restamp ships a title
+        whole once anything under it is written, so it would leave again in
+        this player's dump.
+
+        Args:
+            excluded: Subtrees carried by the whole-card routes. Azahar has no
+                memory card, so this is always empty.
+        """
+        self._clear_save_subtrees(excluded)
 
     def prepare_restore(self) -> None:
         """Stop a running Azahar so the archive can be extracted under it."""

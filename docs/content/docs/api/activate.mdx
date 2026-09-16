@@ -16,42 +16,48 @@ curl -k -X POST https://localhost:3001/streaming/api/session/activate \
   }'
 ```
 
-Returns `{"status": "launching", "session_id": ..., "url": "/streaming/?token=<controller token>"}`.
-Open `https://<host>:3001/streaming/?token=...` for the room with the game
-streaming. Returns `409` if a session is already active.
+You get back `{"status": "launching", "session_id": ..., "url": "/streaming/?token=<controller token>"}`.
+Open `https://<host>:3001/streaming/?token=...` in a browser to land in the
+room, where the game is already streaming. If a session is already active,
+you get back an HTTP error, `409`, instead.
 
-`rom.path` may be a file or a game folder; the broker picks the best bootable
-disc image (disc number first, then format ranking, chd > iso > ...). The path
-must resolve inside `ROM_ROOT` or activate answers `400`.
+`rom.path` can point to a single file or to a whole game folder. When it's a
+folder, the broker automatically picks the best disc image to boot: it
+prefers the lowest disc number first, then a fixed format order, such as chd
+over iso, and so on. Either way, the path has to resolve inside `ROM_ROOT`,
+or activate answers with `400`.
 
 The payload fields:
 
 | Field | Required | Purpose |
 | --- | --- | --- |
-| `emulator` | yes | A registry key from [Supported emulators](/docs/emulators). |
-| `rom` | unless the emulator is `desktop` | `path` is the container path; `id`, `name` and `platform` are echoed in the exit upload and, for `retroarch`, `platform` picks the core. The optional `language` is the rom's own language, for an emulator whose games ship several of them in one folder: ScummVM registers one target per language it detects and the target is what boots, so without it a multilingual game starts in whichever language sorts first. An unrecognised code is ignored rather than failing the launch. |
-| `gui_language` | no | The player's own interface language, not the rom's. An emulator with a translated UI follows it (ScummVM pins it in `scummvm.ini`, which is also where its in-game menu macros read their keyboard shortcuts), and a multilingual game folder falls back to it when `rom.language` is absent: RomM rarely knows a game's language, and the player's is then the only thing saying which variant they want. Sent for the `desktop` session too, which has no rom at all. An unrecognised code is ignored. |
-| `user` | no | `id`, `username`, `display_name` of the controller. Joins and re-joins match on `id`, then `username`. |
-| `session_id` | no | A caller-supplied id, reduced to what is safe in a filename; the broker mints one otherwise. |
+| `emulator` | yes | The emulator's name, from the [Supported emulators](/docs/emulators) list. |
+| `rom` | unless the emulator is `desktop` | `path` is the container path (the file's location inside the container, not on your host machine). `id`, `name` and `platform` come back in the exit upload, and for `retroarch`, `platform` picks the core (the plugin that lets RetroArch emulate that particular system). The optional `language` is the rom's own language, for an emulator whose games ship several of them in one folder: ScummVM sets up one entry, called a target, per language it detects, and that target is what actually boots. Without `language`, a multilingual game starts in whichever language happens to sort first. A code the broker doesn't recognise is ignored rather than failing the launch. |
+| `gui_language` | no | The player's own interface language, not the rom's. If an emulator has a translated interface, it follows this setting (ScummVM writes it into `scummvm.ini`, which is also where the broker reads the keyboard shortcuts it uses to drive ScummVM's in-game menu automatically). A multilingual game folder falls back to `gui_language` when `rom.language` is missing: RomM rarely knows a game's language, so the player's own setting is the only clue left. This is sent for the `desktop` session too, even though it has no rom at all. An unrecognised code is ignored. |
+| `user` | no | `id`, `username` and `display_name` for the controller (the person launching the game, who gets full control by default). If they join or rejoin, the broker matches them by `id` first, then by `username`. |
+| `session_id` | no | An id you supply, cleaned up so it's safe to use in a filename. The broker generates one itself if you leave this out. |
 | `save` | no | See below. |
 | `callback` | no | `base_url` and `token` for the exit upload; see [Exit](/docs/api/exit). |
-| `multiplayer` | no | Decided once on RomM's launch screen: whether RomM advertises the session for joining and whether the room shows its comms surface while the host is alone. |
+| `multiplayer` | no | Set once on RomM's launch screen. It decides whether RomM advertises the session so others can join, and whether the room shows its chat, webcam and mic controls while the host is playing alone. |
 
 ## Launch a game with save data
 
-Add a `save` object: `archive` is a zip restored before launch, `resume_slot`
-loads a state once the VM is up. Both are optional and independent. Like the
-state routes, `resume_slot` resolves to the emulator's working slot rather than
-being honoured literally, so any value loads whatever that slot holds.
+Add a `save` object to restore save data. `archive` is a zip file restored
+before the game launches, and `resume_slot` loads a save state once the
+emulator is up and running. Both are optional, and you can use either one on
+its own. As with the state routes, `resume_slot` doesn't load whatever number
+you send: it always loads from the emulator's own working slot, so any value
+you give ends up loading whatever that slot currently holds.
 
-Most launchers empty their working slot at the start of activate, before the
+Most emulators clear their working slot at the start of activate, before the
 archive is restored: PCSX2, PPSSPP, Dolphin, DuckStation, Flycast, RPCS3 and
-RetroArch all do. A state file is named for the content it was taken from,
-which says which game it belongs to but never which session, so a leftover
-from the last player of the same game cannot be told apart from this player's
-own. RomM already holds those states, and clearing them is what stops the last
-player's save being served as this one's. Both the restore and the later
-resume push land afterwards, so neither is touched.
+RetroArch all do this. A save-state file is named after the game it was taken
+from, which says which game it belongs to, but never which session created
+it, so a leftover from the last person to play that same game can't be told
+apart from your own. RomM already keeps a copy of those states, and clearing
+them here is what stops the last player's save from being served as yours.
+Both the archive restore and the later resume push happen after this
+clearing step, so neither one is affected by it.
 
 ```bash
 curl -k -X POST https://localhost:3001/streaming/api/session/activate \
@@ -66,24 +72,26 @@ curl -k -X POST https://localhost:3001/streaming/api/session/activate \
 ```
 
 The archive path is a container path. RomM gets one by uploading the zip
-through the [import route](/docs/api/archives) first and feeding back the
-`path` it returns.
+through the [import route](/docs/api/archives) first, then using the `path`
+that route sends back.
 
-`save.memory_card_synced: true` tells the broker the whole memory card is
-being synced over the [memory card routes](/docs/api/archives#memory-cards).
-The card then travels as its own image, so it is left out of both the restore
-and the exit dump.
+Setting `save.memory_card_synced: true` tells the broker that the whole
+memory card is being synced separately, through the
+[memory card routes](/docs/api/archives#memory-cards). The card then travels
+as its own image, so it's left out of both this restore and the later exit
+dump.
 
-A resume state can also arrive after activate has returned: the
-[state-file PUT](/docs/api/state#move-a-state-file-in-or-out) needs a live
-session, so RomM pushes its pick once the game is already booting, and the
-deferred resume load waits for it.
+A resume state can also show up after activate has already answered: the
+[state-file PUT](/docs/api/state#move-a-state-file-in-or-out) needs a session
+that's already live, so RomM sends its chosen state once the game has started
+booting, and the broker's deferred resume load waits for it.
 
 ## Launch the desktop
 
-`emulator: "desktop"` streams the full webstation desktop so emulators can be
-configured through the GUI. No `rom` or `save`; same room interface, same exit
-teardown.
+Setting `emulator` to `"desktop"` streams the full webstation desktop, so you
+can configure emulators the normal way, through their own interface. This
+mode takes no `rom` or `save`. Everything else works the same: the same room,
+the same exit teardown.
 
 ```bash
 curl -k -X POST https://localhost:3001/streaming/api/session/activate \
@@ -94,8 +102,8 @@ curl -k -X POST https://localhost:3001/streaming/api/session/activate \
 
 ## Swap discs
 
-Emulators that report `supports_disc_swap` (RetroArch) can change the mounted
-disc without restarting:
+Some emulators (currently RetroArch) report `supports_disc_swap`, meaning
+they can change the mounted disc without restarting the game:
 
 ```bash
 curl -k -X POST https://localhost:3001/streaming/api/session/swap-disc \
@@ -104,39 +112,45 @@ curl -k -X POST https://localhost:3001/streaming/api/session/swap-disc \
   -d '{ "path": "/romm/psx/Final Fantasy VII (Disc 2).chd" }'
 ```
 
-`path` is validated against `ROM_ROOT` the same way activate validates its rom
-path. Returns `{"status": "swapped", ...}`, `400` when the running emulator has
-no tray, `409` without a session. Swaps are serialised against each other and
-against the deferred resume load, and a swap is only committed once the core
-reports a running game again.
+`path` is checked against `ROM_ROOT` the same way activate checks its rom
+path. Returns `{"status": "ok", "path": "<path to the disc>"}`. You get `400` if the running
+emulator has no disc tray to swap into, and `409` if there's no active
+session. Disc swaps can't happen at the same time as each other, or at the
+same time as a deferred resume load that's already running. A swap only
+counts as finished once the core confirms it's running a game again.
 
 ## What activate does
 
 <Steps>
 <Step>
-Checks the secret and that no session is active (`409` otherwise), looks the
-emulator up in the registry (`422` for an unknown one), and resolves the
-bootable file under `ROM_ROOT`.
+Checks the shared secret and makes sure no session is already active
+(answers `409` if one is), looks up the emulator by name (answers `422` if
+it's not recognised), and works out which file under `ROM_ROOT` should
+actually boot.
 </Step>
 <Step>
-Clears any emulator left behind by an earlier broker process (the pid record),
-and clears the emulator's working state slot of leftovers from the previous
-session.
+Shuts down any emulator left running by an earlier broker process, using the
+process ID (PID) it recorded at the time, and clears the emulator's working
+state slot of anything left over from the previous session.
 </Step>
 <Step>
-Restores `save.archive` into the emulator's save subtrees without rolling back
-files that are newer on disk. A member outside the subtrees, or a synced memory
-card inside an older archive, is skipped rather than failing the restore.
+Restores `save.archive`, if one was sent, into the emulator's save folders,
+but never rolls back a file that's newer on disk than what's in the archive.
+A file in the archive that falls outside those folders, or a synced memory
+card sitting in an older archive, gets skipped instead of failing the whole
+restore.
 </Step>
 <Step>
-Launches the emulator in its own process group with output captured to its
-log file, records its pid, and mints the controller token. The token map is
-pushed to selkies so the stream accepts the controller.
+Launches the emulator in its own process group, with its output captured to
+its log file, and records its PID. It also mints the controller token and
+pushes the updated token map to selkies (the video/input streaming layer),
+so the stream will accept input from the controller.
 </Step>
 <Step>
-If `resume_slot` was given, a watchdog waits for the game to report running,
-lets it settle, and fires the load. Answers immediately with the session id
-and the room URL; the status route reports `boot_failed` if the emulator comes
-up but never reaches a running game.
+If you sent `resume_slot`, a background watchdog waits for the game to
+report it's running, gives it a moment to settle, then loads the state.
+Answers right away with the session id and the room URL, without waiting for
+any of that to finish. If the emulator comes up but never actually reaches a
+running game, the status route reports `boot_failed`.
 </Step>
 </Steps>

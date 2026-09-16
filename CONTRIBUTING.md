@@ -13,14 +13,18 @@ Thanks for looking at romm-broker. A few ground rules before you open a PR.
 ## Before you open a PR
 
 ```bash
-uv venv && uv pip install -e . pytest "ruff==0.16.1"
+uv venv && uv pip install -e . pytest pytest-asyncio "ruff==0.16.1"
 .venv/bin/ruff check webstation_broker tests
+BROKER_DEV_MODE=true .venv/bin/python -c "from webstation_broker.app import create_app; create_app()"
 .venv/bin/pytest -q
 ```
 
-CI runs the same lint and test suite on every push and PR to `master`. There
-is no frontend lint, test, or build step in CI; if you touch `frontend/`,
-read your diff carefully before opening the PR.
+CI runs three gates on every push and PR to `master`: lint, a `create_app()`
+import check under `BROKER_DEV_MODE=true` (catching an import or syntax error
+before it would otherwise only surface when s6 restarts the service in the
+container), and the test suite. There is no frontend lint, test, or build
+step in CI; if you touch `frontend/`, read your diff carefully before opening
+the PR.
 
 ## Code conventions
 
@@ -41,7 +45,11 @@ makes a malformed one a docs regression too.
 
   ```python
   BROKER_SECRET = os.environ.get("BROKER_SECRET", "")
-  """Shared secret for the session lifecycle endpoints, from `BROKER_SECRET`; unset disables auth."""
+  """Shared secret for the session lifecycle endpoints, from `BROKER_SECRET`.
+
+  Leaving it unset refuses to start unless `BROKER_DEV_MODE` is set, which
+  starts the broker unauthenticated instead.
+  """
   ```
 
 - **A pydantic field whose meaning is non-obvious gets one too**, carrying the

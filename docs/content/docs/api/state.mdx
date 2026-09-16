@@ -12,26 +12,32 @@ curl -k -X POST https://localhost:3001/streaming/api/session/save-state \
   -d '{ "slot": 3 }'
 ```
 
-`/load-state` takes the same body. Both return
-`{"status": "saved"|"loaded"|"failed", "slot": N, ...}` and both are
-secret-only: the parent's backend is the caller, not the room UI.
+`/load-state` takes the same request body. Both routes return
+`{"status": "saved"|"loaded"|"failed", "slot": N, ...}`. Both need the shared
+secret header shown above, so only the parent's backend (usually RomM) can
+call them, not the room UI.
 
-RomM is the library of states, so each emulator works in exactly one slot and
-resolves whatever `slot` is asked for to its own. The response echoes the slot
-it actually used, which is also the `state_slot` in the status response. The
-field is kept because the per-emulator brokers take it and because it is what
-the parent needs to read back, not because the broker keeps ten of anything.
+RomM keeps the full library of states, not the broker. Because of that, each
+emulator here only ever uses one dedicated slot, no matter which `slot`
+number you ask for: the broker just maps your request onto that one slot.
+The response tells you the slot it actually used, and that same number shows
+up as `state_slot` in the status response. The `slot` field is kept because
+every emulator's request format expects it and because the parent needs a
+number back, not because this broker actually keeps several separate save
+slots.
 
-`400` means the running emulator has no save states at all (`desktop`,
-`shadps4` and the others marked "no" under [Supported emulators](/docs/emulators)
-persist through the game's own save data instead), `409` means there is no
-active session or the emulator process is gone. Which case applies is readable
-ahead of time from `supports_states` in the status response, so the parent does
-not need its own per-emulator table.
+A `400` response means the running emulator has no save states at all.
+(`desktop`, `shadps4`, and the other emulators marked "no" under [Supported
+emulators](/docs/emulators) save your progress through the game's own save
+data instead.) A `409` response means there is no active session, or the
+emulator has already stopped running. You can check which case applies ahead
+of time by looking at `supports_states` in the status response, so you don't
+need to keep your own list of which emulator supports save states.
 
-A `"failed"` status is a real answer, not an error: for PCSX2 it means PINE
-never acked, and for any emulator it covers a load of a slot that holds no
-state file, or a save whose slot never appeared on disk.
+A `"failed"` status is a normal answer, not an error. For PCSX2, it means
+PINE (the socket the broker uses to send PCSX2 remote commands) never
+confirmed the save. For any emulator, it also covers loading a slot with no
+state file in it, or a save whose file never showed up on disk.
 
 ## Move a state file in or out
 
@@ -43,28 +49,37 @@ curl -k -X PUT "https://localhost:3001/streaming/api/session/state-file?filename
   -H 'X-Broker-Secret: <shared secret>' --data-binary @state.bin
 ```
 
-This is how RomM becomes the datastore rather than the container: the GET
-follows a save so the state can be filed in the library, and the PUT sends any
-stored state back so a load or a resume can reach it. The GET reports the name
-in `X-State-Filename` and the slot in `X-State-Slot`.
+These two routes are how RomM stores your save states instead of the
+container storing them. Use the GET after a save, to pull the state file out
+and file it away in RomM's library. Use the PUT to send a stored state back
+in, so a load or a resume can reach it. The GET response reports the file's
+name in the `X-State-Filename` header and its slot in the `X-State-Slot`
+header.
 
-The PUT takes a name back and asks only whether the running emulator could have
-written it for the loaded game. The slot in the name is not part of that test:
-the library holds states captured under whatever slot was in use at the time,
-so the name is restamped into this broker's one working slot and the response
-reports the name it landed under. What is checked is identity, the PCSX2 serial
-or the RetroArch content basename, so a state for another game or another
-directory is still a `400` rather than a stray file in the save tree.
+The PUT only checks one thing: could the running emulator have written a
+file with this exact name for the game that's loaded right now? The slot
+number baked into the filename doesn't matter for that check, because RomM's
+library holds states saved under whatever slot happened to be in use at the
+time. Instead, the broker renames the file to fit its own one working slot,
+and the response reports the name it landed under. What actually gets
+checked is the game itself, PCSX2's game serial number or the name RetroArch
+uses for the loaded ROM, so a state for a different game, or from a
+different folder, still comes back as a `400` instead of landing as a stray
+file in the save folder.
 
-The PUT needs a live session and returns `409` without one, since a state is
-only pushed in so a running emulator can reach it. The GET outlives the session:
-exit captures a state on its way out, and RomM can only come back for it once
-the teardown has answered, so refusing there was what left every exit state
-stranded in the container. The broker holds the exited session's state until the
-next activate clears the working slot, and answers `409` before the first
-session and `404` once the slot is empty. `413` on either side means the file is
-over `BROKER_STATE_FILE_MAX_BYTES` (256 MiB); RomM caps the same transfer, so
-raising one end alone only moves which end refuses.
+The PUT needs an active session and returns `409` without one, since
+pushing a state in only makes sense while a running emulator can use it. The
+GET works differently: it still works after the session ends. Exiting a
+session saves a state on the way out, and RomM can only come back for it
+once that shutdown has finished responding, so refusing the GET at that
+point used to leave every exit state stranded in the container with no way
+out. Instead, the broker holds onto the exited session's state until the
+next activate call clears out the working slot. It answers `409` before
+the very first session, and `404` once that slot is empty again. A `413`
+response on either route means the file is over
+`BROKER_STATE_FILE_MAX_BYTES` (256 MiB by default). RomM enforces the same
+size limit on its own side, so raising the limit on only one end just moves
+which end rejects the file first.
 
 ## Fetch the frame a state was taken at
 
@@ -73,21 +88,26 @@ curl -k -X GET https://localhost:3001/streaming/api/session/state-screenshot \
   -H 'X-Broker-Secret: <shared secret>' -o state.png
 ```
 
-This is what gives a stored state its thumbnail in RomM's resume picker. The
-frame is the streamed desktop as it was the moment the save was sent: the
-save-state and exit routes capture it over the pixelflux computer-use endpoint
-on `127.0.0.1:5000` before the emulator is told to save, scale it to
-`BROKER_STATE_SCREENSHOT_SIZE` on its longest side, and keep it once the state
-is confirmed. It is the same for every emulator, so nothing depends on what
-the emulator itself writes beside a state. It stays readable after exit on the
-same terms as the state itself. `404` means the state has no frame, because
-the capture failed or the container runs without `PIXELFLUX_CU`; RomM files
-the state without a thumbnail.
+This route is what gives a stored state its thumbnail in RomM's resume
+picker. The image is a screenshot of the streamed desktop, taken the moment
+the save was sent. The save-state and exit routes grab it over the pixelflux
+computer-use endpoint (a local screenshot API that Selkies, the video
+streaming piece, exposes on `127.0.0.1:5000`) right before the emulator is
+told to save. The broker then shrinks the image so its longest side is
+`BROKER_STATE_SCREENSHOT_SIZE` pixels, and only keeps it once the state
+itself is confirmed saved. This works the same way for every emulator, so it
+never depends on whatever screenshot feature, if any, the emulator itself
+has. Like the state file, it stays readable after the session has exited. A
+`404` response means the state has no picture, either because the capture
+failed or because the container is running without `PIXELFLUX_CU` set.
+Either way, RomM still files the state, just without a thumbnail.
 
 ## Resume after activate
 
-A state pushed with the PUT can arrive after activate has already returned and
-the game is booting. The deferred resume load waits for the working slot to
-fill before firing, so the sequence RomM uses is: activate with `resume_slot`,
-PUT the chosen state, and let the broker's watchdog load it once the emulator
-reports a running game.
+A state pushed in with the PUT can arrive after activate has already
+returned and the game is already booting. When that happens, the broker's
+deferred resume load waits until the working slot is actually filled before
+it fires, so it never tries to load a state that isn't there yet. Because of
+this, RomM follows this order: call activate with `resume_slot` set, PUT
+the chosen state, and let the broker's watchdog load it once the emulator
+reports the game is running.

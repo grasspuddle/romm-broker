@@ -45,12 +45,10 @@ from threading import Lock
 from typing import Any, Optional
 
 from .. import settings
-from .base import Emulator, base_launch_env
+from .base import Emulator, base_launch_env, xdg_data_dir
 
 log = logging.getLogger(__name__)
 
-XDG_DATA_HOME = os.environ.get("XDG_DATA_HOME") or str(Path.home() / ".local/share")
-"""The XDG data root, `~/.local/share` when `XDG_DATA_HOME` is unset."""
 VERSIONS_DIR = Path(
     os.environ.get(
         "SHADPS4_VERSIONS_DIR",
@@ -61,8 +59,14 @@ VERSIONS_DIR = Path(
 
 Defaults to `~/.local/share/shadPS4QtLauncher/versions`.
 """
-DATA_DIR = Path(os.environ.get("SHADPS4_DATA_DIR", str(Path(XDG_DATA_HOME) / "shadPS4")))
-"""shadPS4's data root holding save data (env `SHADPS4_DATA_DIR`, default `$XDG_DATA_HOME/shadPS4`)."""
+DATA_DIR = xdg_data_dir("shadPS4")
+"""shadPS4's data root, holding the save data the archive is built from.
+
+Not configurable, and deliberately: nothing on shadPS4's command line names it,
+so an override would move only the tree the broker dumps and restores and leave
+shadPS4 writing its own. That loses saves without reporting anything. `launch`
+exports the root this resolved to instead.
+"""
 SHADPS4_LOG_PATH = Path(os.environ.get("SHADPS4_LOG_PATH", "/config/shadps4.log"))
 """The emulator log file (env `SHADPS4_LOG_PATH`, default `/config/shadps4.log`)."""
 
@@ -73,10 +77,13 @@ _MOUNT_MARKER_DIR = "sce_sys"
 _MOUNT_MARKER_NAME = "corrupted"
 """File shadPS4 drops into `sce_sys` while a save is mounted read-write, removed on unmount."""
 
-SHADPS4_CONFIG_PATH = Path(
-    os.environ.get("SHADPS4_CONFIG_PATH", str(DATA_DIR / "config.json"))
-)
-"""shadPS4's own config file (env `SHADPS4_CONFIG_PATH`, default `<data>/config.json`)."""
+SHADPS4_CONFIG_PATH = DATA_DIR / "config.json"
+"""shadPS4's own config file, `config.json` under `DATA_DIR`.
+
+Not configurable, for the same reason as `DATA_DIR`: shadPS4 looks for it beside
+its save data and takes no flag naming it, so an override would leave the broker
+pinning a GPU in a file the emulator never opens.
+"""
 
 SHADPS4_GPU_ID = os.environ.get("SHADPS4_GPU_ID", "auto")
 """Vulkan device index pinned into config.json before each launch (env `SHADPS4_GPU_ID`, default `auto`).
@@ -1255,7 +1262,7 @@ class Shadps4(Emulator):
             return ROM_EXTENSIONS
         return tuple(e for e in ROM_EXTENSIONS if e != ".pkg" and e not in _ARCHIVE_EXTS)
 
-    def clear_working_slot(self) -> None:
+    def clear_working_slot(self, excluded: tuple[str, ...] = ()) -> None:
         """Drop the previous session's save data before this session's restore.
 
         There is no save state and no working slot to reset, so the whole of
@@ -1263,6 +1270,10 @@ class Shadps4(Emulator):
         whole rather than scoped to the incoming serial: the exit dump ships
         the subtree, not the titles this session booted, so another title's
         leftovers would leave in this player's archive.
+
+        Args:
+            excluded: Subtrees carried by the whole-card routes. shadPS4 names
+                no memory card subtree, so this is always empty.
         """
         _clear_stale_save_data(self.save_root / SAVEDATA_SUBTREE)
 
@@ -1359,7 +1370,18 @@ class Shadps4(Emulator):
         _pin_gpu_id()
         env = base_launch_env()
         env["SHADPS4_ENABLE_IPC"] = "true"
-        log.info("launching shadps4 (rom=%s, boot=%s, binary=%s)", rom_path, boot, binary)
+        # Nothing on the command line names the data root, so shadPS4 resolves
+        # it itself. Export the root the broker resolved so the config.json it
+        # just pinned a GPU into, and the savedata the dump reads back, are the
+        # ones this launch uses.
+        env["XDG_DATA_HOME"] = str(DATA_DIR.parent)
+        log.info(
+            "launching shadps4 (rom=%s, boot=%s, binary=%s, data=%s)",
+            rom_path,
+            boot,
+            binary,
+            DATA_DIR,
+        )
         self._spawn([str(binary), "-f", "true", "-g", str(boot)], env, stdin_pipe=True)
         # The IPC input thread starts with the process and stdin buffers early
         # writes; RUN then START release the run/start semaphores so the game

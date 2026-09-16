@@ -4,6 +4,7 @@ Covers registry lookups, the declarations the routes read off each emulator, and
 record.
 """
 
+import inspect
 import json
 import os
 import signal
@@ -68,6 +69,43 @@ def test_every_declared_state_subtree_ships_in_the_save_archive(name: str) -> No
     # A state subtree the dump never walks would label nothing.
     for sub in emu.state_subtrees:
         assert sub in emu.save_subtrees
+
+
+@pytest.mark.parametrize("name", sorted(emulators.REGISTRY))
+def test_every_emulator_that_carries_saves_clears_the_last_session(name: str) -> None:
+    """An emulator holding save data has to empty it before the next player arrives.
+
+    A restore only writes the members the incoming archive names, so whatever
+    the last session left under a subtree the archive does not mention survives
+    into this session and into this player's dump. Both halves are asserted:
+    the flag the routes read, and a hook that actually does the clearing.
+    """
+    emu = emulators.get_emulator(name)
+    if not emu.save_subtrees:
+        return
+
+    assert emu.clears_stale_saves
+    # Either activate hook may be the one that does it: the clear belongs in
+    # prepare_restore for an emulator whose save tree is not ready to be
+    # emptied until that hook has made it reachable.
+    assert (
+        type(emu).clear_working_slot is not emulators.Emulator.clear_working_slot
+        or type(emu).prepare_restore is not emulators.Emulator.prepare_restore
+    )
+
+
+@pytest.mark.parametrize("name", sorted(emulators.REGISTRY))
+def test_a_clear_takes_the_subtrees_activate_did_not_exclude(name: str) -> None:
+    """Every clear accepts the subtrees the whole-card routes carry this session.
+
+    Activate hands the exclusions positionally, so a hook that never grew the
+    parameter would raise there rather than here. What each clear then deletes
+    is the emulator's own layout, and is asserted in its own tests.
+    """
+    emu = emulators.get_emulator(name)
+    signature = inspect.signature(type(emu).clear_working_slot)
+
+    assert "excluded" in signature.parameters
 
 
 @pytest.mark.parametrize("name", sorted(emulators.REGISTRY))

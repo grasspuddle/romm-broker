@@ -8,10 +8,11 @@ process kill an emulator it never spawned.
 import json
 import logging
 import os
+import shutil
 import signal
 import subprocess
 import time
-from collections.abc import Collection
+from collections.abc import Callable, Collection
 from pathlib import Path
 from typing import Any, Optional
 
@@ -1069,7 +1070,80 @@ class Emulator:
         """
         return None
 
-    def clear_working_slot(self) -> None:
+    def _clear_subtree(
+        self, subtree: str, keep: Optional[Callable[[Path], bool]] = None
+    ) -> None:
+        """Empty one of `save_subtrees` without removing the directory itself.
+
+        The directory stays because an emulator that finds its save directory
+        missing at launch writes its saves somewhere else entirely, or refuses
+        to boot at all.
+
+        Args:
+            subtree: A path relative to `save_root`, as `save_subtrees` names it.
+            keep: Called with each top-level entry; returning True leaves that
+                entry in place. The default clears everything.
+        """
+        root = self.save_root
+        target = root / subtree
+        try:
+            resolved = target.resolve()
+            # A relative escape in a subtree name would otherwise point this
+            # delete outside the save tree.
+            if not resolved.is_relative_to(root.resolve()):
+                log.error(
+                    "%s: refusing to clear %s, it escapes the save root %s",
+                    self.name,
+                    target,
+                    root,
+                )
+                return
+            if not target.is_dir():
+                return
+            entries = list(target.iterdir())
+        except OSError as exc:
+            log.warning(
+                "%s: could not scan %s for stale save data, an earlier session's "
+                "saves may survive into this one: %s",
+                self.name,
+                target,
+                exc,
+            )
+            return
+        for entry in entries:
+            if keep is not None and keep(entry):
+                continue
+            try:
+                if entry.is_symlink() or entry.is_file():
+                    entry.unlink()
+                else:
+                    shutil.rmtree(entry)
+            except OSError as exc:
+                log.warning(
+                    "%s: could not clear stale save data %s: %s", self.name, entry, exc
+                )
+                continue
+            log.info("%s: cleared stale save data %s", self.name, entry)
+
+    def _clear_save_subtrees(
+        self,
+        excluded: tuple[str, ...] = (),
+        keep: Optional[Callable[[Path], bool]] = None,
+    ) -> None:
+        """Empty every save subtree this session is responsible for.
+
+        Args:
+            excluded: Subtrees the whole-card routes carry, which this session
+                must leave alone; the card is laid down before activate runs,
+                so clearing one here would delete what RomM just synced.
+            keep: Passed through to `_clear_subtree` for each subtree.
+        """
+        for subtree in self.save_subtrees:
+            if subtree in excluded:
+                continue
+            self._clear_subtree(subtree, keep)
+
+    def clear_working_slot(self, excluded: tuple[str, ...] = ()) -> None:
         """Drop what an earlier session left in the save tree, before the restore.
 
         Every subclass that carries real save data MUST empty the save tree
@@ -1085,12 +1159,18 @@ class Emulator:
 
         Deleting more than the container's own leftovers is the failure in the
         other direction, so the clear is scoped to `save_subtrees` and runs
-        before the archive is extracted, never after.
+        before the archive is extracted, never after. `_clear_save_subtrees`
+        is the usual implementation; an emulator with app data, DLC or
+        quarantined files sharing a subtree passes a `keep` predicate.
 
         The default only reports the gap: the base class cannot know which
         paths are safe to delete, so an emulator with save data that reaches
         this warns rather than silently starting a session on the last
         player's files.
+
+        Args:
+            excluded: Save subtrees the whole-card routes carry for this
+                session, which the clear must leave alone.
         """
         if self.save_subtrees and not self.clears_stale_saves:
             log.warning(
