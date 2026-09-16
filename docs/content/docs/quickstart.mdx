@@ -1,0 +1,150 @@
+---
+title: "Quickstart"
+description: "A step-by-step walkthrough from an empty container to a working, streamed session with RomM."
+---
+
+This is for someone who already has RomM running and wants to add streamed
+emulation on top of it. It assumes you're comfortable with Docker or
+docker-compose, but not with Python or the broker's internals. If you'd
+rather understand how the pieces fit together before touching a config file,
+read the [Overview](/docs/) first: it covers how RomM, the broker, and
+selkies fit together. This page just walks the setup in order.
+
+<Steps>
+<Step>
+### Run the container
+
+```yaml
+services:
+  webstation:
+    image: lscr.io/linuxserver/webstation:romm
+    container_name: webstation
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=Etc/UTC
+      - SUBFOLDER=/streaming/
+      - BROKER_SECRET=change-me
+    volumes:
+      - /path/to/config:/config
+      - /path/to/roms:/romm
+    ports:
+      - 3000:3000
+      - 3001:3001
+    shm_size: "1gb"
+    restart: unless-stopped
+```
+
+You also need a GPU passed through, or most emulators won't run: `/dev/dri`
+for Intel or AMD, or the NVIDIA container runtime with driver 595.80 or newer
+for NVIDIA, plus the `/dev/nvidia-modeset` device specifically, which is easy
+to miss since the container toolkit doesn't add it automatically. See
+[Running the container](/docs/container#gpu) for the full recipes.
+
+<Callout type="warn" title="Container exits right away with no BROKER_SECRET">
+If `BROKER_SECRET` is left unset and `BROKER_DEV_MODE` isn't set either, the
+container logs a critical line reading "BROKER_SECRET IS NOT SET - REFUSING
+TO START" and exits immediately instead of booting unauthenticated. Set
+`BROKER_SECRET` to a real random value for anything beyond a quick local
+test. `BROKER_DEV_MODE=true` also works, but it leaves the session endpoints
+with no authentication at all, so a container run that way should never be
+reachable outside your own machine. See [Broker settings](/docs/configuration).
+</Callout>
+</Step>
+<Step>
+### Wire it into RomM
+
+Add a streaming container entry to RomM's `config.yml`:
+
+```yaml
+streaming:
+  containers:
+    - platform: ps2
+      host: /streaming
+      broker_host: http://10.0.1.56:3000
+      subfolder: /streaming
+      broker_secret: "change-me"
+      protocol: webstation
+      emulator: pcsx2
+      library_path: /romm
+      label: WEBSTATION
+```
+
+Two things trip people up here.
+
+`library_path` has to point at the same path the container sees as
+`ROM_ROOT` (default `/romm`). Activate rejects any rom path outside it with
+a 400 whose detail is literally `rom path must live under <root>`. Get this
+wrong and every launch from that library fails the same way.
+
+`broker_secret` here and `BROKER_SECRET` on the container also have to be the
+exact same string. A mismatch fails every activate, join, and exit call with
+a 403 and a broker log line reading `rejected request: bad or missing broker
+secret`. This already has a full writeup, so see [Reverse proxy
+troubleshooting](/docs/deployment/troubleshooting) rather than repeating it
+here.
+
+See [Wiring it into RomM](/docs/container#wiring-it-into-romm) for what
+every field in this block actually does.
+</Step>
+<Step>
+### Set up each emulator once
+
+This is the step most first launches fail on. A single-game launch reuses
+whatever configuration the emulator already has on disk. It doesn't set
+anything up for you, so before RomM can boot a game straight into an
+emulator, you need to open that emulator from the desktop once and get it
+working by hand: BIOS or firmware installed, keys in place, controller
+responding. Launch a `desktop` session from RomM (or open
+`https://yourhost:3001/streaming/` directly) to get there.
+
+[Emulator setup](/docs/emulators/setup) has the full walkthrough per
+emulator. A few of the sharper pitfalls, so you're not caught flat-footed:
+
+- Eden won't run anything until you install prod keys and firmware yourself,
+  from its Tools menu.
+- Cemu needs a `keys.txt` uploaded by hand, and is genuinely finicky. Expect
+  to launch it more than once before controller and audio settings stick.
+- Xemu needs three specific files uploaded through its own startup menu (the
+  MCPX boot ROM, the flash ROM, and a hard disk drive image), and has to be
+  relaunched once after that before it will boot anything.
+- Xenia needs a profile created from the desktop first: accept the "No
+  Profiles Found" prompt once. Skip this and a single-game launch, which
+  runs headless, stalls forever behind that same prompt with nothing to
+  click it.
+- shadPS4 needs a version downloaded through its own version manager before
+  it can run anything at all.
+
+There's no shortcut past this. A real game with a real controller is the
+only way to confirm an emulator's setup is actually done.
+</Step>
+<Step>
+### Put it behind a reverse proxy (recommended)
+
+Most real deployments want this: serving the container from a subfolder of
+RomM's own origin, rather than as a separate address, is what makes the
+room's camera, microphone, and pointer tracking work at all.
+
+`SUBFOLDER` has to equal the proxy's mount path exactly, trailing slash
+included, or nothing lines up. And most proxies strip that path prefix by
+default, which breaks every asset with a 404. See [Reverse
+proxy](/docs/deployment/reverse-proxy) for the full contract and
+per-proxy recipes (nginx, Nginx Proxy Manager, Caddy, Traefik).
+</Step>
+<Step>
+### Launch a game
+
+Start a game from RomM the way you normally would. It opens the room right
+in your browser, with the emulator already running inside it. See [Using
+the room](/docs/using-the-room) for what the controls do: chat, webcam,
+handing a controller to someone else, ending the session.
+</Step>
+</Steps>
+
+## If something goes wrong
+
+[Troubleshooting](/docs/troubleshooting) covers setup problems in general,
+organized by symptom. If what you're seeing is specifically a dead room,
+404ing assets, or camera/mic access being refused, go straight to [Reverse
+proxy troubleshooting](/docs/deployment/troubleshooting) instead, since
+those are almost always a cross-origin or proxy-configuration symptom.

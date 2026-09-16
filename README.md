@@ -69,6 +69,12 @@ per-emulator setup:
 | [Reverse proxy](https://romm-streaming.github.io/romm-broker/docs/deployment/reverse-proxy) | serving the container from RomM's origin |
 | [Emulator setup](https://romm-streaming.github.io/romm-broker/docs/emulators/setup) | the one-time BIOS/firmware/controller setup each emulator needs |
 
+Or follow the [Quickstart guide](https://romm-streaming.github.io/romm-broker/docs/quickstart)
+on the docs site: the same walkthrough in order, with the pitfalls people
+actually hit called out as they come up, and a
+[Troubleshooting](https://romm-streaming.github.io/romm-broker/docs/troubleshooting)
+page if something still doesn't work.
+
 ## Documentation
 
 | | |

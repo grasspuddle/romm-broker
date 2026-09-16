@@ -1,0 +1,96 @@
+---
+title: "Troubleshooting"
+description: "Common setup problems, organized by symptom, with fixes. Grows as new issues turn up."
+---
+
+This page covers what's been run into and reported so far, organized by
+symptom so it's a self-service first stop during setup and afterward. It's
+expected to grow. If you hit something not listed here, that's worth
+[reporting](https://github.com/romm-streaming/romm-broker/issues) rather than
+assuming it isn't a known issue.
+
+## The container won't start, or keeps restarting
+
+Check the container logs first. A critical log line reading `BROKER_SECRET IS
+NOT SET - REFUSING TO START` means the broker refused to boot on purpose:
+`BROKER_SECRET` isn't set and `BROKER_DEV_MODE` isn't either. Fix: set
+`BROKER_SECRET` to a real value (see [Broker settings](/docs/configuration)),
+or set `BROKER_DEV_MODE=true` for local development only, which starts the
+broker anyway but leaves every session-lifecycle endpoint unauthenticated. It
+must never be reachable outside your own machine in that mode.
+
+## The stream loads, but the screen stays black (or emulators won't draw)
+
+No GPU passed through: the image falls back to software rendering, and most
+emulators will not run under it. Pass through `/dev/dri` (Intel/AMD) or the
+NVIDIA runtime with driver 595.80 or newer. See [Running the
+container](/docs/container#gpu).
+
+NVIDIA specifically: if the GPU is detected and encoding/compute work but
+nothing ever reaches the screen, the missing piece is almost always the
+`/dev/nvidia-modeset` device. The NVIDIA container toolkit adds
+nvidia0/nvidiactl/uvm automatically, but not this one. `nvidia-modprobe
+--modeset` creates it if it doesn't already exist on the host.
+
+PCSX2 on AMD integrated graphics specifically: a "Failed to initialize GS"
+error at startup means RADV (AMD's Vulkan driver) failed on that hardware.
+Switch PCSX2's renderer to OpenGL in Settings > Graphics, which uses radeonsi
+instead and is confirmed to work.
+
+Proxmox LXC: not an officially supported way to run this image (a Docker VM
+is). Device permissions reset on every host reboot, and rendering falls back
+to software without extra bind-mounts. See the Proxmox callout on [Running
+the container](/docs/container#gpu) and [Issue
+#32](https://github.com/romm-streaming/romm-broker/issues/32) for a setup
+confirmed to work anyway.
+
+## Activate fails, or a specific game won't launch
+
+A 400 response with detail `rom path must live under <root>` means RomM's
+`library_path` for this container doesn't point at the same path the broker
+sees as `ROM_ROOT` (default `/romm`). Fix `library_path` in `config.yml` to
+match. See [Wiring it into RomM](/docs/container#wiring-it-into-romm) and
+[Broker settings](/docs/configuration).
+
+The emulator may just need its one-time setup first. Run it through
+[Emulator setup](/docs/emulators/setup) from a desktop session before the
+first real launch. Eden needs prod keys and firmware installed by hand from
+its Tools menu. Cemu needs a `keys.txt` uploaded. Xemu needs three specific
+files uploaded and a relaunch before it boots anything. shadPS4 needs a
+version downloaded through its own version manager before it runs at all.
+
+shadPS4 refuses a `.pkg` file or an archived (`.7z`/`.zip`/`.rar`) ROM
+outright by default, and RPCS3 refuses an archived ROM the same way (`.pkg`
+is unaffected on RPCS3 - it always installs through its own installer
+regardless). That's `SHADPS4_CACHE_ENABLED` or `RPCS3_CACHE_ENABLED` left
+off, which is the default. Turn the relevant one on to allow those formats.
+See [Configuration](/docs/configuration/emulators#shadps4) and
+[Configuration](/docs/configuration/emulators#rpcs3).
+
+Xenia never reaches the game, or seems to hang on launch: no Xbox Live
+profile exists yet. Launch Xenia once from the desktop and create one through
+its "No Profiles Found" prompt before launching anything through RomM.
+
+## A controller isn't working
+
+Desktop sessions and single-game launches share the exact same controller
+configuration, so test with a real controller and a real game from the
+desktop first, from [Emulator setup](/docs/emulators/setup#controllers). For
+PCSX2 and DuckStation specifically, double check the setup wizard's SDL
+device order: SDL 0 should be player 1, SDL 1 should be player 2.
+
+## Camera, microphone, invite links, or a room that loads and then does nothing
+
+These are reverse-proxy and cross-origin symptoms, not broker ones: a room
+that loads then sits dead, assets 404ing, camera/mic being refused instantly,
+invite links falling back to a manual copy box, or a broker-secret 403. All
+of these already have a full writeup. See [Reverse proxy
+troubleshooting](/docs/deployment/troubleshooting).
+
+## Where to look next
+
+The broker's own container logs are the best source of truth for anything
+happening server-to-server; your browser's console only shows what actually
+reaches the browser. If nothing here matches what you're seeing, check
+[existing issues](https://github.com/romm-streaming/romm-broker/issues) or
+open a new one. That's also how something new ends up added to this page.
