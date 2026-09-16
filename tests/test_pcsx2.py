@@ -30,6 +30,9 @@ def sstate_dir(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
     d = tmp_path / "sstates"
     d.mkdir()
     monkeypatch.setattr(pcsx2, "SSTATE_DIR", d)
+    # The save subtrees hang off the config root, which the class resolves once
+    # at import, so the clear would reach outside tmp_path without this.
+    monkeypatch.setattr(pcsx2.Pcsx2, "save_root", tmp_path)
     return d
 
 
@@ -156,18 +159,38 @@ def test_state_target_refuses_a_name_pcsx2_would_never_write(sstate_dir: Path, f
     assert pcsx2.Pcsx2().state_target(filename) is None
 
 
-def test_clearing_the_slot_leaves_the_other_slots_alone(
-    sstate_dir: Path, monkeypatch: pytest.MonkeyPatch
+def test_clearing_the_slot_takes_every_state_not_just_the_broker_slot(
+    sstate_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Clearing the working slot removes its state and keeps the other slots."""
+    """A state in any slot is the last session's, and nothing in its name says so."""
     monkeypatch.setattr(pcsx2, "STATE_SLOT", 10)
     stale = _touch(sstate_dir / "SLUS-20946.10.p2s")
     other = _touch(sstate_dir / "SLUS-20946.02.p2s")
+    slot = tmp_path / "memcards" / "Slot 1"
+    slot.mkdir(parents=True)
+    card = _touch(slot / "_pcsx2_superblock")
 
     pcsx2.Pcsx2().clear_working_slot()
 
     assert not stale.exists()
-    assert other.exists()
+    assert not other.exists()
+    assert not card.exists()
+    assert sstate_dir.is_dir()
+
+
+def test_clearing_the_slot_keeps_a_card_the_memory_route_just_synced(
+    sstate_dir: Path, tmp_path: Path
+) -> None:
+    """The card is hydrated before activate, so a clear that took it would drop it."""
+    slot = tmp_path / "memcards" / "Slot 1"
+    slot.mkdir(parents=True)
+    card = _touch(slot / "_pcsx2_superblock")
+    stale = _touch(sstate_dir / "SLUS-20946.02.p2s")
+
+    pcsx2.Pcsx2().clear_working_slot(("memcards",))
+
+    assert card.exists()
+    assert not stale.exists()
 
 
 def test_the_card_the_whole_card_routes_sync_is_the_slot_1_folder() -> None:
@@ -567,7 +590,7 @@ def test_resolve_refuses_a_direct_path_that_is_a_symlink_out_of_the_library(
 
 
 def test_two_sessions_keep_their_own_working_slot(sstate_dir: Path) -> None:
-    """Each instance resolves, targets and clears its own slot, not a shared one."""
+    """Each instance resolves and targets its own slot, not a shared one."""
     first = pcsx2.Pcsx2()
     second = pcsx2.Pcsx2()
     first.state_slot = 3
@@ -579,11 +602,6 @@ def test_two_sessions_keep_their_own_working_slot(sstate_dir: Path) -> None:
     assert second.state_path() == theirs
     assert first.state_target("SLUS-20946 (7D3A8B4E).01.p2s") == mine
     assert second.state_target("SLUS-20946 (7D3A8B4E).01.p2s") == theirs
-
-    first.clear_working_slot()
-
-    assert not mine.exists()
-    assert theirs.exists()
 
 
 def test_a_save_addresses_the_slot_of_the_instance_that_asked(
