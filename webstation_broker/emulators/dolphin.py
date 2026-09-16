@@ -741,10 +741,12 @@ class Dolphin(Emulator):
         state_dir: Where Dolphin writes `.sNN` files.
         log_path: The Dolphin log the broker exposes.
         memory_card_subtree: `GC` on a GameCube session, None on any other.
+        clears_stale_saves: On; activate empties the save subtrees this session owns.
     """
 
     name = "dolphin"
     display_name = "Dolphin"
+    clears_stale_saves = True
     save_root = USER_DIR
     save_subtrees = ("StateSaves", "GC", "Wii")
     """Directories the save archive carries.
@@ -1081,22 +1083,28 @@ class Dolphin(Emulator):
         """Return the newest state file in the broker's slot, or None when it holds nothing."""
         return _state_for_slot(STATE_SLOT)
 
-    def clear_working_slot(self) -> None:
-        """Delete every state in the broker's slot before a new session boots.
+    def clear_working_slot(self, excluded: tuple[str, ...] = ()) -> None:
+        """Empty the save subtrees this session owns before the archive restore.
 
         A state is named for the game it was taken from, and the game id only
         comes off the running disc, so a leftover cannot be told apart from the
         state of the game about to boot. Anything still here belongs to a
         session that has already exited and whose states RomM holds.
+
+        The GC cards and the Wii NAND go the same way, and for a stronger
+        reason: they are the player's actual progress, nothing in a `.gci` or
+        a NAND title directory names whose session wrote it, and the restore
+        only writes the members the incoming archive carries. A card or a NAND
+        save the last player left would otherwise be readable by this one and
+        ship back out in their dump.
+
+        Args:
+            excluded: Subtrees carried by the whole-card routes. `GC` lands
+                here when a GameCube session syncs its card separately, and
+                the card is written before activate runs, so clearing it here
+                would delete what RomM just laid down.
         """
-        if not STATE_DIR.is_dir():
-            return
-        for stale in STATE_DIR.glob(f"*.s{STATE_SLOT:02d}"):
-            try:
-                stale.unlink()
-                log.info("cleared stale state %s", stale.name)
-            except OSError as exc:
-                log.warning("could not clear stale state %s: %s", stale.name, exc)
+        self._clear_save_subtrees(excluded)
 
     def state_target(self, filename: str) -> Optional[Path]:
         """Map a pushed state's filename to where it may be written.

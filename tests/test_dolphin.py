@@ -47,6 +47,9 @@ def state_dir(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
     d = tmp_path / "StateSaves"
     d.mkdir()
     monkeypatch.setattr(dolphin, "STATE_DIR", d)
+    # The save subtrees hang off the user directory, which the class resolves
+    # once at import, so the clear would reach outside tmp_path without this.
+    monkeypatch.setattr(dolphin.Dolphin, "save_root", tmp_path)
     return d
 
 
@@ -222,18 +225,36 @@ def test_state_target_refuses_a_name_dolphin_would_never_write(state_dir: Path, 
     assert dolphin.Dolphin().state_target(filename) is None
 
 
-def test_clearing_the_slot_leaves_the_other_slots_alone(
-    state_dir: Path, monkeypatch: pytest.MonkeyPatch
+def test_clearing_the_slot_takes_every_state_not_just_the_broker_slot(
+    state_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Clearing the working slot removes its state and keeps the other slots."""
+    """A state in any slot is the last session's, and nothing in its name says so."""
     monkeypatch.setattr(dolphin, "STATE_SLOT", 1)
     stale = _touch(state_dir / "GXCE01.s01")
     other = _touch(state_dir / "GXCE01.s02")
+    card = _touch(tmp_path / "GC" / "MemoryCardA.USA.raw")
+    nand = _touch(tmp_path / "Wii" / "title" / "00010000" / "data.bin")
 
     dolphin.Dolphin().clear_working_slot()
 
     assert not stale.exists()
-    assert other.exists()
+    assert not other.exists()
+    assert not card.exists()
+    assert not nand.exists()
+    assert state_dir.is_dir()
+
+
+def test_clearing_the_slot_keeps_a_card_the_memory_route_just_synced(
+    state_dir: Path, tmp_path: Path
+) -> None:
+    """The GameCube card is hydrated before activate, so a clear that took it would drop it."""
+    card = _touch(tmp_path / "GC" / "MemoryCardA.USA.raw")
+    stale = _touch(state_dir / "GXCE01.s02")
+
+    dolphin.Dolphin().clear_working_slot(("GC",))
+
+    assert card.exists()
+    assert not stale.exists()
 
 
 def test_the_undo_buffer_is_dropped_before_the_dump(state_dir: Path) -> None:
