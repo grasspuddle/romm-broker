@@ -372,6 +372,7 @@ class Flycast(Emulator):
     # DATA_DIR itself: VMU saves and the savestate both sit loose at its
     # root, with nothing else here to split them into named subtrees.
     save_subtrees = (DATA_DIR.name,)
+    clears_stale_saves = True
     rom_extensions = ROM_EXTENSIONS
     log_path = FLYCAST_LOG_PATH
     # The window-close request goes through the SDL event loop into
@@ -565,7 +566,7 @@ class Flycast(Emulator):
                     )
         super().stop()
 
-    def clear_working_slot(self) -> None:
+    def clear_working_slot(self, excluded: tuple[str, ...] = ()) -> None:
         """Drop every session-owned file left in DATA_DIR before a restore.
 
         Resume states, their owner markers, VMU images, arcade nvmem and
@@ -583,6 +584,10 @@ class Flycast(Emulator):
         are left: they are container setup, not one session's data. So are
         states set aside under `UNTRUSTED_SUFFIX`, which can be the only copy
         of that progress and which no resume can pick up anyway.
+
+        Args:
+            excluded: Subtrees carried by the whole-card routes. Flycast names
+                no memory card subtree, so this is always empty.
         """
         if not DATA_DIR.is_dir():
             return

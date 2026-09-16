@@ -1262,7 +1262,7 @@ class Shadps4(Emulator):
             return ROM_EXTENSIONS
         return tuple(e for e in ROM_EXTENSIONS if e != ".pkg" and e not in _ARCHIVE_EXTS)
 
-    def clear_working_slot(self) -> None:
+    def clear_working_slot(self, excluded: tuple[str, ...] = ()) -> None:
         """Drop the previous session's save data before this session's restore.
 
         There is no save state and no working slot to reset, so the whole of
@@ -1270,6 +1270,10 @@ class Shadps4(Emulator):
         whole rather than scoped to the incoming serial: the exit dump ships
         the subtree, not the titles this session booted, so another title's
         leftovers would leave in this player's archive.
+
+        Args:
+            excluded: Subtrees carried by the whole-card routes. shadPS4 names
+                no memory card subtree, so this is always empty.
         """
         _clear_stale_save_data(self.save_root / SAVEDATA_SUBTREE)
 

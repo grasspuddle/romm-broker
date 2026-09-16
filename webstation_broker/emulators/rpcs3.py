@@ -1670,7 +1670,7 @@ class Rpcs3(Emulator):
             return ROM_EXTENSIONS
         return tuple(e for e in ROM_EXTENSIONS if e not in _ARCHIVE_EXTS)
 
-    def clear_working_slot(self) -> None:
+    def clear_working_slot(self, excluded: tuple[str, ...] = ()) -> None:
         """Create the savestates symlink and drop the last session's saves and states.
 
         Save data goes first and goes whole (`_clear_stale_save_data`): a save
@@ -1697,6 +1697,10 @@ class Rpcs3(Emulator):
         nothing rather than guessing. Flipping _restoring here, not just in
         prepare_restore(), matters because api.py reads save_subtrees for the
         restore extract before it ever calls prepare_restore().
+
+        Args:
+            excluded: Subtrees carried by the whole-card routes. RPCS3 names no
+                memory card subtree, so this is always empty.
         """
         _ensure_sstate_link()
         _clear_stale_save_data()

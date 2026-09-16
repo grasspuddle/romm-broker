@@ -2232,6 +2232,36 @@ def test_an_archive_held_back_by_the_card_sync_is_reported(
     assert "memory-card routes" in body["save_restore_skipped"]
 
 
+def test_the_clear_is_told_which_subtree_the_card_routes_carry(
+    client: TestClient,
+    broker_dirs: dict[str, Path],
+    fake_emulator: list[FakeEmulator],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A whole card RomM synced separately is named to the clear so it survives it.
+
+    The card is laid down before activate runs, so a clear that swept it would
+    delete the save data this session is supposed to boot from.
+    """
+    from webstation_broker import emulators
+
+    monkeypatch.setattr(emulators.REGISTRY["fake"], "save_subtrees", ("saves", "states"))
+    monkeypatch.setattr(emulators.REGISTRY["fake"], "memory_card_subtree", "saves")
+
+    _activate(client, broker_dirs, save={"memory_card_synced": True})
+
+    assert fake_emulator[0].cleared_excluding == ("saves",)
+
+
+def test_the_clear_excludes_nothing_when_no_card_was_synced(
+    client: TestClient, broker_dirs: dict[str, Path], fake_emulator: list[FakeEmulator]
+) -> None:
+    """Without a separate card sync there is nothing for the clear to leave behind."""
+    _activate(client, broker_dirs)
+
+    assert fake_emulator[0].cleared_excluding == ()
+
+
 def test_a_fully_failed_restore_is_reported_not_launched(
     client: TestClient,
     broker_dirs: dict[str, Path],
@@ -2315,11 +2345,12 @@ def _record_activate_hooks(
 
     calls: list[str] = []
 
-    def _clear(self: FakeEmulator) -> None:
+    def _clear(self: FakeEmulator, excluded: tuple[str, ...] = ()) -> None:
         """Record the working-slot clear.
 
         Args:
             self: The emulator being cleared.
+            excluded: Save subtrees the whole-card routes carry this session.
         """
         calls.append("clear_working_slot")
 

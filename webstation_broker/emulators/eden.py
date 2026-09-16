@@ -365,7 +365,7 @@ class Eden(Emulator):
         would restamp and ship all of them.
         """
 
-    def clear_working_slot(self) -> None:
+    def clear_working_slot(self, excluded: tuple[str, ...] = ()) -> None:
         """Drop the previous session's saves and profile before the restore.
 
         Eden has no save states and no fixed slot, so the whole clear is the
@@ -373,6 +373,10 @@ class Eden(Emulator):
         at exit: a session that crashes or is killed never reaches
         `save_and_exit`, and the exit restamp ships a save unit whole, so a
         leftover file in one would leave in the next player's archive.
+
+        Args:
+            excluded: Subtrees carried by the whole-card routes. Eden names no
+                memory card subtree, so this is always empty.
         """
         _clear_stale_save_data()
 

@@ -606,7 +606,7 @@ async def _start_session(body: ActivateIn, request: Request) -> dict[str, Any]:
                 restore_skipped,
             )
 
-    await anyio.to_thread.run_sync(emulator.clear_working_slot)
+    await anyio.to_thread.run_sync(emulator.clear_working_slot, excluded)
     # Unconditional: the hook is where a subclass drops a stale save that would
     # otherwise be picked up as this session's own, and a session with no
     # archive is exactly the one where nothing else would overwrite it.
