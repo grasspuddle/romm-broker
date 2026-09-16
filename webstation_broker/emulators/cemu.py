@@ -235,6 +235,23 @@ def _pick_rom_file(candidates: Iterable[Path], base: Path) -> Optional[Path]:
     return min(ranked)[4]
 
 
+def _is_account_store(entry: Path) -> bool:
+    """Whether `entry` under `usr/save` is the account store rather than save data.
+
+    `usr/save` holds one `<titleHigh>` directory per title id half plus
+    `system`, where Cemu keeps the account the save paths are keyed by.
+    Anything that is not a title id half is treated as not being save data,
+    so an entry nobody recognises is kept rather than deleted.
+
+    Args:
+        entry: A top-level entry under `usr/save`.
+
+    Returns:
+        True when the entry is not a title save directory.
+    """
+    return not _HEX8_RE.match(entry.name)
+
+
 def _patch_settings() -> None:
     """Force broker-required settings.xml values before every launch.
 
@@ -355,10 +372,12 @@ class Cemu(Emulator):
         rom_extensions: Bootable formats, best first.
         log_path: The emulator log file.
         term_timeout: SIGTERM grace before SIGKILL (env `CEMU_STOP_WAIT`, default 5).
+        clears_stale_saves: On; activate empties the title save tree.
     """
 
     name = "cemu"
     display_name = "Cemu"
+    clears_stale_saves = True
     save_root = MLC_DIR
     save_subtrees = ("usr/save",)
     rom_extensions = ROM_EXTENSIONS
@@ -381,6 +400,28 @@ class Cemu(Emulator):
         container would read as written this session and `save_and_exit`
         would restamp and ship all of them.
         """
+
+    def clear_working_slot(self, excluded: tuple[str, ...] = ()) -> None:
+        """Empty the title save tree before the archive restore.
+
+        Cemu keys a save by title id and by an account id the container shares
+        across players, so the previous session's saves sit exactly where this
+        one's belong. The restore only writes the members the incoming archive
+        carries, and the exit restamp ships a title whole once anything under
+        it is written, so a title the last player saved and this one's archive
+        does not name would be readable here and would leave again in this
+        player's dump.
+
+        The account store under `usr/save/system` stays: it is what the save
+        paths are keyed by, not one player's data, and Cemu only writes it on
+        a first boot, so clearing it every activate would drop the session onto
+        account setup instead of the game.
+
+        Args:
+            excluded: Subtrees carried by the whole-card routes. Cemu has no
+                memory card, so this is always empty.
+        """
+        self._clear_save_subtrees(excluded, keep=_is_account_store)
 
     def prepare_restore(self) -> None:
         """Stop a running Cemu so the archive can be extracted under it."""

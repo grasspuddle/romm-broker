@@ -66,6 +66,9 @@ def save_dir(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
     save.mkdir(parents=True)
     monkeypatch.setattr(cemu, "MLC_DIR", mlc)
     monkeypatch.setattr(cemu, "SAVE_DIR", save)
+    # The save subtree hangs off the MLC root, which the class resolves once at
+    # import, so the clear would reach outside tmp_path without this.
+    monkeypatch.setattr(cemu.Cemu, "save_root", mlc)
     return save
 
 
@@ -256,6 +259,49 @@ def test_pad_uuids_can_be_pinned_by_env(monkeypatch: pytest.MonkeyPatch) -> None
     """CEMU_PAD_UUIDS overrides the computed pad UUIDs with a comma-separated list."""
     monkeypatch.setenv("CEMU_PAD_UUIDS", "0_aaaa, 1_bbbb")
     assert cemu._pad_uuids() == ["0_aaaa", "1_bbbb"]
+
+
+def test_clearing_the_slot_drops_the_last_sessions_saves(save_dir: Path) -> None:
+    """Every title save left on the mlc goes before the next player's archive lands.
+
+    A restore only writes the members the incoming archive names, so a title the
+    archive does not mention would stay readable by this player and be swept into
+    their dump at exit.
+    """
+    stale = _touch(save_dir / "00050000" / "aaaaaaaa" / "user" / "80000001" / "old.dat")
+    other = _touch(save_dir / "00050000" / "bbbbbbbb" / "user" / "80000001" / "old.dat")
+
+    cemu.Cemu().clear_working_slot()
+
+    assert not stale.exists()
+    assert not other.exists()
+    # The tree itself is where the restore extracts to.
+    assert save_dir.is_dir()
+
+
+def test_clearing_the_slot_keeps_the_account_cemu_created_for_itself(save_dir: Path) -> None:
+    """The account store under usr/save survives the clear.
+
+    Cemu writes the account itself on first boot and every save path is keyed by
+    its persistent id, so deleting it would strand the saves the restore is about
+    to lay down.
+    """
+    account = _touch(save_dir / "system" / "act" / "80000001" / "account.dat")
+    stale = _touch(save_dir / "00050000" / "aaaaaaaa" / "user" / "80000001" / "old.dat")
+
+    cemu.Cemu().clear_working_slot()
+
+    assert account.exists()
+    assert not stale.exists()
+
+
+def test_a_missing_save_tree_is_nothing_to_clear(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A container whose mlc has not been created yet clears cleanly."""
+    monkeypatch.setattr(cemu.Cemu, "save_root", tmp_path / "absent")
+
+    cemu.Cemu().clear_working_slot()
 
 
 def test_launch_always_states_the_mlc_the_dump_reads_back(
