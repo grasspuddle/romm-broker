@@ -2262,45 +2262,7 @@ class Retroarch(Emulator):
         """Release `_disc_lock` taken by `lock_for_state_write`."""
         self._disc_lock.release()
 
-    def _clear_subtree(self, subtree: str) -> None:
-        """Empty one of `save_subtrees` without removing the directory itself.
-
-        The directory stays because the broker config names it as RetroArch's
-        savestate or savefile directory, and a launch that finds it missing
-        writes its saves somewhere else entirely.
-
-        Args:
-            subtree: A path relative to `save_root`, as `save_subtrees` names it.
-        """
-        root = self.save_root
-        target = root / subtree
-        try:
-            resolved = target.resolve()
-            # The subtrees come from the platform table; a relative escape in
-            # one would otherwise point this delete outside the save tree.
-            if not resolved.is_relative_to(root.resolve()):
-                log.error(
-                    "retroarch: refusing to clear %s, it escapes the save root %s", target, root
-                )
-                return
-            if not target.is_dir():
-                return
-            entries = list(target.iterdir())
-        except OSError as exc:
-            log.warning("retroarch: could not scan %s for stale save data: %s", target, exc)
-            return
-        for entry in entries:
-            try:
-                if entry.is_symlink() or entry.is_file():
-                    entry.unlink()
-                else:
-                    shutil.rmtree(entry)
-            except OSError as exc:
-                log.warning("retroarch: could not clear stale save data %s: %s", entry, exc)
-                continue
-            log.info("retroarch: cleared stale save data %s", entry)
-
-    def clear_working_slot(self) -> None:
+    def clear_working_slot(self, excluded: tuple[str, ...] = ()) -> None:
         """Empty every save subtree the incoming archive restores into.
 
         The states alone are not enough. RetroArch names both a state and an
@@ -2315,9 +2277,12 @@ class Retroarch(Emulator):
         Scoped to `save_subtrees`, so the platforms that share a savefile dir
         with their core's app data (dolphin, azahar) lose their saves and keep
         the rest of that dir.
+
+        Args:
+            excluded: Subtrees carried by the whole-card routes. RetroArch
+                names no memory card subtree, so this is always empty.
         """
-        for subtree in self.save_subtrees:
-            self._clear_subtree(subtree)
+        self._clear_save_subtrees(excluded)
 
     def state_target(self, filename: str) -> Optional[Path]:
         """Where a pushed state called `filename` belongs.
