@@ -43,9 +43,15 @@ def dirs(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> dict[str, Path]:
     monkeypatch.setattr(scummvm, "CONFIG_DIR", config)
     monkeypatch.setattr(scummvm, "INI_PATH", ini)
     monkeypatch.setattr(scummvm, "SAVE_DIR", saves)
+    # The class resolves its root once at import, and the save subtree hangs off
+    # it rather than off SAVE_DIR, so the clear would reach outside tmp_path.
+    monkeypatch.setattr(scummvm.Scummvm, "save_root", tmp_path)
     # The macros sleep between steps to let the menu animate; nothing in a test
     # is waiting for an animation.
     monkeypatch.setattr(scummvm, "KEY_DELAY", 0.0)
+    # Likewise the settle window: a test's write is already finished when it is
+    # made, so the tests that assert on the window set their own.
+    monkeypatch.setattr(scummvm, "STATE_STABLE", 0.0)
     return {"roms": roms, "config": config, "saves": saves, "ini": ini}
 
 
@@ -480,6 +486,44 @@ def test_a_pin_the_ini_never_had_is_added(dirs: dict[str, Path]) -> None:
     assert scummvm._ini_domains()["scummvm"]["gfx_mode"] == "surfacesdl"
 
 
+def test_a_written_ini_ends_in_a_newline(dirs: dict[str, Path]) -> None:
+    """A final line without one is not parsed by every reader."""
+    scummvm.patch_ini()
+
+    assert dirs["ini"].read_text().endswith("\n")
+
+
+def test_an_ini_write_that_fails_leaves_the_previous_one_whole(
+    dirs: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A truncating write would leave ScummVM reading a half file for its savepath.
+
+    An ini that stops short of `savepath` sends the session's saves to the
+    default directory, where the dump does not look for them.
+    """
+    write_ini(dirs["ini"], "[scummvm]\nsavepath=/keep/me\nmusic_volume=192")
+    before = dirs["ini"].read_text()
+
+    def no_rename(src: object, dst: object) -> None:
+        """Fail the rename that publishes the file.
+
+        Args:
+            src: The temp file.
+            dst: The ini it would replace.
+
+        Raises:
+            OSError: Always.
+        """
+        raise OSError("no space left on device")
+
+    monkeypatch.setattr(scummvm.os, "replace", no_rename)
+
+    scummvm.patch_ini()  # must not raise
+
+    assert dirs["ini"].read_text() == before
+    assert not list(dirs["config"].glob("*.tmp"))
+
+
 def test_an_ini_without_an_application_section_gains_one(dirs: dict[str, Path]) -> None:
     """An ini holding only game domains still gets the settings the macros need."""
     write_ini(dirs["ini"], "[monkey]\ngameid=monkey\npath=/romm/monkey")
@@ -792,25 +836,40 @@ def test_the_working_slot_is_served_for_the_booted_game(dirs: dict[str, Path]) -
     assert booted().state_path() == dirs["saves"] / "monkey.s01"
 
 
-def test_the_working_slot_is_emptied_before_a_session(dirs: dict[str, Path]) -> None:
-    """Every game's working slot goes, since a leftover cannot be told apart.
+def test_every_leftover_save_is_emptied_before_a_session(dirs: dict[str, Path]) -> None:
+    """The whole save directory goes, not just the slot the broker writes.
+
+    A save the last player made from inside the game's own menu is named for the
+    slot they picked, and nothing in that name says whose session wrote it, so
+    leaving it behind hands it to this player and to their dump.
 
     The target only exists once a game has booted, which is after this runs.
     """
-    stale = (dirs["saves"] / "monkey.s01", dirs["saves"] / "indy3.001")
-    kept = (dirs["saves"] / "monkey.s02", dirs["saves"] / "monkey.s00")
-    for path in stale + kept:
+    stale = (
+        dirs["saves"] / "monkey.s01",
+        dirs["saves"] / "indy3.001",
+        dirs["saves"] / "monkey.s02",
+        dirs["saves"] / "monkey.s00",
+    )
+    for path in stale:
         path.write_bytes(b"save")
+    nested = dirs["saves"] / "timbre" / "timbre.s00"
+    nested.parent.mkdir()
+    nested.write_bytes(b"save")
 
     Scummvm().clear_working_slot()
 
     assert not any(path.exists() for path in stale)
-    assert all(path.exists() for path in kept)
+    assert not nested.parent.exists()
+    # The directory itself stays, so a launch has somewhere to write.
+    assert dirs["saves"].is_dir()
 
 
-def test_an_empty_save_dir_is_nothing_to_clear(dirs: dict[str, Path], tmp_path: Path) -> None:
+def test_an_empty_save_dir_is_nothing_to_clear(
+    dirs: dict[str, Path], monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     """A container whose save directory does not exist yet clears cleanly."""
-    scummvm.SAVE_DIR = tmp_path / "absent"
+    monkeypatch.setattr(scummvm.Scummvm, "save_root", tmp_path / "absent")
 
     Scummvm().clear_working_slot()
 
@@ -1159,6 +1218,84 @@ def test_the_save_hotkey_follows_the_gui_language(
     emu.load_state(1)
 
     assert ("type", "c") in xdo.calls
+
+
+def test_a_save_still_being_written_is_not_confirmed(
+    dirs: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A file that keeps growing is a write in progress, not a finished save.
+
+    The caller stops ScummVM the moment this returns and the archive is zipped
+    right after, so confirming the first differing stat sends SIGTERM into the
+    write and ships the fragment to RomM as the player's progress.
+    """
+    monkeypatch.setattr(scummvm, "STATE_WAIT", 0.5)
+    monkeypatch.setattr(scummvm, "STATE_STABLE", 10.0)
+    slot = dirs["saves"] / "monkey.s01"
+    xdo = Xdo(writes=slot)
+    emu = running(monkeypatch, xdo)
+
+    growing = [b"partial", b"partial and more", b"partial and more still"]
+
+    def keep_growing(target: Optional[str], number: int) -> dict[str, tuple[float, int]]:
+        """Report a slot whose size never holds still.
+
+        Args:
+            target: The booted target.
+            number: The slot number.
+
+        Returns:
+            A stamp for the slot, one size larger on each call.
+        """
+        if growing:
+            slot.write_bytes(growing.pop(0))
+        return {"monkey.s01": (time.time(), slot.stat().st_size)}
+
+    monkeypatch.setattr(scummvm, "_slot_stamp", keep_growing)
+
+    assert emu.save_state(1) is False
+
+
+def test_a_save_is_confirmed_once_its_write_holds_still(
+    dirs: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A slot that stops changing for the settle window is a finished save."""
+    monkeypatch.setattr(scummvm, "STATE_WAIT", 5.0)
+    monkeypatch.setattr(scummvm, "STATE_STABLE", 0.2)
+    xdo = Xdo(writes=dirs["saves"] / "monkey.s01")
+    emu = running(monkeypatch, xdo)
+
+    assert emu.save_state(1) is True
+
+
+def test_an_empty_slot_file_is_not_a_finished_save(
+    dirs: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A file created but not yet written to would archive as an empty save."""
+    monkeypatch.setattr(scummvm, "STATE_WAIT", 0.5)
+    slot = dirs["saves"] / "monkey.s01"
+
+    class TouchOnly(Xdo):
+        """An xdotool whose confirming keystroke only creates the file."""
+
+        def __call__(self, *args: str, **kwargs: Any) -> Optional[str]:
+            """Create an empty slot file rather than writing a save into it.
+
+            Args:
+                *args: The xdotool arguments.
+                **kwargs: The real helper's keyword options, ignored here.
+
+            Returns:
+                Whatever the base stub answers.
+            """
+            result = super().__call__(*args, **kwargs)
+            if "Return" in args:
+                slot.write_bytes(b"")
+            return result
+
+    emu = running(monkeypatch, TouchOnly())
+
+    assert emu.save_state(1) is False
 
 
 # ── Exit ──────────────────────────────────────────────────────────────────────
