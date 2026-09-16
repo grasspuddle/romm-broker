@@ -312,13 +312,43 @@ def test_clear_working_slot_wipes_every_leftover_resume_state(duckstation_dirs: 
     assert duckstation.SSTATE_DIR.is_dir()
 
 
-def test_clear_working_slot_leaves_unrelated_files_alone(duckstation_dirs: dict[str, Path]) -> None:
-    """Clearing the working slot leaves unrelated files alone."""
-    unrelated = _touch(duckstation.SSTATE_DIR / "notes.txt")
+def test_clear_working_slot_wipes_every_leftover_save(duckstation_dirs: dict[str, Path]) -> None:
+    """Nothing in a save subtree is another session's to inherit, whatever it is named."""
+    card = _touch(duckstation_dirs["data_dir"] / "memcards" / "shared_card_1.mcd")
+    unnamed = _touch(duckstation.SSTATE_DIR / "notes.txt")
+    nested = _touch(duckstation.SSTATE_DIR / "backup" / "SLUS-00001_resume.sav")
 
     duckstation.Duckstation().clear_working_slot()
 
-    assert unrelated.exists()
+    assert not card.exists()
+    assert not unnamed.exists()
+    assert not nested.parent.exists()
+
+
+def test_clear_working_slot_keeps_a_card_the_memory_route_just_synced(
+    duckstation_dirs: dict[str, Path],
+) -> None:
+    """The card is hydrated before activate, so a clear that took it would drop it."""
+    card = _touch(duckstation_dirs["data_dir"] / "memcards" / "shared_card_1.mcd")
+    state = _touch(duckstation.SSTATE_DIR / "SLUS-00001_resume.sav")
+
+    duckstation.Duckstation().clear_working_slot(("memcards",))
+
+    assert card.exists()
+    assert not state.exists()
+
+
+def test_clear_working_slot_keeps_a_quarantined_state(duckstation_dirs: dict[str, Path]) -> None:
+    """A state set aside as possibly torn is evidence, and no resume can pick it up."""
+    aside = _touch(duckstation.SSTATE_DIR / "SLUS-00001_resume.sav.untrusted")
+    marker = _touch(duckstation.SSTATE_DIR / "SLUS-00001_resume.sav.untrusted.rom")
+    stale = _touch(duckstation.SSTATE_DIR / "SLUS-00002_resume.sav")
+
+    duckstation.Duckstation().clear_working_slot()
+
+    assert aside.exists()
+    assert marker.exists()
+    assert not stale.exists()
 
 
 def test_clear_working_slot_tolerates_a_file_it_cannot_delete(
@@ -336,7 +366,7 @@ def test_clear_working_slot_tolerates_a_file_it_cannot_delete(
         duckstation.Duckstation().clear_working_slot()  # must not raise
 
     assert stuck.exists()
-    assert "could not clear stale resume state" in caplog.text
+    assert "could not clear stale save data" in caplog.text
 
 
 # ── launch ───────────────────────────────────────────────────────────────

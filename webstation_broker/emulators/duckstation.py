@@ -237,6 +237,10 @@ def _patch_ini() -> None:
         ) from exc
 
 
+_RESUME_SUFFIX = "_resume.sav"
+"""Suffix DuckStation appends to a game's serial when it writes a resume state."""
+
+
 def _resume_snapshot() -> dict[Path, tuple[int, float]]:
     """Snapshot every `<serial>_resume.sav` in `SSTATE_DIR`.
 
@@ -247,7 +251,7 @@ def _resume_snapshot() -> dict[Path, tuple[int, float]]:
     if not SSTATE_DIR.is_dir():
         return {}
     snap: dict[Path, tuple[int, float]] = {}
-    for p in SSTATE_DIR.glob("*_resume.sav"):
+    for p in SSTATE_DIR.glob(f"*{_RESUME_SUFFIX}"):
         try:
             st = p.stat()
             snap[p] = (st.st_size, st.st_mtime)
@@ -255,9 +259,6 @@ def _resume_snapshot() -> dict[Path, tuple[int, float]]:
             log.debug("duckstation: resume state %s vanished mid-scan, skipping: %s", p, exc)
     return snap
 
-
-_RESUME_SUFFIX = "_resume.sav"
-"""Suffix DuckStation appends to a game's serial when it writes a resume state."""
 
 OWNER_SUFFIX = ".rom"
 """Suffix of the marker file recording which disc a resume state belongs to.
@@ -272,11 +273,17 @@ UNTRUSTED_SUFFIX = ".untrusted"
 
 The file is only suspected of being incomplete, never known to be, so it is
 set aside under this name rather than deleted. It stops matching
-`*_resume.sav`, so neither `clear_working_slot` nor a resume can pick it up,
-and it rides the save archive as ordinary save data (see `save_file_kind`),
-which is what makes it recoverable at all: SSTATE_DIR does not outlive the
-container.
+`*_resume.sav`, so no resume can pick it up, and `clear_working_slot` keeps
+it where it sweeps everything else. It rides the save archive as ordinary
+save data (see `save_file_kind`), which is what makes it recoverable at all:
+SSTATE_DIR does not outlive the container.
 """
+
+
+def _is_quarantined(entry: Path) -> bool:
+    """Whether `entry` is a state set aside as possibly torn, or that state's marker."""
+    name = entry.name
+    return name.endswith(UNTRUSTED_SUFFIX) or name.endswith(UNTRUSTED_SUFFIX + OWNER_SUFFIX)
 
 
 def _rom_identity(rom: Path) -> str:
@@ -454,6 +461,7 @@ class Duckstation(Emulator):
         display_name: Human-readable name shown in the UI.
         save_root: DuckStation's data root, which the save subtrees hang off.
         save_subtrees: `memcards` and `savestates`, the directories the save archive carries.
+        clears_stale_saves: On; activate empties both save subtrees, keeping quarantined states.
         rom_extensions: Bootable disc formats, best first.
         log_path: The DuckStation log the broker exposes.
         term_timeout: Seconds SIGTERM gets before SIGKILL (env `DUCKSTATION_STOP_WAIT`, default 30).
@@ -464,6 +472,7 @@ class Duckstation(Emulator):
     save_root = DATA_DIR
     save_subtrees = ("memcards", "savestates")
     state_subtrees = ("savestates",)
+    clears_stale_saves = True
     rom_extensions = ROM_EXTENSIONS
     log_path = DUCKSTATION_LOG_PATH
     term_timeout = float(os.environ.get("DUCKSTATION_STOP_WAIT", "30"))
@@ -496,30 +505,31 @@ class Duckstation(Emulator):
             return "save"
         return super().save_file_kind(rel)
 
-    def clear_working_slot(self) -> None:
-        """Drop every resume state and owner marker left in SSTATE_DIR before a restore.
+    def clear_working_slot(self, excluded: tuple[str, ...] = ()) -> None:
+        """Empty the save subtrees this session owns before the archive restore.
 
-        All titles share one flat directory, and the broker cannot read the
-        booting disc's serial to tell which state is its own. Emptying the
+        All titles share one flat state directory, and the broker cannot read
+        the booting disc's serial to tell which state is its own. Emptying the
         directory here is what leaves the incoming archive's states, and the
         markers restored beside them, as the only pairs a resume can see. A
         marker outliving its state would be worse than none: DuckStation
         reuses a serial's filename, so the next state written under that name
         would inherit an ownership claim nothing verified.
 
+        The memory cards go the same way. A `.mcd` is named by slot, not by
+        player, DuckStation has no whole-card route to move it on, and the
+        restore only writes the members the incoming archive carries, so a
+        card the last player left would otherwise be mounted for this one and
+        ship back out in their dump.
+
         States set aside under `UNTRUSTED_SUFFIX` are left alone. They can be
         the only copy of that progress and no resume can pick them up anyway.
+
+        Args:
+            excluded: Subtrees carried by the whole-card routes. DuckStation
+                names no memory card subtree, so this is always empty.
         """
-        if not SSTATE_DIR.is_dir():
-            return
-        patterns = (f"*{_RESUME_SUFFIX}", f"*{_RESUME_SUFFIX}{OWNER_SUFFIX}")
-        for pattern in patterns:
-            for stale in SSTATE_DIR.glob(pattern):
-                try:
-                    stale.unlink()
-                    log.info("cleared stale resume state %s", stale.name)
-                except OSError as exc:
-                    log.warning("could not clear stale resume state %s: %s", stale.name, exc)
+        self._clear_save_subtrees(excluded, keep=_is_quarantined)
 
     def _set_aside_untrusted_state(self, path: Path) -> None:
         """Rename a resume state a force-killed exit may have torn, marker and all.
