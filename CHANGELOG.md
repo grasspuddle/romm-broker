@@ -1,5 +1,29 @@
 # Changelog
 
+## [0.8.4](https://github.com/romm-streaming/romm-broker/compare/v0.8.3...v0.8.4) (2026-09-16)
+
+
+### Bug Fixes
+
+* **azahar:** empty the SD and NAND save trees before the restore ([149ef9d](https://github.com/romm-streaming/romm-broker/commit/149ef9d3f7ba18d3f8802cca4cc0943cc399095e))
+* **cemu:** empty the last session's Wii U saves before the restore ([c2f92f3](https://github.com/romm-streaming/romm-broker/commit/c2f92f3549c265b95dcfe77a0abbbc285221c6b9)), closes [#42](https://github.com/romm-streaming/romm-broker/issues/42)
+* **dolphin:** empty the GC cards and the Wii NAND, not just the state slot ([2f6b70e](https://github.com/romm-streaming/romm-broker/commit/2f6b70e265fde958b8e30fb1814ed17159eefeca))
+* **duckstation:** empty the memory cards alongside the resume states ([9d9952b](https://github.com/romm-streaming/romm-broker/commit/9d9952b654eb25193cc74c28fe672597405f9874))
+* **emulators:** make emptying the save tree part of the activate contract ([cb3c826](https://github.com/romm-streaming/romm-broker/commit/cb3c8262b0f5f6b9ed8c3fa0d8ce8773b42ea7d5))
+* **emulators:** stop the config knobs from desyncing broker and emulator ([3bae05f](https://github.com/romm-streaming/romm-broker/commit/3bae05fd065189fba9cfb8fc0d0535976e347b85))
+* **emulators:** stop the save-tree knobs from desyncing broker and emulator ([ec12e27](https://github.com/romm-streaming/romm-broker/commit/ec12e277ef3902d30f3de41937f5ca32f403349b))
+* **emulators:** stop the state-watch knobs from desyncing broker and emulator ([d29c774](https://github.com/romm-streaming/romm-broker/commit/d29c7740689536b1748a6bb5e2cd47e870183ffe))
+* **pcsx2:** empty the memory cards alongside the state slot ([eba2b75](https://github.com/romm-streaming/romm-broker/commit/eba2b75a0088fd4ee7957384e667578f8ff499af))
+* **ppsspp:** empty the memory stick saves, not just the broker's state slot ([db864dd](https://github.com/romm-streaming/romm-broker/commit/db864ddfd31e75e7d35d0fa729b609a18beee299))
+* **scummvm:** empty the whole save directory, and stop shipping torn saves ([171d65e](https://github.com/romm-streaming/romm-broker/commit/171d65ef9369a479dd5fb755394740810eb8e853))
+* **xemu:** clear the launched title's saves off the HDD image before injecting ([fec8cec](https://github.com/romm-streaming/romm-broker/commit/fec8cec383ede6338d11bef012710b0f2bb6b5db))
+
+
+### Documentation
+
+* add a quickstart walkthrough and a general troubleshooting page ([8903697](https://github.com/romm-streaming/romm-broker/commit/89036978ae656432699c3371e95588662057b193))
+* humanize prose and fix drift from actual broker behavior ([d908ec2](https://github.com/romm-streaming/romm-broker/commit/d908ec23db06693955d3fe53ea50a2218f1c09b7))
+
 ## [0.8.3](https://github.com/romm-streaming/romm-broker/compare/v0.8.2...v0.8.3) (2026-09-15)
 
 
