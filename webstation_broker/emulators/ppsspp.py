@@ -584,10 +584,12 @@ class Ppsspp(Emulator):
         state_slot: The one slot the broker works in, echoed back as the effective slot.
         state_dir: Where PPSSPP writes `.ppst` files.
         log_path: The PPSSPP log the broker exposes.
+        clears_stale_saves: On; activate empties both save subtrees.
     """
 
     name = "ppsspp"
     display_name = "PPSSPP"
+    clears_stale_saves = True
     save_root = PSP_DIR
     save_subtrees = ("SAVEDATA", "PPSSPP_STATE")
     state_subtrees = ("PPSSPP_STATE",)
@@ -881,35 +883,31 @@ class Ppsspp(Emulator):
         """Return the newest state file in the broker's slot, or None when it holds nothing."""
         return _state_for_slot(STATE_SLOT)
 
-    def clear_working_slot(self) -> None:
-        """Delete everything the broker's slot holds before a new session boots.
+    def clear_working_slot(self, excluded: tuple[str, ...] = ()) -> None:
+        """Empty the state tree and the memory stick saves before the restore.
 
         A state is named for the game it was taken from, and the game id only
         comes off the running disc, so a leftover cannot be told apart from
         the state of the game about to boot. Anything still here belongs to a
         session that has already exited and whose states RomM holds.
 
-        The staging file goes with them. A session killed mid-save leaves one
+        The staging files go with them. A session killed mid-save leaves one
         behind with no state to pair it against, and the save archive sweeps
         up whatever sits in the state tree, so it would ship to RomM as a
-        state of its own. So would a `.jpg` whose state is already gone,
-        which is why those are swept by name rather than only alongside the
-        state they belong to.
+        state of its own. So would a `.jpg` whose state is already gone.
+
+        `SAVEDATA` is cleared for the stronger reason: it is the memory stick,
+        the player's actual in-game progress, keyed by game id with nothing in
+        the path naming whose session wrote it. PPSSPP has no whole-card route
+        to move it on, so the archive is the only thing that should ever put a
+        save there, and a directory the last player left would otherwise be
+        loaded by this one and ship back out in their dump.
+
+        Args:
+            excluded: Subtrees carried by the whole-card routes. PPSSPP names
+                no memory card subtree, so this is always empty.
         """
-        if not STATE_DIR.is_dir():
-            return
-        patterns = (
-            f"*_{STATE_SLOT}.ppst",
-            f"*_{STATE_SLOT}.ppst{_STAGING_SUFFIX}",
-            f"*_{STATE_SLOT}.jpg",
-        )
-        for pattern in patterns:
-            for stale in STATE_DIR.glob(pattern):
-                try:
-                    stale.unlink()
-                    log.info("cleared stale state file %s", stale.name)
-                except OSError as exc:
-                    log.warning("could not clear stale state file %s: %s", stale.name, exc)
+        self._clear_save_subtrees(excluded)
 
     def state_target(self, filename: str) -> Optional[Path]:
         """Map a pushed state's filename to where it may be written.

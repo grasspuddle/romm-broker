@@ -46,6 +46,9 @@ def state_dir(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
     d = tmp_path / "PPSSPP_STATE"
     d.mkdir()
     monkeypatch.setattr(ppsspp, "STATE_DIR", d)
+    # The save subtrees hang off the memory stick root, which the class resolves
+    # once at import, so the clear would reach outside tmp_path without this.
+    monkeypatch.setattr(ppsspp.Ppsspp, "save_root", tmp_path)
     return d
 
 
@@ -235,20 +238,31 @@ def test_state_target_refuses_a_name_ppsspp_would_never_write(state_dir: Path, f
     assert ppsspp.Ppsspp().state_target(filename) is None
 
 
-def test_clearing_the_slot_leaves_the_other_slots_alone(
+def test_clearing_the_slot_takes_every_state_not_just_the_broker_slot(
     state_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Clearing the working slot removes its state and thumbnail and keeps the other slots."""
+    """A state in any slot is the last session's, and nothing in its name says so."""
     monkeypatch.setattr(ppsspp, "STATE_SLOT", 1)
     stale = _touch(state_dir / "ULUS10041_1_1.ppst")
     stale_shot = _touch(state_dir / "ULUS10041_1_1.jpg")
     other = _touch(state_dir / "ULUS10041_1_2.ppst")
+    other_shot = _touch(state_dir / "ULUS10041_1_2.jpg")
 
     ppsspp.Ppsspp().clear_working_slot()
 
-    assert not stale.exists()
-    assert not stale_shot.exists()
-    assert other.exists()
+    assert not any(p.exists() for p in (stale, stale_shot, other, other_shot))
+    assert state_dir.is_dir()
+
+
+def test_clearing_the_slot_takes_the_in_game_saves_too(state_dir: Path, tmp_path: Path) -> None:
+    """SAVEDATA has no whole-card route, so a leftover would ship in this session's dump."""
+    savedata = tmp_path / "SAVEDATA"
+    theirs = _touch(savedata / "ULUS100410000" / "DATA.BIN")
+
+    ppsspp.Ppsspp().clear_working_slot()
+
+    assert not theirs.parent.exists()
+    assert savedata.is_dir()
 
 
 def test_clearing_the_slot_removes_a_staging_file_a_killed_session_left(
@@ -262,21 +276,7 @@ def test_clearing_the_slot_removes_a_staging_file_a_killed_session_left(
     ppsspp.Ppsspp().clear_working_slot()
 
     assert not staged.exists()
-    assert other_staged.exists()
-
-
-def test_clearing_the_slot_removes_a_screenshot_whose_state_is_already_gone(
-    state_dir: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """An orphaned thumbnail is swept by name, not only alongside the state it belonged to."""
-    monkeypatch.setattr(ppsspp, "STATE_SLOT", 1)
-    orphan = _touch(state_dir / "ULUS10041_1_1.jpg")
-    other = _touch(state_dir / "ULUS10041_1_2.jpg")
-
-    ppsspp.Ppsspp().clear_working_slot()
-
-    assert not orphan.exists()
-    assert other.exists()
+    assert not other_staged.exists()
 
 
 def test_a_players_own_state_bindings_survive_the_launch_patch(
