@@ -6,14 +6,15 @@ description: "Moving from the deprecated per-emulator broker mods to a single ro
 If you're running one of the per-emulator broker mods
 (`pcsx2-romm-integration`, `dolphin-romm-integration`,
 `xemu-romm-integration`, `rpcs3-romm-integration`, `eden-romm-integration`),
-those are deprecated. This broker, running inside a single
+those are deprecated. This broker replaces all of
+them. It runs inside a single
 [docker-webstation](https://github.com/linuxserver/docker-webstation)
-container, replaces all of them: one container serves every platform instead
-of one container per emulator.
+container and handles every platform itself, instead of you running a
+separate container per emulator.
 
-In RomM's `config.yml`, each per-emulator container used a bare `platform:`
-key. One `protocol: webstation` container replaces any number of those with
-a `platforms:` map:
+In RomM's `config.yml`, each per-emulator container had its own `platform:`
+key. A single `protocol: webstation` container can replace any number of
+those, using a `platforms:` map instead:
 
 ```yaml
 # before: one container per platform
@@ -47,12 +48,14 @@ streaming:
           label: Dolphin
 ```
 
-`subfolder` and `library_path` line up with this broker's own `SUBFOLDER` and
-`ROM_ROOT` env vars (see [Broker settings](/docs/configuration)), so set them
-to match however you deploy the container.
+The `subfolder` and `library_path` values here should match this broker's
+own `SUBFOLDER` and `ROM_ROOT` environment variables (see
+[Broker settings](/docs/configuration)). Set them to whatever you actually
+use when you deploy the container.
 
-Stand up docker-webstation with this broker installed, mount it at the same
-ROM library path your old per-emulator containers used (so save/state history
-keyed to it doesn't reset), confirm streaming works for each platform, then
-remove the old containers. See RomM's migration guide for the full walkthrough:
+Set up docker-webstation with this broker installed. Mount it at the same
+ROM library path your old per-emulator containers used, so your save and
+state history (which is tied to that path) doesn't reset. Make sure
+streaming works for each platform, then remove the old containers. See
+RomM's migration guide for the full walkthrough:
 https://docs.romm.app/latest/using/emulator-streaming-migration/

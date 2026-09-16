@@ -34,7 +34,11 @@ PORT = int(os.environ.get("BROKER_PORT", "8000"))
 """Port uvicorn listens on, from `BROKER_PORT` (default `8000`)."""
 
 BROKER_SECRET = os.environ.get("BROKER_SECRET", "")
-"""Shared secret for the session lifecycle endpoints, from `BROKER_SECRET`; unset disables auth."""
+"""Shared secret for the session lifecycle endpoints, from `BROKER_SECRET`.
+
+Leaving it unset refuses to start unless `BROKER_DEV_MODE` is set, which
+starts the broker unauthenticated instead.
+"""
 
 _control_url = os.environ.get("SELKIES_CONTROL_URL", "").rstrip("/")
 """Base of the token control endpoint used by selkies, from `SELKIES_CONTROL_URL` (default empty)."""

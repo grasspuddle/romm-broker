@@ -3,12 +3,14 @@ title: "Overview"
 description: "What the broker is, how a play session flows, and where it sits next to RomM and the webstation container."
 ---
 
-romm-broker is the session broker and collaboration interface for the
-RomM webstation container. The container hosts one play session at a time: a
-game is activated over REST, the broker launches the emulator (restoring save
-data if provided) and returns a token URL that lands on a collab room with the
-selkies stream iframed inside it. Exiting saves state, stops the emulator, and
-archives the session's save delta.
+romm-broker manages play sessions for the RomM webstation container, and it
+also runs the shared room each session happens in. The container plays one
+game at a time. RomM starts a game by sending an activate request, the
+broker launches the emulator (restoring your save data if you gave it any),
+and sends back a link to the room. That room shows the selkies video stream,
+the tool that turns the emulator's screen into video you can watch in a
+browser, right inside the page. Exiting a session saves your progress, stops
+the emulator, and packages up whatever save data changed.
 
 ## The pieces
 
@@ -19,18 +21,22 @@ RomM (parent)  ──REST──▶  romm-broker  ──spawns──▶  emulator
    └──────── browser ◀───────┘  room UI (chat, webcam, input assignment)
 ```
 
-- **RomM** is the library and the caller. It decides which game to launch,
-  holds every save state and save archive, and calls the broker's lifecycle
-  endpoints with a shared secret.
-- **romm-broker** is a FastAPI app inside the container. It owns the
-  single session, launches and stops the emulator, moves save data in and out,
-  and serves the collab room.
-- **selkies** streams the desktop and enforces input routing. The broker pushes
-  it a token map, `{token: {role, slot, mk_control}}`, and selkies decides per
-  streaming connection whether input reaches the mouse and keyboard, a virtual
-  gamepad slot, or nowhere.
-- **The emulator** is whichever launcher the activate request named. Each one is
-  a subclass of the broker's `Emulator` base class; see [Emulators](/docs/emulators).
+- **RomM** is your game library. It decides what to launch, stores every save
+  state and save archive, and calls the broker to start, stop, and manage
+  sessions, using a shared secret both sides know (like a password between
+  them).
+- **romm-broker** is a Python web app (built with FastAPI) that runs
+  inside the container. It manages the one active session, starts and stops
+  the emulator, moves save data in and out, and serves the room.
+- **selkies** turns the emulator's screen into a video stream and decides who
+  is allowed to send input. The broker tells it which tokens are active with
+  a token map, `{token: {role, slot, mk_control}}`, and selkies uses that to
+  decide, for each person watching or playing, whether their input reaches
+  the mouse and keyboard, a specific virtual gamepad slot, or nowhere.
+- **The emulator** is whichever launcher the activate request asked for (the
+  broker's term for an emulator integration, like PCSX2). Each one is its own
+  module in the code, a subclass of the broker's `Emulator` base class. See
+  [Emulators](/docs/emulators).
 
 ## A session, end to end
 
@@ -38,28 +44,32 @@ RomM (parent)  ──REST──▶  romm-broker  ──spawns──▶  emulator
 <Step>
 ### Activate
 
-RomM POSTs to `/api/session/activate` with the user, the emulator and the rom
-path, optionally with a save archive to restore and a state slot to resume.
-The broker resolves the bootable file, clears the emulator's working state
-slot, restores the archive, launches the emulator and answers with a token
-URL. See [Launch a game](/docs/api/activate).
+RomM tells the broker to start a game by calling `/api/session/activate`,
+sending the user, which emulator to launch, and the rom's file path. It can
+also include a save archive to restore and a state slot to resume from. The
+broker figures out the right file to boot, clears out the emulator's working
+state slot, restores the save archive if one was given, launches the
+emulator, and answers with a token URL, a private link for reaching the
+room. See [Launch a game](/docs/api/activate).
 </Step>
 <Step>
 ### Play
 
-The token URL opens the room: the stream is iframed inside a page with chat,
-webcam fanout and drag-and-drop gamepad and mouse/keyboard assignment.
-Other users join through `/api/session/join` or an invite link and get their
-own tokens. RomM can save and load state mid-session and pull the state file
-out into its library. See [Save states](/docs/api/state).
+Opening the token URL takes you to the room: the video stream sits right
+inside the page, alongside chat, webcam video from everyone connected, and a
+drag-and-drop panel for assigning gamepads and mouse/keyboard control. Other
+people join by calling `/api/session/join` or by using an invite link, and
+each one gets their own token. RomM can save and load a state mid-session
+and pull the state file out into its library. See
+[Save states](/docs/api/state).
 </Step>
 <Step>
 ### Exit
 
-RomM's stop button calls `/api/session/exit`. The broker saves a final
-state, stops the emulator, zips everything under the emulator's save subtrees
+Clicking stop in RomM calls `/api/session/exit`. The broker saves one last
+state, stops the emulator, zips up everything in the emulator's save folders
 that changed since launch, and uploads the archive to the callback origin.
-The room is torn down and every streaming token is revoked. See
+The room shuts down and every streaming token stops working. See
 [Exit](/docs/api/exit).
 </Step>
 </Steps>
@@ -67,24 +77,32 @@ The room is torn down and every streaming token is revoked. See
 ## Key ideas
 
 - **Everything lives under `SUBFOLDER`** (default `/streaming/`). The same
-  variable drives the container's nginx templating, the FastAPI mount and the
-  vite base, so the whole app follows one reverse-proxy rule. See
+  setting drives three things: the nginx templating that configures the
+  container's web server, the FastAPI mount that places the broker's own app,
+  and the vite base that sets the room UI's build path. So your whole app
+  only has to follow one reverse-proxy rule. See
   [Reverse proxy](/docs/deployment/reverse-proxy).
-- **RomM is the datastore.** Each emulator works in exactly one state slot;
-  whatever slot a request names resolves to it. States and save archives are
-  pulled out of the container after every save and exit, and pushed back in
-  before a load or a resume, so a fresh container with nothing on disk can
-  carry on a session.
-- **Save data travels as zip archives** scoped to the emulator's save subtrees
-  (for example `memcards/` and `sstates/` for PCSX2). Activate restores an
-  archive without rolling back newer files; exit zips everything modified since
-  launch. A dead callback never loses save data: outside dev mode the archive
-  lands on disk only when the upload fails, and the
-  [export routes](/docs/api/archives) hand it back.
-- **The callback origin defaults to the parent.** The broker is same-origined
-  under the parent's `SUBFOLDER`, so activate derives the upload target from
-  the request itself (`X-Forwarded-Proto` / `X-Forwarded-Host`, else `Host`).
-  A split-origin deployment overrides it with `callback.base_url`.
+- **RomM keeps the permanent copy of your save data.** Each emulator only
+  uses one state slot at a time; no matter what slot number a request asks
+  for, it resolves to that same slot. States and save archives get pulled out
+  of the container every time you save or exit, and pushed back in before you
+  load a state or resume a session. That's what lets a brand new container,
+  with nothing saved on its own disk, pick up right where a session left off.
+- **Save data moves around as zip files**, covering only the folders each
+  emulator actually uses for saves (for example `memcards/` and `sstates/`
+  for PCSX2). Activate restores a zip archive without overwriting
+  anything newer that's already there; exit zips up everything that's
+  changed since launch. Your save data survives even when the upload fails:
+  outside of dev mode, the broker only writes the zip to disk if the upload
+  to the callback doesn't go through, and the
+  [export routes](/docs/api/archives) let you get it back.
+- **By default, the save archive uploads back to RomM itself.** The broker
+  runs under RomM's own `SUBFOLDER`, so as far as the browser is concerned
+  they're the same website, which lets activate work out where to send the
+  finished archive just from the incoming request's headers
+  (`X-Forwarded-Proto` / `X-Forwarded-Host`, or plain `Host` if neither is
+  set). If RomM and the broker run on separate domains or ports, override
+  this with `callback.base_url`.
 
 ## Where to go next
 

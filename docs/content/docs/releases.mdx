@@ -3,33 +3,41 @@ title: "Releases"
 description: "How versions are cut with release-please, how the container image picks them up, and where the changelog lives."
 ---
 
-Versions are semver and cut by release-please off `master`. Conventional commit
-subjects drive the bump: `feat:` takes the minor, `fix:` the patch. The action
-opens a release pull request that carries the version into `pyproject.toml` and
-writes `CHANGELOG.md`; merging it tags `vX.Y.Z` and publishes the release.
+Version numbers follow semver (`major.minor.patch`), and a tool called
+release-please cuts each one from `master`. It reads the commit messages to
+decide the bump: a commit starting with `feat:` bumps the minor number, one
+starting with `fix:` bumps the patch number. Release-please keeps a release
+pull request up to date with the version bump written into `pyproject.toml`
+and the notes written into `CHANGELOG.md`. Merging that pull request creates
+the `vX.Y.Z` tag and publishes the release.
 
-The image installs a release by source tarball, so nothing has to be attached to
-it:
+The container image installs a release straight from its source tarball (a
+zipped copy of the code that GitHub generates for every tag), so nothing extra
+has to be attached to the release itself:
 
 ```
 https://github.com/romm-streaming/romm-broker/archive/refs/tags/vX.Y.Z.tar.gz
 ```
 
-While the version is below 1.0.0 a breaking change still takes the minor. Going
-to 1.0.0 is a deliberate call, made with a `Release-As: 1.0.0` commit footer.
+Before version 1.0.0, even a breaking change (one that could require you to
+change your setup) only bumps the minor number, not a major one. Moving to
+1.0.0 is a deliberate decision, made by adding a `Release-As: 1.0.0` line to a
+commit message.
 
 ## What a release triggers
 
-1. `release.yml` runs release-please on every push to `master`. It keeps the
-   release PR up to date with the commits since the last tag; merging that PR
-   creates the tag and the GitHub release.
-2. linuxserver's docker-webstation pipeline polls the latest release on a
-   schedule and, when it differs from the version baked into the published
-   `webstation:romm` image, rebuilds the image with `BROKER_RELEASE` pinned to
-   the new tag. See [Inside the image](/docs/container/image-internals).
-3. `docs.yml` rebuilds this site on every push to `master` that touches the
-   docs or the package, so the developer reference always reflects the
-   current source.
+1. The `release.yml` workflow runs release-please on every push to `master`.
+   It keeps the release pull request up to date with the commits made since
+   the last tag; merging that pull request creates the tag and the GitHub
+   release.
+2. linuxserver's docker-webstation pipeline checks for the latest release on
+   a schedule. When that differs from the version baked into the published
+   `webstation:romm` image, it rebuilds that image with `BROKER_RELEASE`
+   pinned to the new tag. See
+   [Inside the image](/docs/container/image-internals).
+3. The `docs.yml` workflow rebuilds this site on every push to `master` that
+   touches the docs or the broker's own code, so the developer reference
+   always matches the current source.
 
 ## Changelog
 

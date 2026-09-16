@@ -3,14 +3,15 @@ title: "Emulator setup"
 description: "The one-time desktop session each emulator needs before single game launches work: BIOS, firmware, keys and controllers."
 ---
 
-Single game launches reuse whatever configuration the emulators already have, so
-the workflow is: launch the container into desktop mode from the RomM web
-interface, open each emulator you plan to use from the desktop, run its setup
-wizard, configure your controller, install any system files or firmware it
-needs, and play an actual title to confirm everything works. While you are in
-there, tweak graphics and audio settings to your desired profile. All of this is
-stored in the container's home directory and carries over to individual game
-launching.
+Single game launches reuse whatever configuration the emulators already have,
+so before a game will launch straight from RomM, each emulator needs a
+one-time setup pass. Launch the container in desktop mode from the RomM web
+interface, then open each emulator you plan to use from that desktop. Run its
+setup wizard, configure your controller, and install any system files or
+firmware it needs. Play an actual game to confirm everything works, and while
+you are there, adjust graphics and audio settings to your liking. Everything
+you set up here is stored in the container's home directory and carries over
+automatically when you launch games directly.
 
 ## Getting files into the container
 
@@ -20,184 +21,190 @@ files, not ROMs. Games come from your RomM library. Once uploaded, use the
 pcmanfm file manager or a foot terminal on the desktop to move files into the
 directories each emulator expects.
 
-Drag-and-drop is not the only option. `/config`, the volume every deployment
-already mounts (see [Running the container](/docs/container)), is the
-container's home directory, so anything placed on the host at the matching
-path inside it shows up in the container without an upload. This is
-particularly useful for RetroArch: its shared BIOS directory is
+Drag-and-drop is not the only option. `/config` is the volume every deployment
+already mounts (see [Running the container](/docs/container)), and it acts as
+the container's home directory. So anything you place on the host at the
+matching path shows up inside the container automatically, with no upload
+needed. This is especially useful for RetroArch: its shared BIOS directory is
 `RETROARCH_SYSTEM_DIR` (default `/config/.config/retroarch/system`, see
-[Configuration](/docs/configuration/emulators)), one folder every libretro
-core reads from, so seeding it on the host covers every RetroArch core at
-once. The per-emulator sections below give the equivalent path for each
-standalone emulator's BIOS, keys, or firmware (for example
-`/config/.local/share/flycast` for Flycast, `/config/.local/share/Cemu` for
-Cemu's `keys.txt`).
+[Configuration](/docs/configuration/emulators)). Every RetroArch core
+(RetroArch's term for the plug-in that emulates one specific system) reads
+from this one folder, so seeding it on the host covers every core at once.
+The per-emulator sections below give the matching path for each standalone
+emulator's BIOS, keys, or firmware, for example `/config/.local/share/flycast`
+for Flycast, or `/config/.local/share/Cemu` for Cemu's `keys.txt`.
 
 Pre-seeding a path does not skip a standalone emulator's setup wizard.
-Emulators outside RetroArch keep their own BIOS/firmware location in their own
-internal config rather than reading it from the broker, so most still need one
-visit to their setup UI to point at or select the file, even when it is
-already sitting in the expected directory. What pre-seeding removes is the
-upload step itself, not the one-time wizard visit described per emulator
-below.
+Emulators outside RetroArch each keep track of their own BIOS or firmware
+location in their own settings, rather than reading it from the broker. So
+most of them still need one visit to their setup screen to point at or select
+the file, even when that file is already sitting in the expected directory.
+Pre-seeding only saves you the upload step; it doesn't skip the one-time
+wizard visit described for each emulator below.
 
 ## Leaving desktop mode
 
-You do not have to close the emulators you opened before ending the session.
-Exiting desktop mode closes everything that was started from the desktop,
-whether or not you left its window open, so a forgotten RetroArch or PCSX2
-window is not still running (and still rendering into the next session's
-stream) afterwards.
+You don't have to close the emulators you opened before ending the session.
+Exiting desktop mode closes everything you started from the desktop, whether
+or not you left its window open. So a RetroArch or PCSX2 window you forgot
+about won't keep running in the background (and won't keep rendering into the
+next session's stream) afterwards.
 
 Each app gets `DESKTOP_STOP_WAIT` seconds (default 15, see
 [Configuration](/docs/configuration/emulators)) to shut down on its own before
-it is killed outright, which is what lets an emulator write the configuration
-you just set. Raise it if an emulator you use needs longer than that to save
-its settings on exit.
+it gets killed outright. That grace period is what lets an emulator finish
+writing the settings you just changed. Raise the value if an emulator you use
+needs more time than that to save its settings on exit.
 
 ## Controllers
 
-Controllers behave identically in the desktop view and in single game
-launching, so a controller that works in a real game on the desktop will work
+Controllers behave the same in the desktop view as they do in a single game
+launch. So if a controller works in a real game on the desktop, it will work
 the same way when RomM launches that game directly. Always test a real game
-with a real controller before calling an emulator done.
+with a real controller before you call an emulator's setup done.
 
 ## Dolphin
 
-Dolphin ships with default controller profiles and settings inside the
-container environment on first launch. The only settings you should need to
-touch are graphical preferences such as internal resolution and rendering
-options.
+Dolphin comes with default controller profiles and settings already set up
+inside the container on first launch. The only settings you should need to
+change are graphics options, such as internal resolution and rendering mode.
 
 <Callout type="info">
-Dolphin may need to be opened and closed once before its titlebar decorations
-appear, so if the window looks undecorated on first launch, close it and
-reopen it to continue configuration.
+Dolphin may need to be opened and closed once before its window gets a normal
+titlebar (the bar across the top with the close and minimize buttons). If the
+window has no titlebar on first launch, close it and reopen it to continue
+configuration.
 </Callout>
 
 ## Eden
 
-Eden needs prod keys and firmware installed before it is functional. Under
-**Tools**, select **Install decryption keys** and point it at your uploaded
-prod keys, then select **Install firmware** and point it at the folder or file
-you uploaded.
+Eden won't run games until you install prod keys and firmware. Go to
+**Tools**, select **Install decryption keys**, and point it at your uploaded
+prod keys. Then select **Install firmware** and point it at the folder or
+file you uploaded.
 
-Controller profiles are already set up for Eden on first container init. You
-may also want to adjust graphics and audio settings, then run a game to
-confirm.
+Controller profiles are already set up for Eden the first time the container
+starts. You may also want to adjust graphics and audio settings, then run a
+game to confirm.
 
 ## Xemu
 
-Xemu needs three specific files, and by default it launches directly into the
-settings menu that asks for them. Upload your files, then select the MCPX boot
-ROM, the flash ROM (BIOS), and the hard disk drive image.
+Xemu needs three specific files. By default, it launches straight into the
+settings menu that asks for them. Upload your files, then select the MCPX
+boot ROM, the flash ROM (BIOS), and the hard disk drive image.
 
-On first init the container extracts the hard disk drive to raw format and
-backs up the qcow2 image in the same folder. This is needed for save
-extraction and injection, so leave both files where they are.
+The first time the container starts, it converts the hard disk drive to raw
+format and keeps a backup of the original qcow2 image in the same folder. The
+broker needs both files to extract and restore your saves, so leave them
+where they are.
 
-Controller profiles are set up automatically on first init. Adjust graphics
-and audio to your liking and test a game.
+Controller profiles are set up automatically the first time the container
+starts. Adjust graphics and audio to your liking, then test a game.
 
 <Callout type="info">
-Xemu must be relaunched after its default files are set up before it will boot
-anything.
+You need to relaunch Xemu after its default files are set up, before it will
+boot anything.
 </Callout>
 
 ## Xenia
 
-Xenia (Xbox 360) runs through the Xenia Edge.
-Controllers work out of the box through SDL, so the desktop visit is mostly
-about the profile and graphics settings.
+Xenia (Xbox 360) runs through the Xenia Edge. Controllers work out of the box
+through SDL (the library that lets emulators read game controllers), so the
+desktop visit is mostly about the profile and graphics settings.
 
-Xenia needs a profile before it can save anything, and it asks for one the
-first time it starts with none: a **No Profiles Found** dialog offers to create
-one. Launch Xenia once from the desktop, accept that prompt (or use the profile
-menu's **Create new...**), enter a gamertag, and close Xenia. The new profile is
-signed in automatically and Xenia remembers it in its config, so every later
-launch signs into that profile silently and games see a logged-in Live profile
-to save against.
+Xenia needs a profile before it can save anything. The first time it starts
+with no profile, a **No Profiles Found** dialog offers to create one. Launch
+Xenia once from the desktop, accept that prompt (or use the profile menu's
+**Create new...**), enter a gamertag, and close Xenia. The new profile signs
+in automatically, and Xenia remembers it in its own settings. So every later
+launch signs into that profile by itself, and games see a logged-in Xbox Live
+profile to save against.
 
-Single game launches run with `--headless`, which auto-answers the guest
-dialogs (storage device select, sign-in, message boxes) that nobody in the
-stream could click through. The profile prompt is not one of those: it is
-Xenia's own window, it appears even in headless mode, and a game launched
-without a profile would sit behind it with no way to dismiss it.
+Single game launches run with `--headless`, which automatically answers the
+guest dialogs (storage device selection, sign-in, message boxes) that nobody
+watching the stream could otherwise click through. The profile prompt is
+different: it's Xenia's own window, it still appears even in headless mode,
+and a game launched without a profile would get stuck behind it with no way
+to dismiss it.
 
 Set your graphics options and test a real game from the desktop before
-launching through RomM.
+launching it through RomM.
 
 <Callout type="warn">
-Xenia must be launched once from the desktop to create a default Live profile
-for signing into games. Without it, single game launches stall on the profile
-prompt and games cannot save. Single game launches keep all Xenia data, the
-profile included, under `/config/xenia`; the profile has to be created against
-that same storage root to be the one games boot with.
+You must launch Xenia once from the desktop to create a default Xbox Live
+profile for signing into games. Without it, single game launches stall on the
+profile prompt and games cannot save. Single game launches keep all Xenia
+data, including the profile, under `/config/xenia`; the profile has to be
+created in that same folder to be the one games boot with.
 </Callout>
 
 ## DuckStation
 
-DuckStation runs a setup wizard on first launch. Upload your BIOS, select it
-for the BIOS folder, and skip the game directory step. For controller setup,
-make sure you pick the proper SDL devices: SDL 0 for player 1 and SDL 1 for
-player 2.
+DuckStation runs a setup wizard the first time you launch it. Upload your
+BIOS, select it for the BIOS folder, and skip the game directory step. For
+controller setup, make sure you pick the right SDL devices: SDL 0 for player
+1 and SDL 1 for player 2.
 
 Finish by setting the graphics options you want (renderer, internal
-resolution, enhancements) and testing a game.
+resolution, enhancements), then test a game.
 
 ## shadPS4
 
 shadPS4 needs everything below before it can launch games.
 
-Launch shadps4qt and run the **version manager** in the top right. From that
-menu select the version of shadPS4 you want to use; this same interface is how
-you pull future updates. The RomM broker always uses the latest version you
-have downloaded, preferring a pre-release if one is available. After a version
-downloads, the container automatically extracts its AppImage so it can run in
-a Docker environment.
+Launch shadps4qt and open the **version manager** in the top right. From that
+menu, pick the version of shadPS4 you want to use; you'll use this same menu
+later to pull updates. The broker always uses the latest version you've
+downloaded, preferring a pre-release if one is available. Once a version
+downloads, the container automatically extracts its AppImage (a self-contained
+app format) so it can run inside Docker.
 
 Controllers are pre-configured for shadPS4.
 
-Most games need sys_modules. Upload them and make sure they end up in
-`/config/.local/share/shadPS4/sys_modules` (the directory is created
-automatically the first time the program launches).
+Most games need sys_modules, PS4 system library files that shadPS4 doesn't
+ship with. Upload them so they end up in
+`/config/.local/share/shadPS4/sys_modules` (shadPS4 creates this folder itself
+the first time it launches).
 
-You may also want to point DLC content at your `/romm` directory in the
-container; this depends entirely on how you have that folder organized.
+You may also want to point DLC content at your `/romm` folder in the
+container. This depends entirely on how you have that folder organized.
 
-As with the others, set graphics options to taste and confirm with a real
-game.
+As with the other emulators, set graphics options to taste and confirm with a
+real game.
 
 <Callout type="info">
-shadps4qt is only the desktop manager for shadPS4's core settings. You
-configure through it, but the binaries that single game launches actually use
-are the shadPS4 cores it downloads.
+shadps4qt is only a desktop manager for shadPS4's settings. You configure
+things through it, but the actual programs single game launches use are the
+shadPS4 versions it downloads.
 </Callout>
 
 <Callout type="info">
-shadPS4 boots an `eboot.bin` out of an extracted game folder and cannot boot a
-`.pkg` directly, so a `.pkg` ROM (or a `.7z`/`.zip`/`.rar` archive holding one)
-has to be unpacked by `pkg_extractor` before it can run, and the extraction
-cache is where that unpacked copy goes. Set `SHADPS4_CACHE_ENABLED=true` to
-boot those formats: the first launch extracts the ROM and every later launch
-reuses that extraction, bounded by `SHADPS4_CACHE_MAX_GB` (default 30GB,
-oldest extraction evicted first). The cache lives at
-`/config/.local/share/shadPS4/extracted`; if you enable it, point a dedicated
-bind mount or Docker volume at that path so it doesn't compete with the rest
+shadPS4 boots an `eboot.bin` file out of an extracted game folder, and it
+can't boot a `.pkg` file directly. So a `.pkg` ROM (or a `.7z`/`.zip`/`.rar`
+archive containing one) has to be unpacked by `pkg_extractor` before it can
+run, and the extraction cache is where that unpacked copy goes. Set
+`SHADPS4_CACHE_ENABLED=true` to let shadPS4 boot those formats: the first
+launch extracts the ROM, and every later launch reuses that extraction. The
+cache size is capped by `SHADPS4_CACHE_MAX_GB` (default 30GB), and the oldest
+extraction gets evicted first once you hit that limit. The cache lives at
+`/config/.local/share/shadPS4/extracted`. If you enable it, point a dedicated
+bind mount or Docker volume at that path, so it doesn't compete with the rest
 of `/config` for space.
 
-An archive is the expensive case: its unpacked `.pkg` and `pkg_extractor`'s
-output are both on disk at the peak, so it wants roughly twice the archive's
-size free even though only about the archive's size is kept afterward. A
-launch that doesn't fit, either under `SHADPS4_CACHE_MAX_GB` or in the free
-space actually on that filesystem, is refused when it is requested rather
-than filling the disk for several minutes and failing on a write error.
+An archive is the expensive case: its unpacked `.pkg` file and
+`pkg_extractor`'s own output both sit on disk at the same time at the peak.
+So it needs roughly twice the archive's size in free space, even though only
+about the archive's size is kept afterward. If a launch won't fit, either
+under `SHADPS4_CACHE_MAX_GB` or in the actual free space on that filesystem,
+it's refused up front instead of filling the disk for several minutes and
+then failing with a write error.
 
-Leave `SHADPS4_CACHE_ENABLED` off, its default, and a `.pkg`/archive ROM is
-refused outright rather than re-extracted and thrown away on every launch, so
-only natively bootable formats (a game folder, a bare `eboot.bin`, a `.zar`)
-work. While extracting, `GET /api/session/status` reports `extraction_phase`
-as `"extracting_archive"` or `"extracting_pkg"` (see
+Leave `SHADPS4_CACHE_ENABLED` off (its default) and a `.pkg` or archive ROM is
+refused outright, rather than being extracted and thrown away on every
+launch. That means only natively bootable formats work: a game folder, a bare
+`eboot.bin`, or a `.zar` file. While extraction is running,
+`GET /api/session/status` reports `extraction_phase` as
+`"extracting_archive"` or `"extracting_pkg"` (see
 [Configuration](/docs/configuration/emulators)).
 </Callout>
 
@@ -205,74 +212,80 @@ as `"extracting_archive"` or `"extracting_pkg"` (see
 
 PCSX2 runs a setup wizard much like DuckStation's. Upload your BIOS files and
 select them, skip the game folder step, and for controller setup pick the
-proper SDL devices: SDL 0 for player 1 and SDL 1 for player 2.
+right SDL devices: SDL 0 for player 1 and SDL 1 for player 2.
 
 Set your graphics preferences and test a game before moving on.
 
 ## PPSSPP
 
-PPSSPP needs no BIOS; PSP support is fully HLE. Controllers work out of the
-box through SDL, so the desktop visit is mostly about graphics and audio.
+PPSSPP needs no BIOS: PSP support is fully HLE (high-level emulation, meaning
+it doesn't need real PSP system files to run games). Controllers work out of
+the box through SDL, so the desktop visit is mostly about graphics and audio.
 
-PPSSPP is hotkey driven like Dolphin, working in state slot 1. Save data and
+PPSSPP is hotkey-driven like Dolphin: the broker triggers save and load
+through PPSSPP's keyboard shortcuts, always using state slot 1. Save data and
 states live under `PSP/` in PPSSPP's config root, `$XDG_CONFIG_HOME/ppsspp`
 (default `/config/.config/ppsspp`).
 
-Prefer RetroArch's `ppsspp` core for PSP launches: same core, better
-controller and save-state handling (see
-[Supported emulators](/docs/emulators#ppsspp)). Set this one up anyway if you
-want the standalone available; it needs no extra files either way.
+Prefer RetroArch's `ppsspp` core for PSP launches instead: it's the same
+underlying emulator engine, just with better controller and save-state
+handling (see [Supported emulators](/docs/emulators#ppsspp)). Set up the
+standalone version anyway if you want it available too; it needs no extra
+files either way.
 
 Set your graphics options and test a real game before moving on.
 
 ## RetroArch
 
-RetroArch is pre-configured, and cores are downloaded on demand for requested
-launches. You may still want to adjust per-core or general settings from the
-RetroArch main GUI on the desktop. The same menu is reachable during a single
-game launch by pressing **F1**.
+RetroArch is pre-configured, and cores are downloaded automatically as you
+request launches. You may still want to adjust per-core or general settings
+from RetroArch's main menu on the desktop. You can reach that same menu
+during a single game launch by pressing **F1**.
 
-BIOS files and other RetroArch assets are too varied to cover in full here.
-The [RetroArch core manifest](/docs/emulators/retroarch-cores) summarizes what
-each core this repo maps a platform to actually needs; for the authoritative
-per-core detail, defer to libretro's own
+BIOS files and other RetroArch assets vary too much to cover here in full.
+The [RetroArch core manifest](/docs/emulators/retroarch-cores) lists what
+each core this project maps to a platform actually needs. For the full,
+authoritative details on a specific core, check libretro's own
 [core-specific BIOS documentation](https://docs.libretro.com/library/bios/#links-to-the-core-specific-bios-information).
 
 ## RPCS3
 
 RPCS3 needs its firmware installed from **File > Install Firmware**.
-Controllers are pre-set up.
+Controllers are already set up.
 
-Adjust graphics settings as desired and run a game to confirm.
+Adjust graphics settings to your liking and run a game to confirm.
 
-> **Special note:** Saving a state in RPCS3 always closes the game, and there
-> is no live in-game load either, so a single game launch captures a state
-> only on exit (via the same in-game save-state hotkey a player would use)
-> and resumes at the next launch by booting straight into that state rather
-> than loading it after the fact. RPCS3's IPC has no save/load-state opcode
-> at all, so it is used only to confirm a launch actually reached a running
-> game and, when a game's title id can't be read from the file path alone,
-> to look it up once the game is confirmed running.
+> **Special note:** Saving a state in RPCS3 always closes the game, and
+> there's no way to load a state while the game is running either. So a
+> single game launch captures a state only on exit (using the same in-game
+> save-state hotkey a player would use), and it resumes at the next launch by
+> booting straight into that state, rather than loading the state afterward.
+> RPCS3's IPC (its interface for outside programs to talk to it) has no
+> command for saving or loading a state at all. The broker only uses that
+> interface to confirm a launch actually reached a running game and, when a
+> game's title ID can't be read from the file path alone, to look it up once
+> the game is confirmed running.
 >
 > A ROM stored as a `.7z`, `.zip`, or `.rar` archive has to be extracted
-> before it can boot, since RPCS3 cannot boot an archive directly, so those
+> before it can boot, since RPCS3 can't boot an archive directly. So those
 > formats need the extraction cache. Set `RPCS3_CACHE_ENABLED=true` to boot
-> them: the first launch extracts the ROM and every later launch reuses that
-> extraction, bounded by `RPCS3_CACHE_MAX_GB` (default 30GB, oldest
-> extraction evicted first). The cache lives at
-> `/config/.config/rpcs3/extracted`; if you enable it, point a dedicated
-> bind mount or Docker volume at that path so it doesn't compete with the
-> rest of `/config` for space. A launch that doesn't fit, either under
-> `RPCS3_CACHE_MAX_GB` or in the free space actually on that filesystem, is
-> refused when it is requested rather than filling the disk for several
-> minutes and failing on a write error.
+> them: the first launch extracts the ROM, and every later launch reuses that
+> extraction. The cache size is capped by `RPCS3_CACHE_MAX_GB` (default
+> 30GB), and the oldest extraction gets evicted first once you hit that
+> limit. The cache lives at `/config/.config/rpcs3/extracted`. If you enable
+> it, point a dedicated bind mount or Docker volume at that path, so it
+> doesn't compete with the rest of `/config` for space. If a launch won't
+> fit, either under `RPCS3_CACHE_MAX_GB` or in the actual free space on that
+> filesystem, it's refused up front instead of filling the disk for several
+> minutes and then failing with a write error.
 >
-> Leave `RPCS3_CACHE_ENABLED` off, its default, and an archived ROM is
-> refused outright rather than re-extracted and thrown away on every launch,
-> so only natively bootable formats (`.iso`, an installed `.pkg`) work.
-> `.pkg` is unaffected either way: it always installs through its own
-> installer, never through this cache. While an archive is extracting,
-> `GET /api/session/status` reports `extraction_phase: "extracting_archive"`.
+> Leave `RPCS3_CACHE_ENABLED` off (its default) and an archived ROM is
+> refused outright, rather than being extracted and thrown away on every
+> launch. That means only natively bootable formats work: `.iso`, or an
+> installed `.pkg`. `.pkg` is unaffected either way: it always installs
+> through its own installer, never through this cache. While an archive is
+> extracting, `GET /api/session/status` reports
+> `extraction_phase: "extracting_archive"`.
 
 ## Cemu
 
@@ -282,14 +295,15 @@ decryption keys.
 1. Launch Cemu once and close it so it creates its default directories.
 2. Upload your `keys.txt` and place it in `/config/.local/share/Cemu`.
 3. Launch Cemu and open controller settings. Select **Wii U Pro Controller**
-   as the emulated controller; if that option is not available, set it up as a
-   Wii U GamePad, save, exit, and reopen the settings.
+   as the emulated controller. If that option isn't available, set it up as
+   a Wii U GamePad instead, save, exit, and reopen the settings.
 4. Click the add button for the controller, select **SDL** as the driver type,
    and pick the first pad in the list of four. Confirm the controller works by
    moving the analog sticks and watching the live input display.
 5. Under **General settings > Audio**, make sure TV is set to
-   **Default Device**. You may need to close and re-enter this menu before the
-   option appears, which lets Cemu detect the PulseAudio backend.
+   **Default Device**. You may need to close and reopen this menu before the
+   option appears; that gives Cemu time to detect the PulseAudio backend
+   (the container's audio system).
 
 Finish with your preferred graphics settings and test a game.
 
@@ -304,67 +318,69 @@ into the dropdowns, and navigate them with the keyboard to get them to behave.
 Controllers are pre-configured for Azahar. Open it from the desktop, set
 graphics and audio to your liking, and test a game to confirm.
 
-Azahar stops rendering when the display resizes underneath it in fullscreen,
-and the display resizes every time you resize your browser window. Single game
-launches therefore start it windowed, which is not affected. Keep that in mind
-on the desktop as well: if you put Azahar into fullscreen yourself and then
-resize the browser, the picture freezes and you have to leave fullscreen to get
-it back.
+Azahar stops rendering if the display resizes while it's in fullscreen, and
+the display resizes every time you resize your browser window. That's why
+single game launches start Azahar windowed instead, since a windowed game
+isn't affected. Keep this in mind on the desktop too: if you put Azahar into
+fullscreen yourself and then resize the browser, the picture freezes, and you
+have to leave fullscreen to get it back.
 
 <Callout type="info">
-For 3DS, the RetroArch core is the better option and is what a `3ds` launch
-uses by default. Azahar exposes no way for the broker to reach it from outside
-the process, so a standalone session has no save states and shuts down with a
-kill rather than a clean exit, meaning only what the game already wrote to its
-own save survives. The RetroArch core supports both save states and a proper
-exit. Use standalone Azahar when you want its own interface, and pick
-`retroarch` otherwise.
+For 3DS, the RetroArch core is the better choice, and it's what a `3ds`
+launch uses by default. Azahar gives the broker no way to reach it from
+outside its own process. So a standalone session has no save states, and it
+shuts down with a hard kill rather than a clean exit, meaning only what the
+game already wrote to its own save survives. The RetroArch core supports both
+save states and a proper exit. Use standalone Azahar when you want its own
+interface, and pick `retroarch` otherwise.
 </Callout>
 
 ## Flycast
 
-Flycast needs the Dreamcast BIOS pair, `dc_boot.bin` and `dc_flash.bin`.
+Flycast needs the Dreamcast BIOS pair: `dc_boot.bin` and `dc_flash.bin`.
 Upload them and place them in `/config/.local/share/flycast`, the same flat
-directory VMU saves and save states live in.
+directory that VMU (Dreamcast memory card) saves and save states live in.
 
 Controllers are pre-configured. Set your graphics and audio preferences from
 the desktop and test a game.
 
 <Callout type="info">
-A RetroArch core also covers Dreamcast (`dc` defaults to it), for anyone who
-prefers RetroArch's shared save-state UI and hotkeys. Standalone Flycast has
-neither a control socket nor a SIGTERM handler, so the only way the broker
-asks it to shut down cleanly is an Alt+F4 keypress into its window, which is
-also the only moment it will write a save state. That means, like DuckStation,
-there is no mid-session save/load: a launch resumes from whatever state was
-written on the previous clean exit, and the current session's state is
-written once, on exit. Use standalone Flycast for its own interface and
-settings, and pick `retroarch` if you'd rather manage Dreamcast alongside your
-other RetroArch cores.
+A RetroArch core also covers Dreamcast (`dc` defaults to it) for anyone who
+prefers RetroArch's shared save-state menu and hotkeys. Standalone Flycast
+has no control socket (a direct channel for the broker to send it commands)
+and no SIGTERM handler (the standard shutdown signal), so the only way the
+broker can ask it to shut down cleanly is by sending an Alt+F4 keypress into
+its window. That's also the only moment it writes a save state. That means,
+like DuckStation, there's no mid-session save or load: a launch resumes from
+whatever state was written on the previous clean exit, and the current
+session's state gets written once, on exit. Use standalone Flycast for its
+own interface and settings, and pick `retroarch` if you'd rather manage
+Dreamcast alongside your other RetroArch cores.
 </Callout>
 
 ## ScummVM
 
-Nothing to install: ScummVM ships its own engines and needs no BIOS, firmware
-or keys. The games are the setup. A ScummVM game is a *folder* of data files
-rather than a single image, so the entries in your RomM library for this
-platform have to be directories, one per game, and the platform's `fs_path`
-has to resolve to the same files inside the container.
+Nothing to install here: ScummVM ships its own engines and needs no BIOS,
+firmware, or keys. The games themselves are the setup. A ScummVM game is a
+*folder* of data files rather than a single image, so the entries in your
+RomM library for this platform have to be folders, one per game, and the
+platform's `fs_path` has to resolve to the same files inside the container.
 
-There is no controller step either. These are mouse-and-keyboard games, and the
-stream's own pointer and keyboard are what play them.
+There's no controller step either. These are mouse-and-keyboard games, played
+with the stream's own pointer and keyboard.
 
-Worth doing once from the desktop: open ScummVM, set the GUI language you want
-and play a game to confirm the pointer tracks. The broker follows that language
-when it drives the save menu, and it pins the renderer and windowing settings
-the stream needs on every launch, so a game that behaves in a desktop session
-behaves in a streamed one.
+It's worth doing once from the desktop: open ScummVM, set the menu language
+you want, and play a game to confirm the pointer tracks. The broker follows
+that same language when it drives the save menu, and it pins the renderer and
+window settings the stream needs on every launch, so a game that behaves in a
+desktop session behaves the same way in a streamed one.
 
 <Callout type="info">
-Not every engine can save mid-game. The broker's save and load drive ScummVM's
-Global Main Menu, and an engine that does not implement runtime saving declines
-it: Gobliiins is the canonical case, since its gob engine has no save handler
-at all and passwords are the game's own progression system. Save state then
-reports a failure rather than pretending, while the game's own saves still
-travel in the archive and a boot-time resume still works.
+Not every engine can save mid-game. The broker's save and load actions drive
+ScummVM's Global Main Menu, and an engine that doesn't support saving while
+running declines the request: Gobliiins is the clearest example, since its
+gob engine has no save handler at all and passwords are the game's own
+progression system. Save state then reports a failure rather than pretending,
+while the game's own saves still travel in the archive and a boot-time resume
+still works.
 </Callout>

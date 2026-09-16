@@ -63,7 +63,7 @@ the full path through to it.
 ## Where things live in room.js
 
 - **Bootstrap** (`DOMContentLoaded`): fetches `GET api/session/context`,
-  which returns `COLLAB_DATA` (role, permission, token, roster, game name).
+  which returns `COLLAB_DATA` (role, permission, token, game name).
   Everything else in the file reads off that object and the websocket
   messages that update it.
 - **Media capture and playback**: the top of the file is WebCodecs plumbing,
