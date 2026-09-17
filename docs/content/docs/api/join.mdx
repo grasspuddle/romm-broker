@@ -22,7 +22,7 @@ the same user (by id, else username) replaces their old token.
 Every user gets a personal token. The broker pushes the full token map,
 `{token: {role, slot, mk_control}}`, to selkies, which enforces input routing
 per streaming connection: a participant can be handed a gamepad slot or the
-mouse and keyboard from the room UI by dragging the icons onto them, a
+mouse and keyboard from the room UI by dragging the icons onto them; a
 spectator never gets input. Removing a user from the room revokes the token and
 selkies drops that connection live.
 

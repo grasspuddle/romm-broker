@@ -32,7 +32,7 @@ emulators](/docs/emulators) save your progress through the game's own save
 data instead.) A `409` response means there is no active session, or the
 emulator has already stopped running. You can check which case applies ahead
 of time by looking at `supports_states` in the status response, so you don't
-need to keep your own list of which emulator supports save states.
+need to keep your own list of which emulators support save states.
 
 A `"failed"` status is a normal answer, not an error. For PCSX2, it means
 PINE (the socket the broker uses to send PCSX2 remote commands) never
