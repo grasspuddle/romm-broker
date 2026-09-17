@@ -1636,8 +1636,9 @@ document.addEventListener('DOMContentLoaded', async () => {
         } else if (type === 'video') {
             if (localStream && localStream.getVideoTracks().length > 0) {
                 isWebcamOn = !isWebcamOn;
+                // Turning the camera off leaves the tile up: it holds the only
+                // camera toggle, and a disabled track already blanks the preview.
                 localStream.getVideoTracks().forEach(t => t.enabled = isWebcamOn);
-                localContainer.style.display = isWebcamOn ? 'flex' : 'none';
                 sendControlMessage('video_state', isWebcamOn);
             } else {
                 isWebcamOn = false;
@@ -3065,7 +3066,6 @@ document.addEventListener('DOMContentLoaded', async () => {
             isWebcamOn = true;
             if (localStream && localStream.getVideoTracks().length > 0) {
                 localStream.getVideoTracks().forEach(t => t.enabled = true);
-                localContainer.style.display = 'flex';
                 sendControlMessage('video_state', true);
             }
             updateMediaButtonUI();
@@ -3143,6 +3143,8 @@ document.addEventListener('DOMContentLoaded', async () => {
 
         toggleVideoBtn.classList.toggle('inactive', !isWebcamOn);
         toggleVideoBtn.querySelector('i').className = isWebcamOn ? 'fas fa-video' : 'fas fa-video-slash';
+
+        localContainer.classList.toggle('media-live', isMicOn || isWebcamOn);
     };
 
     const playNotificationSound = () => {
