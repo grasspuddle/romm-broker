@@ -1749,6 +1749,14 @@ document.addEventListener('DOMContentLoaded', async () => {
                 }
                 
                 if (chunk.byteLength === 0) return;
+                // A keyframe still in the encoder when the camera went off would land
+                // after video_state false and read to viewers as the camera coming
+                // back, repainting the blanked tile. Anything dropped breaks the delta
+                // chain, so the next frame encoded is a keyframe.
+                if (!isWebcamOn) {
+                    frameCounter = 0;
+                    return;
+                }
 
                 const isKeyFrame = chunk.type === 'key';
                 const chunkData = new Uint8Array(8 + chunk.byteLength + 2);
@@ -1789,6 +1797,10 @@ document.addEventListener('DOMContentLoaded', async () => {
                     videoEncoder.encode(upright, { keyFrame: needsKeyFrame });
                     if (upright !== frame) upright.close();
                     frameCounter++;
+                } else {
+                    // The first frame back is a keyframe, so anyone who joined while
+                    // the camera was off sees it at once instead of seconds later.
+                    frameCounter = 0;
                 }
 
                 frame.close();
@@ -1949,6 +1961,9 @@ document.addEventListener('DOMContentLoaded', async () => {
 
                     const frameType = new Uint8Array(data, 1, 1)[0];
                     const isKeyFrame = frameType === 0x01;
+                    // Nothing is sent while a camera is off, so a keyframe means it is
+                    // back even when its video_state true was lost across a reconnect.
+                    if (isKeyFrame) stream.cameraOff = false;
 
                     if (!stream.hasReceivedKeyFrame) {
                         if (isKeyFrame) {
@@ -2118,7 +2133,9 @@ document.addEventListener('DOMContentLoaded', async () => {
 
         const videoDecoder = new VideoDecoder({
             output: (frame) => {
-                if (remoteStreams[publicId] !== stream) {
+                // Checked at output, not on receipt: a frame that arrived just before
+                // video_state false can still finish decoding after the tile was blanked.
+                if (remoteStreams[publicId] !== stream || stream.cameraOff) {
                     frame.close();
                     return;
                 }
@@ -2695,7 +2712,15 @@ document.addEventListener('DOMContentLoaded', async () => {
         if (!stream) return;
 
         if (action === 'video_state') {
-            stream.container.style.display = state ? 'flex' : 'none';
+            // The tile stays up with the camera off: it carries this member's
+            // mute buttons, host controls and drag target. The sender stops
+            // encoding, so the last frame has to be blanked or it sits frozen.
+            stream.cameraOff = !state;
+            if (!state) {
+                hideRemoteSink(stream);
+                stream.ctx.fillStyle = '#222';
+                stream.ctx.fillRect(0, 0, stream.canvas.width, stream.canvas.height);
+            }
         }
     };
  
