@@ -269,7 +269,7 @@ streaming:
 `SUBFOLDER`, and that is an absolute path, so it replaces whatever path `host`
 was carrying. A container mounted at `/streaming-2` while declaring
 `subfolder: /streaming` hands the player a URL the proxy routes to the
-container at `/streaming` instead, mid session, with nothing written to
+container at `/streaming` instead, mid-session, with nothing written to
 either log.
 
 RomM refuses such an entry rather than resolve it. It still appears in the fleet
@@ -316,5 +316,5 @@ path under RomM's origin, that cookie is sent to the container on every
 request for `/streaming/*` too. The container has no use for it and does not
 read it, but it does cross the boundary. On a LAN deployment where the
 container is already trusted enough to be handed the ROM library, this is not
-a meaningful change. It is worth knowing before pointing this at anything you
-do not control.
+a meaningful change. Don't point this setup at a container or network you
+don't control.

@@ -53,11 +53,12 @@ dc, saturn, psp, nds, 3ds, arcade and genesis). The
 [RetroArch core manifest](/docs/emulators/retroarch-cores) lists the full
 platform-to-core mapping and what BIOS, firmware, or key file each one needs
 before it'll boot. If a core is missing, the broker downloads it from the
-libretro buildbot into your own
-`libretro_directory`. That's also where RetroArch keeps the matching `.info`
-file for each core, so a core placed anywhere else has no matching info file,
-and checking its status (`GET_STATUS`) then crashes RetroArch mid-session (a
-segfault). The broker never edits your RetroArch config directly; it only
+libretro buildbot (libretro's server that hosts precompiled cores) into your
+own `libretro_directory`. That's also where RetroArch keeps the matching
+`.info` file for each core, so a core placed anywhere else has no matching
+info file, and checking its status (`GET_STATUS`) then crashes RetroArch
+mid-session (a segfault, a crash from the program touching memory it isn't
+allowed to). The broker never edits your RetroArch config directly; it only
 layers extra settings on top with `--appendconfig`.
 
 Save states work, but RetroArch has no direct "save to slot number n"
@@ -289,9 +290,10 @@ container.
 extracted dump (a folder containing `default.xex`), or an XBLA / Games on
 Demand title folder. For that last case, the broker walks the same folder
 layout the console itself uses (`[Content/<XUID>/]<TITLE_ID>/000D0000` or
-`00007000/<package>`) and boots whichever file there is a genuine game
-package in Xbox 360's own STFS format, confirmed by checking the start of
-the file rather than its name. That way DLC, title updates, and the extra
+`00007000/<package>`) and boots whichever file is a genuine game
+package in Xbox 360's own STFS format (Microsoft's package format for Xbox
+Live content), confirmed by checking the start of the file rather than its
+name. That way DLC, title updates, and the extra
 `.data` file that sits beside a Games on Demand package are correctly
 skipped.
 
@@ -310,8 +312,9 @@ it exited cleanly, and the current session's state is written exactly once,
 on exit.
 
 The save state is always a single, predictably-named file, `<rom>.state`,
-sitting directly in `$XDG_DATA_HOME/flycast` (no subfolders). VMU saves live
-loose in that same folder and travel with it as one save subtree, since
+sitting directly in `$XDG_DATA_HOME/flycast` (no subfolders). VMU (Dreamcast
+memory card) saves live loose in that same folder and travel with it as one
+save subtree, since
 nothing separates them from the save state, or from a leftover first-run
 setup file. A RetroArch core also covers the Dreamcast (`dc` uses it by
 default), for anyone who'd rather use RetroArch's shared save-state menu and
@@ -366,8 +369,9 @@ numbered slot in a grid. Second, `keymap_global_MENU` is bound to
 [`SCUMMVM_MENU_KEY`](/docs/configuration/emulators#scummvm) (default `F11`).
 ScummVM's own default menu shortcut is
 `C+F5`, but a Ctrl modifier doesn't survive being simulated inside the
-container's Xwayland display server, so the key press arrives without its
-Ctrl and the menu never opens. The plain, unmodified `F5` that does work is
+container's Xwayland (the compatibility layer that lets this X11-based
+software run under Wayland) display server, so the key press arrives
+without its Ctrl and the menu never opens. The plain, unmodified `F5` that does work is
 normally reserved for each game engine's own shortcuts, and some engines
 grab it for themselves (the gob engine, used by the Gobliiins games, opens
 its own panel on `F5` instead, which has no Save option). Third, the Save
@@ -442,8 +446,7 @@ the broker's simulated key presses have an Xwayland window to talk to.
 None of the above fixes one deeper pointer problem that isn't something this
 launcher alone can solve. While a game is running, it holds what's called a
 pointer lock: ScummVM hides the normal mouse cursor and moves (warps) it
-itself. Xwayland, the compatibility layer that lets this X11-based software
-run under Wayland, emulates that lock, but the desktop's window manager,
+itself. Xwayland emulates that lock, but the desktop's window manager,
 labwc, drops the *absolute* mouse-position updates the browser sends while a
 lock is active. It still forwards relative movement, though, so the result
 is an in-game cursor that freezes in place while clicks still land where you

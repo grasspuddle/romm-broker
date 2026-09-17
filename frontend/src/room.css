@@ -1703,3 +1703,10 @@ body.solo-mode #chat-peek,
 body.solo-mode #video-toggle-handle {
   display: none;
 }
+
+/* Everyone else leaving does not stop a mic or camera already on, and the
+   self tile holds the only switches for them, so it stays in the corner
+   until both are off. */
+body.solo-mode #local-user-container.media-live {
+  display: flex;
+}

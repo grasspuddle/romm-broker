@@ -14,7 +14,7 @@ container somewhere other than `/streaming/`.
 | `BROKER_SECRET` | unset | A shared password for the session lifecycle endpoints (the URLs RomM uses to run a session, start to finish), sent as the `X-Broker-Secret` header. Leave it unset outside dev mode and the broker refuses to start; leave it unset in dev mode and it starts anyway with those endpoints unauthenticated, so dev mode should never be exposed beyond local development. |
 | `BROKER_HOST` | `127.0.0.1` | The network interface uvicorn (the server process that runs the broker) listens on. Only nginx is meant to talk to it directly. |
 | `BROKER_PORT` | `8000` | The port uvicorn listens on. The image's nginx setup already expects 8000. |
-| `ROM_ROOT` | `/romm` | The folder your ROMs live in. Activate refuses any ROM path outside this folder. |
+| `ROM_ROOT` | `/romm` | The folder your ROMs live in. Activate (the call that launches a game) refuses any ROM path outside this folder. |
 | `BROKER_EXPORT_DIR` | `/config/broker-exports` | Where exit writes save archives to disk. In dev mode it always writes here; otherwise only if uploading the save fails. |
 | `BROKER_IMPORT_DIR` | `/config/broker-imports` | Where uploaded save archives land, ready for activate to load them via `save.archive`. |
 | `BROKER_FRONTEND_DIST` | `/usr/share/webstation-broker/www` | Where the built room UI is served from outside dev mode. |
@@ -24,7 +24,7 @@ container somewhere other than `/streaming/`.
 | `BROKER_STATE_FILE_MAX_BYTES` | `268435456` | The largest a single state file (a save-state snapshot) is allowed to be on the state-file routes, 256 MiB. RomM enforces the same limit on its side, so raising just this one only shifts which side rejects the file first. |
 | `BROKER_STATE_SCREENSHOT_SIZE` | `640` | The longest side, in pixels, of the thumbnail saved with a state. The broker captures the whole streamed desktop, then shrinks it to this size before saving it as the thumbnail. |
 | `SAVE_FILE_MAX_BYTES` | `268435456` | The largest a save or memory-card archive is allowed to be, 256 MiB, checked on import, on exit, and on the memory-card routes. Unlike the other settings on this page, this one has no `BROKER_` prefix. |
-| `BROKER_SAVE_FILE_MAX_ENTRIES` | `10000` | The most files a save or memory-card archive may contain. This is separate from `SAVE_FILE_MAX_BYTES`: a size limit alone wouldn't stop an archive packed with huge numbers of tiny, deeply nested files from using up disk inodes or stalling the restore. |
+| `BROKER_SAVE_FILE_MAX_ENTRIES` | `10000` | The most files a save or memory-card archive may contain. This is separate from `SAVE_FILE_MAX_BYTES`: a size limit alone wouldn't stop an archive packed with huge numbers of tiny, deeply nested files from using up disk inodes (the fixed number of file-record slots a filesystem has, separate from its storage space) or stalling the restore. |
 | `BROKER_GAMEPAD_SLOTS` | `4` | How many virtual gamepad slots the room can hand out. |
 | `BROKER_MAX_ROOM_VIEWERS` | `32` | The most viewers who can be in the room at once. Once that limit is hit, a disconnected anonymous viewer's seat can be given to a new arrival; a signed-in user's seat never gets reassigned this way. |
 | `BROKER_DEV_MODE` | unset | Set to `true` to run from your mounted source code, with uvicorn and vite hot reload (changes show up without a rebuild), and to skip the exit save upload (it just reports what it would have done instead). See [Dev mode](/docs/container/dev-mode). |
