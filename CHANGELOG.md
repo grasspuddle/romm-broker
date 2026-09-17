@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.8.5](https://github.com/romm-streaming/romm-broker/compare/v0.8.4...v0.8.5) (2026-09-17)
+
+
+### Bug Fixes
+
+* **room:** keep a member's tile up when their camera turns off ([0071584](https://github.com/romm-streaming/romm-broker/commit/0071584c0bdf1d177b3b40af52736399f9c4fd59))
+* **room:** keep the self tile up when the camera turns off ([ba73064](https://github.com/romm-streaming/romm-broker/commit/ba73064f1093f25a97c32b452cc2174e775e8e90))
+
+
+### Documentation
+
+* clarify Activate on the broker settings page ([b811e3a](https://github.com/romm-streaming/romm-broker/commit/b811e3a3bf82f7e737169db519c6e8716398a57f))
+* cut implementation-defense noise from the emulator settings page ([e837edc](https://github.com/romm-streaming/romm-broker/commit/e837edca77b3d8021faa6f3100cf9b02d67646b7))
+* cut remaining tone issues from the docs site ([88d598d](https://github.com/romm-streaming/romm-broker/commit/88d598dce215ffd7d6c00b5e19a684d9c2a45674))
+* fix typos across the docs site ([cd0b67f](https://github.com/romm-streaming/romm-broker/commit/cd0b67f7be3692c01ee51bc5a5ec4ce890bbcb55))
+
 ## [0.8.4](https://github.com/romm-streaming/romm-broker/compare/v0.8.3...v0.8.4) (2026-09-16)
 
 
