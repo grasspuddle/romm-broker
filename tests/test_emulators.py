@@ -5,6 +5,7 @@ record.
 """
 
 import inspect
+import io
 import json
 import os
 import signal
@@ -12,13 +13,14 @@ import subprocess
 import sys
 import time
 import uuid
+import zipfile
 from collections.abc import Callable
 from pathlib import Path
 from typing import Optional
 
 import pytest
 
-from webstation_broker import emulators
+from webstation_broker import emulators, imports, saves
 from webstation_broker.emulators import base
 
 from .conftest import DETACHED_CMD, SLEEPER_CMD, await_cmdline, await_gone
@@ -601,3 +603,67 @@ def test_the_launch_env_points_at_the_labwc_session(monkeypatch: pytest.MonkeyPa
 
     assert env["WAYLAND_DISPLAY"] == "wayland-0"
     assert env["DISPLAY"] == ":0"
+
+
+@pytest.mark.parametrize("name", sorted(emulators.REGISTRY))
+def test_no_emulator_accepts_imports_yet(name: str) -> None:
+    """Wave 1 ships the framework with every emulator's spec empty.
+
+    Args:
+        name: The registry name.
+    """
+    emu = emulators.get_emulator(name)
+    assert emu is not None
+
+    assert emu.import_spec().kinds == ()
+
+
+@pytest.mark.parametrize("name", sorted(emulators.REGISTRY))
+def test_every_emulator_refuses_a_declared_import(name: str, tmp_path: Path) -> None:
+    """Preflight refuses each member with `kind_not_accepted` on every emulator.
+
+    Args:
+        name: The registry name.
+        tmp_path: The per-test temporary directory.
+    """
+    emu = emulators.get_emulator(name)
+    assert emu is not None
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr(".import/save/a.sav", b"x")
+        zf.writestr(
+            saves.MANIFEST_NAME,
+            json.dumps(
+                {"version": 2, "created_at": 0, "files": [{"path": ".import/save/a.sav", "kind": "save"}]}
+            ),
+        )
+    body = buf.getvalue()
+
+    result = imports.preflight(
+        emu,
+        saves.read_archive(body),
+        body,
+        rom_file=None,
+        rom=None,
+        memory_card_synced=False,
+        excluded=(),
+        resume_slot=None,
+    )
+
+    assert [(r.reason, r.member) for r in result.refusals] == [("kind_not_accepted", ".import/save/a.sav")]
+    assert result.placements == ()
+
+
+@pytest.mark.parametrize("name", sorted(emulators.REGISTRY))
+def test_restore_subtrees_covers_every_save_subtree(name: str) -> None:
+    """Whatever a restore may write into includes every subtree a dump ships.
+
+    Args:
+        name: The registry name.
+    """
+    emu = emulators.get_emulator(name)
+    assert emu is not None
+
+    assert set(emu.save_subtrees) <= set(emu.restore_subtrees) | {
+        s for s in emu.save_subtrees if any(s.startswith(r + "/") for r in emu.restore_subtrees)
+    }
