@@ -15,7 +15,7 @@ and `identity_source`); this module holds the shared machinery they lean on.
 
 import logging
 import zipfile
-from collections.abc import Hashable, Iterable
+from collections.abc import Hashable, Iterable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any, Literal, Optional
@@ -389,3 +389,118 @@ def fold_v1_problems(
     for name, message, kind in v1_plan.problems if v1_plan else ():
         out.append(ImportRefusal(_V1_REASONS[kind], name, None, detail=message))
     return out
+
+
+_KINDS: tuple[str, ...] = ("save", "state", "memcard")
+"""The kinds a manifest may declare."""
+_ORIGINS: frozenset[str] = frozenset({"emulatorjs", "standalone", "hardware", "unknown"})
+"""The origins a manifest may declare; anything else is read as `unknown`."""
+_MANIFEST_EXPECTED = "a version 2 manifest declaring every .import/ member once, by its kind"
+"""The `expected` text on every `manifest_invalid`."""
+
+
+@dataclass(frozen=True)
+class ManifestEntry:
+    """One `.import/` member's declaration.
+
+    Attributes:
+        path: The member's zip name.
+        kind: The declared kind, which matches the path's kind segment.
+        origin: The declared origin.
+    """
+
+    path: str
+    kind: ImportKind
+    origin: Origin
+
+
+def _manifest_invalid(member: Optional[str], detail: str) -> ImportRefusal:
+    """Build a `manifest_invalid` refusal.
+
+    Args:
+        member: The member, or None for the whole manifest.
+        detail: What is wrong.
+
+    Returns:
+        The refusal.
+    """
+    return ImportRefusal("manifest_invalid", member, _MANIFEST_EXPECTED, detail=detail)
+
+
+def parse_manifest_v2(
+    manifest: Any, import_names: Sequence[str], manifest_error: Optional[str] = None
+) -> tuple[dict[str, ManifestEntry], list[ImportRefusal]]:
+    """Match an archive's `.import/` members to their declarations.
+
+    Entries whose path is not under `.import/` are the v1 entries RomM
+    carried over and are ignored. Every import member needs exactly one
+    entry whose kind matches its path segment.
+
+    Args:
+        manifest: The parsed manifest, or None.
+        import_names: The archive's `.import/` member names.
+        manifest_error: Why the manifest could not be read, if it could not.
+
+    Returns:
+        The valid declarations keyed by member name, and every refusal.
+        Without imports, both are empty and the manifest is not checked.
+    """
+    if not import_names:
+        return {}, []
+    if manifest_error:
+        return {}, [_manifest_invalid(None, manifest_error)]
+    if not isinstance(manifest, dict):
+        return {}, [_manifest_invalid(None, "manifest is not a JSON object")]
+    if manifest.get("version") != 2:
+        return {}, [_manifest_invalid(None, f"manifest version is {manifest.get('version')!r}, not 2")]
+    files = manifest.get("files")
+    if not isinstance(files, list):
+        return {}, [_manifest_invalid(None, "manifest files is not a list")]
+    if "import" in manifest:
+        log.info("imports: manifest import block: %r", manifest["import"])
+
+    present = set(import_names)
+    entries: dict[str, ManifestEntry] = {}
+    refusals: list[ImportRefusal] = []
+    seen: set[str] = set()
+    refused: set[str] = set()
+    for index, entry in enumerate(files):
+        if not isinstance(entry, dict):
+            refusals.append(_manifest_invalid(None, f"files[{index}] is not an object"))
+            continue
+        path = entry.get("path")
+        if not isinstance(path, str) or not path.startswith(saves.IMPORT_PREFIX):
+            continue
+        if path in seen:
+            entries.pop(path, None)
+            if path not in refused:
+                refused.add(path)
+                refusals.append(_manifest_invalid(path, "declared more than once"))
+            continue
+        seen.add(path)
+        kind = entry.get("kind")
+        if kind not in _KINDS:
+            refused.add(path)
+            refusals.append(_manifest_invalid(path, f"kind {kind!r} is not save, state or memcard"))
+            continue
+        parts = path.split("/")
+        if len(parts) < 3 or parts[1] != kind:
+            refused.add(path)
+            refusals.append(
+                _manifest_invalid(path, f"declared {kind} but the path is not under .import/{kind}/")
+            )
+            continue
+        if path not in present:
+            refused.add(path)
+            refusals.append(_manifest_invalid(path, "declared but not in the archive"))
+            continue
+        origin = entry.get("origin", "unknown")
+        if origin not in _ORIGINS:
+            log.info("imports: %s declares unknown origin %r, reading it as unknown", path, origin)
+            origin = "unknown"
+        entries[path] = ManifestEntry(path, kind, origin)
+    for name in import_names:
+        if name not in seen:
+            seen.add(name)
+            refusals.append(_manifest_invalid(name, "not declared in the manifest"))
+    return entries, refusals

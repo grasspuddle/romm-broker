@@ -140,3 +140,103 @@ def test_rom_ref_copies_the_body_fields() -> None:
     )
 
     assert ref == imports.RomRef(4, "G", "ps2", "SLUS-20001", None, None)
+
+
+# ── manifest v2 ────────────────────────────────────────────────────────
+
+
+def _v2(*files: dict[str, Any]) -> dict[str, Any]:
+    """Build a version 2 manifest.
+
+    Args:
+        *files: The `files` entries.
+
+    Returns:
+        The manifest.
+    """
+    return {"version": 2, "created_at": 0, "files": list(files)}
+
+
+def test_manifest_v2_declares_each_member() -> None:
+    """Each `.import/` entry maps its member to a kind and origin; v1 entries are ignored."""
+    entries, refusals = imports.parse_manifest_v2(
+        _v2(
+            {"path": "saves/a.srm", "kind": "save"},
+            {"path": ".import/save/a.srm", "kind": "save", "origin": "standalone"},
+            {"path": ".import/state/b.p2s", "kind": "state", "origin": "martian"},
+        ),
+        [".import/save/a.srm", ".import/state/b.p2s"],
+    )
+
+    assert refusals == []
+    assert entries[".import/save/a.srm"] == imports.ManifestEntry(".import/save/a.srm", "save", "standalone")
+    assert entries[".import/state/b.p2s"].origin == "unknown"
+
+
+def test_manifest_v2_is_skipped_without_imports() -> None:
+    """An archive without imports is never checked against v2 rules."""
+    assert imports.parse_manifest_v2({"version": 1}, []) == ({}, [])
+
+
+@pytest.mark.parametrize(
+    ("manifest", "error"),
+    [
+        (None, "archive has no manifest"),
+        ([1, 2], None),
+        ({"version": 1, "files": []}, None),
+        ({"version": 2, "files": "nope"}, None),
+    ],
+)
+def test_an_unusable_manifest_refuses_the_whole_import(manifest: Any, error: Optional[str]) -> None:
+    """No usable v2 manifest gives one archive-level `manifest_invalid`.
+
+    Args:
+        manifest: The parsed manifest.
+        error: The manifest error `read_archive` recorded, if any.
+    """
+    entries, refusals = imports.parse_manifest_v2(manifest, [".import/save/a"], error)
+
+    assert entries == {}
+    assert [(r.reason, r.member) for r in refusals] == [("manifest_invalid", None)]
+
+
+@pytest.mark.parametrize(
+    ("files", "names", "member"),
+    [
+        ([], [".import/save/a"], ".import/save/a"),
+        ([{"path": ".import/save/a", "kind": "state"}], [".import/save/a"], ".import/save/a"),
+        ([{"path": ".import/save/a", "kind": "bios"}], [".import/save/a"], ".import/save/a"),
+        ([{"path": ".import/save/gone", "kind": "save"}], [], ".import/save/gone"),
+        (
+            [{"path": ".import/save/a", "kind": "save"}, {"path": ".import/save/a", "kind": "save"}],
+            [".import/save/a"],
+            ".import/save/a",
+        ),
+    ],
+    ids=["undeclared", "segment-mismatch", "unknown-kind", "missing-member", "duplicate"],
+)
+def test_manifest_v2_refuses_a_bad_declaration_once(
+    files: list[dict[str, Any]], names: list[str], member: str
+) -> None:
+    """Each bad declaration is one `manifest_invalid` for its member, never two.
+
+    Args:
+        files: The manifest's `files` entries.
+        names: The archive's `.import/` member names.
+        member: The member the refusal must name.
+    """
+    entries, refusals = imports.parse_manifest_v2(_v2(*files), names or [".import/save/other"])
+
+    assert [(r.reason, r.member) for r in refusals if r.member == member] == [
+        ("manifest_invalid", member)
+    ]
+    assert member not in entries
+
+
+def test_a_non_object_entry_is_refused_at_archive_level() -> None:
+    """A `files` entry that is not an object cannot name a member."""
+    _, refusals = imports.parse_manifest_v2(
+        _v2("x", {"path": ".import/save/a", "kind": "save"}), [".import/save/a"]
+    )
+
+    assert [(r.reason, r.member) for r in refusals] == [("manifest_invalid", None)]
