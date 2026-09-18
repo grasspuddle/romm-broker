@@ -611,6 +611,8 @@ def normalise_member(
         info=info,
         _zf=zf,
     )
+
+
 def _accepted_kinds(spec: ImportSpec) -> str:
     """Name the kinds an emulator takes, for `expected`.
 
@@ -655,7 +657,10 @@ def gate_kind(member: ImportMember, spec: ImportSpec, ctx: ImportCtx) -> Optiona
 
 
 LIBRETRO_STATE_RE = re.compile(r"^.+\.state(\d+|\.auto)$", re.I)
-"""A RetroArch state name (`.state`, `.state3`, `.state.auto`), which no standalone loads."""
+"""A RetroArch numbered or auto state name (`.state3`, `.state.auto`), which no standalone loads.
+
+A bare `.state` is not matched: flycast takes that name as its own.
+"""
 
 
 def place_single_file(
@@ -663,7 +668,7 @@ def place_single_file(
     *,
     subtree: str,
     pattern: re.Pattern[str],
-    rename: Callable[[str], str],
+    rename: Callable[[str], Optional[str]],
     expected: str,
     allow_wrappers: tuple[str, ...] = (),
     nonempty: bool = False,
@@ -677,6 +682,7 @@ def place_single_file(
         subtree: The directory it lands in, relative to `save_root`.
         pattern: What the file's name must `fullmatch`.
         rename: The emulator's own pure renamer, called with pre-launch inputs only.
+            It returns None for a name it does not recognise.
         expected: The accepted shape, in words.
         allow_wrappers: Leading folders (slash-joined) to strip, at most one.
         nonempty: Whether an empty file is an `incomplete_unit`.
@@ -704,6 +710,10 @@ def place_single_file(
     if nonempty and member.size == 0:
         return ImportRefusal("incomplete_unit", member.name, expected, detail="the file is empty")
     new = rename(leaf)
+    if new is None:
+        return ImportRefusal(
+            "unrecognised_layout", member.name, expected, detail="name not recognised by the emulator"
+        )
     problem = _name_problem(new) or _component_problem(new, max_component_bytes)
     if problem:
         return ImportRefusal("unsafe_path", member.name, expected, detail=f"renamed to {new!r}: {problem}")

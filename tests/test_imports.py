@@ -4,6 +4,7 @@ Each test drives one helper directly. The activate wiring is covered in
 test_api.py, and the per-emulator hooks in test_emulators.py.
 """
 
+import dataclasses
 import io
 import json
 import re
@@ -526,4 +527,69 @@ def test_build_dest_joins_or_refuses() -> None:
         "SAVEDATA", ("ULUS10064",), ("DATA.BIN",), member=member, expected="e"
     ) == PurePosixPath("SAVEDATA/ULUS10064/DATA.BIN")
     refused = imports.build_dest("SAVEDATA", ("..",), ("a",), member=member, expected="e")
+    assert isinstance(refused, imports.ImportRefusal) and refused.reason == "unsafe_path"
+
+
+def test_place_single_file_refuses_when_the_renamer_rejects_the_name() -> None:
+    """A renamer returning None is an `unrecognised_layout`, not a crash."""
+    result = imports.place_single_file(
+        _member("Game.srm"), subtree="saves", pattern=_SRM, rename=lambda _: None, expected="x"
+    )
+
+    assert isinstance(result, imports.ImportRefusal)
+    assert (result.reason, result.detail) == ("unrecognised_layout", "name not recognised by the emulator")
+
+
+@pytest.mark.parametrize("renamed", ["a/b", "/etc/passwd"])
+def test_place_single_file_refuses_a_renamed_path(renamed: str) -> None:
+    """A renamer that returns a path, relative or absolute, cannot escape the subtree.
+
+    Args:
+        renamed: What the renamer returns.
+    """
+    result = imports.place_single_file(
+        _member("Game.srm"), subtree="saves", pattern=_SRM, rename=lambda _: renamed, expected="x"
+    )
+
+    assert isinstance(result, imports.ImportRefusal) and result.reason == "unsafe_path"
+
+
+def test_place_single_file_refuses_a_trailing_newline() -> None:
+    """`fullmatch` rejects a name the pattern only matches up to a trailing newline.
+
+    Hygiene already refuses the control character, so the member is built past
+    it: this pins the placement check on its own.
+    """
+    member = dataclasses.replace(_member("Game.srm"), parts=("Game.srm\n",))
+
+    result = imports.place_single_file(
+        member, subtree="saves", pattern=_SRM, rename=lambda n: n, expected="x"
+    )
+
+    assert isinstance(result, imports.ImportRefusal) and result.reason == "unrecognised_layout"
+
+
+def test_place_single_file_refuses_a_member_that_is_only_the_wrapper() -> None:
+    """A file named like the wrapper is not stripped to nothing, and is refused."""
+    result = imports.place_single_file(
+        _member("wrap"),
+        subtree="saves",
+        pattern=_SRM,
+        rename=lambda n: n,
+        expected="x",
+        allow_wrappers=("wrap",),
+    )
+
+    assert isinstance(result, imports.ImportRefusal) and result.reason == "unrecognised_layout"
+
+
+@pytest.mark.parametrize("tail", ["a/b", ""])
+def test_build_dest_refuses_an_unsafe_tail_component(tail: str) -> None:
+    """A tail component holding a slash, or empty, is `unsafe_path`.
+
+    Args:
+        tail: The tail component.
+    """
+    refused = imports.build_dest("SAVEDATA", ("ULUS10064",), (tail,), member=_member("x/y"), expected="e")
+
     assert isinstance(refused, imports.ImportRefusal) and refused.reason == "unsafe_path"
