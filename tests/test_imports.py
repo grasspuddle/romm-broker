@@ -16,7 +16,7 @@ import pytest
 
 from webstation_broker import imports, saves
 
-from .conftest import FakeEmulator
+from .conftest import FakeEmulator, mangle_zip_member
 
 
 def _zip(members: dict[str, bytes], manifest: Optional[Any] = None) -> bytes:
@@ -83,6 +83,7 @@ def test_fold_v1_problems_maps_each_kind() -> None:
             ("s/b", "archive member resolves outside save dir: s/b", "symlink"),
             ("saves", "archive member names a save subtree: saves", "names_subtree"),
             ("x/c", "archive member outside save subtrees: x/c", "outside"),
+            ("s/d", "archive member is encrypted: s/d", "unreadable"),
         ),
     )
 
@@ -94,6 +95,7 @@ def test_fold_v1_problems_maps_each_kind() -> None:
         ("unsafe_path", "s/b"),
         ("unrecognised_layout", "saves"),
         ("unrecognised_layout", "x/c"),
+        ("unsafe_path", "s/d"),
     ]
     assert folded[1].detail == "archive member escapes save dir: ../a"
 
@@ -360,6 +362,41 @@ def test_normalise_member_honours_a_tighter_component_limit() -> None:
     refusal = imports.normalise_member(_info(name), _entry(name), zf=None, max_component_bytes=42)
 
     assert isinstance(refusal, imports.ImportRefusal) and refusal.reason == "unsafe_path"
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "detail"),
+    [
+        ("flag_bits", 0x801, "the member is encrypted"),
+        ("compress_type", 99, "the member uses unsupported compression method 99"),
+    ],
+    ids=["encrypted", "compression"],
+)
+def test_normalise_member_refuses_a_member_that_cannot_be_read(field: str, value: int, detail: str) -> None:
+    """A member whose header says the write would fail is refused before the clear.
+
+    Args:
+        field: The `ZipInfo` attribute to break.
+        value: The value to give it.
+        detail: The refusal's expected detail.
+    """
+    name = ".import/save/a.srm"
+    info = _info(name)
+    setattr(info, field, value)
+
+    refusal = imports.normalise_member(info, _entry(name), zf=None)
+
+    assert isinstance(refusal, imports.ImportRefusal)
+    assert (refusal.reason, refusal.detail) == ("unsafe_path", detail)
+
+
+def test_normalise_member_ignores_the_date_a_placed_member_never_uses() -> None:
+    """A placed member is stamped with the write time, so a bad zip date is harmless."""
+    name = ".import/save/a.srm"
+    info = _info(name)
+    info.date_time = (1980, 0, 0, 0, 0, 0)
+
+    assert isinstance(imports.normalise_member(info, _entry(name), zf=None), imports.ImportMember)
 
 
 # ── the kind gate and the placement helpers ────────────────────────────
@@ -975,6 +1012,13 @@ def test_a_destination_a_v1_member_also_writes_conflicts(tmp_path: Path) -> None
     assert refusals == [("destination_conflict", ".import/save/a")]
 
 
+def test_a_v1_name_spelled_differently_still_conflicts(tmp_path: Path) -> None:
+    """`saves/./a` writes the same file as `saves/a`, so the two clash."""
+    refusals = _check(tmp_path, [_placed("a", "saves/a")], archive_paths=frozenset({"saves/./a"}))
+
+    assert refusals == [("destination_conflict", ".import/save/a")]
+
+
 def test_max_members_counts_v1_members_when_asked(tmp_path: Path) -> None:
     """With `counts_v1`, a v1 member of the kind uses up the one allowed place."""
     spec = imports.ImportSpec(kinds=(imports.KindSpec("state", ("x",), max_members=1, counts_v1=True),))
@@ -1317,6 +1361,49 @@ def test_a_hook_that_answers_nonsense_is_a_bug(tmp_path: Path) -> None:
 
     with pytest.raises(TypeError, match="place_import"):
         _preflight(emu, _declared({".import/save/a": b"x"}))
+
+
+def test_an_unreadable_import_member_is_refused_by_preflight(tmp_path: Path) -> None:
+    """An encrypted `.import/` member is refused, so nothing is placed and the slot is never cleared."""
+    emu = _Accepting()
+    emu.save_root = tmp_path
+    body = mangle_zip_member(_declared({".import/save/a.srm": b"x"}), ".import/save/a.srm", flags=0x1)
+
+    result = _preflight(emu, body)
+
+    assert result.placements == ()
+    assert [(r.reason, r.member, r.detail) for r in result.refusals] == [
+        ("unsafe_path", ".import/save/a.srm", "the member is encrypted")
+    ]
+
+
+def test_preflight_suggests_from_the_emulators_platform(tmp_path: Path) -> None:
+    """The suggestion reads `emulator.platform`, the same value `import_spec` reads."""
+
+    class Refusing(_Accepting):
+        """Refuses every member as another emulator's format."""
+
+        def place_import(self, member: Any, spec: Any, ctx: Any) -> Any:
+            """Refuse the member.
+
+            Args:
+                member: The member.
+                spec: The spec.
+                ctx: The launch context.
+
+            Returns:
+                A `source_incompatible` refusal.
+            """
+            return imports.ImportRefusal("source_incompatible", member.name, None)
+
+    emu = Refusing()
+    emu.save_root = tmp_path
+    emu.platform = "psp"
+    body = _declared({".import/save/ULUS10041DATA/PARAM.SFO": b"x"})
+
+    result = _preflight(emu, body, rom=imports.RomRef(1, "Game", None))
+
+    assert [r.suggest_emulator for r in result.refusals] == ["ppsspp"]
 
 
 def test_an_archive_level_manifest_refusal_refuses_the_whole_import(tmp_path: Path) -> None:

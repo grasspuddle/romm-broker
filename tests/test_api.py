@@ -26,7 +26,7 @@ from webstation_broker import api, callback, imports, saves, screenshot, selkies
 from webstation_broker.app import create_app
 from webstation_broker.emulators import base, rpcs3, shadps4
 
-from .conftest import PREFIX, SLEEPER_CMD, FakeEmulator
+from .conftest import PREFIX, SLEEPER_CMD, FakeEmulator, mangle_zip_member
 
 API = f"{PREFIX}/api"
 
@@ -2233,6 +2233,53 @@ def test_an_archive_held_back_by_the_card_sync_is_reported(
     assert "memory-card routes" in body["save_restore_skipped"]
 
 
+@pytest.mark.parametrize("bad", ["unreadable-zip", "read-raises"])
+def test_a_skipped_archive_that_cannot_be_read_is_still_just_skipped(
+    client: TestClient,
+    broker_dirs: dict[str, Path],
+    fake_emulator: list[FakeEmulator],
+    monkeypatch: pytest.MonkeyPatch,
+    bad: str,
+) -> None:
+    """The look for imports in a skipped archive never turns the old skip into a crash.
+
+    Args:
+        client: The app client.
+        broker_dirs: The redirected ROM root and archive directories.
+        fake_emulator: The instances the registry built.
+        monkeypatch: Pytest's attribute patcher.
+        bad: How the read fails: a body `zipfile` chokes on, or a reader that raises.
+    """
+    from webstation_broker import emulators
+
+    monkeypatch.setattr(emulators.REGISTRY["fake"], "save_subtrees", ())
+    archive = broker_dirs["imports"] / "sess-1.zip"
+    body = _zip({"saves/X": b"stored"})
+    if bad == "unreadable-zip":
+        body = mangle_zip_member(body, "saves/X", flags=0x800, raw_name=b"saves/\xff")
+    else:
+
+        def _boom(content: bytes) -> saves.ArchiveView:
+            """Fail the way an unforeseen zip defect would.
+
+            Args:
+                content: The archive body.
+
+            Raises:
+                RuntimeError: Always.
+            """
+            raise RuntimeError("unforeseen")
+
+        monkeypatch.setattr(saves, "read_archive", _boom)
+    archive.write_bytes(body)
+
+    response = _activate(client, broker_dirs, save={"archive": str(archive)})
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "launching"
+    assert "no save subtree" in response.json()["save_restore_skipped"]
+
+
 def test_the_clear_is_told_which_subtree_the_card_routes_carry(
     client: TestClient,
     broker_dirs: dict[str, Path],
@@ -2329,14 +2376,57 @@ def test_a_restored_archive_reports_no_skip(
 
 
 @pytest.mark.parametrize(
-    ("members", "patch", "fragment"),
+    ("body", "patch", "link_states", "fragment"),
     [
-        (None, None, "body is not a zip archive"),
-        ({"../escape": b"x"}, None, "archive member escapes save dir"),
-        ({"elsewhere/x": b"x"}, None, "archive member outside save subtrees"),
-        ({"saves": b"x"}, None, "archive member names a save subtree"),
-        ({"saves/a": b"xxxx"}, ("SAVE_FILE_MAX_BYTES", 2), "archive exceeds size limit"),
-        ({"saves/a": b"a", "saves/b": b"b"}, ("SAVE_FILE_MAX_ENTRIES", 1), "more than 1 entries"),
+        (b"not a zip", None, False, "body is not a zip archive"),
+        (_zip({"../escape": b"x"}), None, False, "archive member escapes save dir"),
+        (_zip({"elsewhere/x": b"x"}), None, False, "archive member outside save subtrees"),
+        (_zip({"saves": b"x"}), None, False, "archive member names a save subtree"),
+        (_zip({"saves/a": b"xxxx"}), ("SAVE_FILE_MAX_BYTES", 2), False, "archive exceeds size limit"),
+        (
+            _zip({"saves/a": b"a", "saves/b": b"b"}),
+            ("SAVE_FILE_MAX_ENTRIES", 1),
+            False,
+            "more than 1 entries",
+        ),
+        (_zip({"states/x": b"x"}), None, True, "archive member resolves outside save dir"),
+        (
+            mangle_zip_member(_zip({"saves/a": b"a"}), "saves/a", flags=0x1),
+            None,
+            False,
+            "archive member is encrypted",
+        ),
+        (
+            mangle_zip_member(_zip({"saves/a": b"a"}), "saves/a", method=99),
+            None,
+            False,
+            "archive member uses unsupported compression method 99",
+        ),
+        (
+            mangle_zip_member(_zip({"saves/a": b"a"}), "saves/a", dos_date=0),
+            None,
+            False,
+            "archive member has an invalid timestamp",
+        ),
+        (
+            mangle_zip_member(_zip({"saves/X": b"a"}), "saves/X", flags=0x800, raw_name=b"saves/\xff"),
+            None,
+            False,
+            "body is not a zip archive",
+        ),
+    ],
+    ids=[
+        "not-a-zip",
+        "escape",
+        "outside",
+        "names-subtree",
+        "size",
+        "entries",
+        "symlink-escape",
+        "encrypted",
+        "compression",
+        "bad-date",
+        "bad-utf8-name",
     ],
 )
 def test_a_bad_archive_is_refused_before_the_slot_is_cleared(
@@ -2344,32 +2434,60 @@ def test_a_bad_archive_is_refused_before_the_slot_is_cleared(
     broker_dirs: dict[str, Path],
     fake_emulator: list[FakeEmulator],
     monkeypatch: pytest.MonkeyPatch,
-    members: Optional[dict[str, bytes]],
+    tmp_path: Path,
+    body: bytes,
     patch: Optional[tuple[str, int]],
+    link_states: bool,
     fragment: str,
 ) -> None:
-    """Every whole-archive or member problem answers 422 with the slot untouched.
+    """Every whole-archive or member problem answers 422 with the slot byte-identical.
 
     Refusing after the clear left the player with an emptied slot and no
     restore: the saves the slot held were gone before the archive was
-    ever checked.
+    ever checked. The clear here really empties the slot, so a refusal that
+    came too late would show in the seeded file.
 
     Args:
         client: The app client.
         broker_dirs: The redirected ROM root and archive directories.
         fake_emulator: The instances the registry built.
         monkeypatch: Pytest's attribute patcher.
-        members: The archive's members, or None for a body that is not a zip.
+        tmp_path: The per-test temporary directory; the fake's save root lives under it.
+        body: The archive body.
         patch: A limit to lower first, as `(name, value)`, or None.
+        link_states: Whether to make the `states` subtree a symlink out of the save root.
         fragment: Text the 422 detail must contain.
     """
+    from webstation_broker import emulators
+
     calls = _record_activate_hooks(monkeypatch)
+    root = emulators.REGISTRY["fake"].save_root
+    seeded = root / "saves" / "keep.bin"
+    seeded.write_bytes(b"the player's own save")
+
+    def _wipe(self: FakeEmulator, excluded: tuple[str, ...] = ()) -> None:
+        """Record the clear and empty the save subtrees, as a real clear does.
+
+        Args:
+            self: The emulator being cleared.
+            excluded: Save subtrees the whole-card routes carry this session.
+        """
+        calls.append("clear_working_slot")
+        for sub in ("saves", "states"):
+            shutil.rmtree(root / sub, ignore_errors=True)
+
+    monkeypatch.setattr(emulators.REGISTRY["fake"], "clear_working_slot", _wipe)
+    if link_states:
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (root / "states").rmdir()
+        (root / "states").symlink_to(outside)
     if patch is not None:
         name, value = patch
         target = saves if name == "SAVE_FILE_MAX_BYTES" else settings
         monkeypatch.setattr(target, name, value)
     archive = broker_dirs["imports"] / "sess-1.zip"
-    archive.write_bytes(b"not a zip" if members is None else _zip(members))
+    archive.write_bytes(body)
 
     response = _activate(client, broker_dirs, save={"archive": str(archive)})
 
@@ -2377,6 +2495,7 @@ def test_a_bad_archive_is_refused_before_the_slot_is_cleared(
     assert response.json()["detail"].startswith("save restore failed: ")
     assert fragment in response.json()["detail"]
     assert calls == []
+    assert seeded.read_bytes() == b"the player's own save"
 
 
 # ── the activate hooks run on every launch ─────────────────────────────

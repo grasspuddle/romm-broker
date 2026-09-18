@@ -647,21 +647,31 @@ async def _start_session(body: ActivateIn, request: Request) -> dict[str, Any]:
                 save.archive,
                 restore_skipped,
             )
-            if archive_path.is_file():
-                skipped = await anyio.to_thread.run_sync(
-                    saves.read_archive, await anyio.to_thread.run_sync(archive_path.read_bytes)
-                )
-                if skipped.imports:
-                    # Dropping a declared import is exactly the silent loss the
-                    # refusal list exists to prevent.
-                    reason = "memcard_synced_separately" if excluded else "kind_not_accepted"
-                    raise HTTPException(
-                        status_code=422,
-                        detail=imports.refusal_body(
-                            imports.ImportRefusal(reason, i.filename, None, detail=restore_skipped)
-                            for i in skipped.imports
-                        ),
+            skipped: Optional[saves.ArchiveView] = None
+            try:
+                if archive_path.is_file():
+                    skipped = await anyio.to_thread.run_sync(
+                        saves.read_archive, await anyio.to_thread.run_sync(archive_path.read_bytes)
                     )
+            except Exception:
+                # This read only looks for imports to refuse; failing it must
+                # not turn the skip every older archive gets into a crash.
+                log.warning(
+                    "activate: could not read skipped save archive %s for imports",
+                    save.archive,
+                    exc_info=True,
+                )
+            if skipped is not None and skipped.imports:
+                # Dropping a declared import is exactly the silent loss the
+                # refusal list exists to prevent.
+                reason = "memcard_synced_separately" if excluded else "kind_not_accepted"
+                raise HTTPException(
+                    status_code=422,
+                    detail=imports.refusal_body(
+                        imports.ImportRefusal(reason, i.filename, None, detail=restore_skipped)
+                        for i in skipped.imports
+                    ),
+                )
 
     rom_ref = imports.RomRef.from_body(body.rom) if body.rom else None
     v1_plan: Optional[saves.V1Plan] = None

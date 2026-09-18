@@ -17,6 +17,8 @@ import pytest
 
 from webstation_broker import saves
 
+from .conftest import mangle_zip_member
+
 # Zip entries carry a DOS timestamp, which has no room for anything before
 # 1980, so the fixture clock sits in 2020 rather than at the epoch.
 OLD = 1_600_000_000
@@ -720,6 +722,44 @@ def test_read_archive_reports_an_unusable_manifest_beside_imports(
     assert fragment in (view.manifest_error or "")
 
 
+def test_read_archive_rejects_a_name_flagged_utf8_that_is_not() -> None:
+    """A UTF-8-flagged name that does not decode is not a zip, not a crash."""
+    body = mangle_zip_member(_zip({"GC/X": b"x"}), "GC/X", flags=0x800, raw_name=b"GC/\xff")
+
+    view = saves.read_archive(body)
+
+    assert view.error == "body is not a zip archive"
+    assert view.v1 == () and view.imports == ()
+
+
+def test_read_archive_reports_a_manifest_nested_too_deep_to_parse() -> None:
+    """A manifest that blows the parser's recursion limit is unusable, not a crash."""
+    deep = b"[" * 100_000 + b"]" * 100_000
+    view = saves.read_archive(_zip({".import/save/b.srm": b"b", saves.MANIFEST_NAME: deep}))
+
+    assert view.manifest is None
+    assert "not JSON" in (view.manifest_error or "")
+
+
+def test_read_archive_reports_a_manifest_whose_data_is_corrupt() -> None:
+    """A deflated manifest whose data is damaged is unusable, not a crash."""
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr(".import/save/b.srm", b"b")
+        zf.writestr(saves.MANIFEST_NAME, json.dumps({"version": 2, "pad": "x" * 4000}))
+    body = bytearray(buf.getvalue())
+    with zipfile.ZipFile(io.BytesIO(bytes(body))) as zf:
+        info = zf.getinfo(saves.MANIFEST_NAME)
+    start = info.header_offset + 30 + len(info.filename.encode())
+    body[start : start + info.compress_size] = b"\xff" * info.compress_size
+
+    view = saves.read_archive(bytes(body))
+
+    assert view.error is None
+    assert view.manifest is None
+    assert "manifest unreadable" in (view.manifest_error or "")
+
+
 # ── plan_v1: every v1 check, with nothing written ──────────────────────
 
 
@@ -772,6 +812,49 @@ def test_plan_v1_keeps_the_legacy_messages(tmp_path: Path, name: str, message: s
 
     assert plan.problems == ((name, message, kind),)
     assert plan.error == message
+
+
+@pytest.mark.parametrize(
+    ("mangle", "message"),
+    [
+        ({"flags": 0x1}, "archive member is encrypted: GC/a"),
+        ({"method": 99}, "archive member uses unsupported compression method 99: GC/a"),
+        ({"dos_date": 0}, "archive member has an invalid timestamp (1980, 0, 0, 0, 0, 0): GC/a"),
+    ],
+    ids=["encrypted", "compression", "date"],
+)
+def test_plan_v1_refuses_a_member_that_would_fail_to_write(
+    tmp_path: Path, mangle: dict[str, int], message: str
+) -> None:
+    """A member whose header says it cannot be read or stamped is refused before any write.
+
+    Each of these used to raise inside the write, after the slot was cleared.
+
+    Args:
+        tmp_path: The per-test temporary directory.
+        mangle: The header fields to break, passed to `mangle_zip_member`.
+        message: The legacy-style error text.
+    """
+    root = tmp_path / "root"
+    root.mkdir()
+    body = mangle_zip_member(_zip({"GC/a": b"a", "GC/ok": b"k"}), "GC/a", **mangle)
+
+    plan = saves.plan_v1(saves.read_archive(body), root, ("GC",), ())
+
+    assert plan.problems == (("GC/a", message, "unreadable"),)
+    assert plan.names == ("GC/ok",)
+
+
+def test_plan_v1_never_reads_an_excluded_member_header(tmp_path: Path) -> None:
+    """A dropped member is never written, so a broken header on it is no problem."""
+    root = tmp_path / "root"
+    root.mkdir()
+    body = mangle_zip_member(_zip({"card/a": b"a"}), "card/a", flags=0x1)
+
+    plan = saves.plan_v1(saves.read_archive(body), root, ("GC",), ("card",))
+
+    assert plan.problems == ()
+    assert plan.excluded_count == 1
 
 
 def test_plan_v1_collects_every_problem(tmp_path: Path) -> None:
@@ -901,6 +984,42 @@ def test_write_save_archive_counts_a_link_out_of_the_root_as_failed(tmp_path: Pa
 
     assert result["failed"] == 1 and result["imported"] == 0
     assert not (outside / "x").exists()
+
+
+def test_write_save_archive_stamps_an_unusable_zip_date_with_now(tmp_path: Path) -> None:
+    """A date the plan did not vet falls back to the write stamp instead of raising."""
+    root = tmp_path / "root"
+    root.mkdir()
+    body = mangle_zip_member(_zip({"GC/a": b"a"}), "GC/a", dos_date=0)
+
+    result = saves.write_save_archive(body, root, saves.ArchivePlan(("GC/a",), 0), stamp=NEW)
+
+    assert result["written"] == 1 and result["failed"] == 0
+    assert (root / "GC" / "a").stat().st_mtime == NEW
+
+
+@pytest.mark.parametrize(
+    "mangle",
+    [{"flags": 0x1}, {"method": 99}],
+    ids=["encrypted", "compression"],
+)
+def test_write_save_archive_counts_an_unreadable_member_as_failed(
+    tmp_path: Path, mangle: dict[str, int]
+) -> None:
+    """A member that raises on read is a failed write, never an exception out of the restore.
+
+    Args:
+        tmp_path: The per-test temporary directory.
+        mangle: The header fields to break, passed to `mangle_zip_member`.
+    """
+    root = tmp_path / "root"
+    root.mkdir()
+    body = mangle_zip_member(_zip({"GC/a": b"a"}), "GC/a", **mangle)
+
+    result = saves.write_save_archive(body, root, saves.ArchivePlan(("GC/a",), 0))
+
+    assert result["failed"] == 1 and result["written"] == 0
+    assert list((root / "GC").iterdir()) == []
 
 
 def test_extract_save_archive_still_refuses_import_members(tmp_path: Path) -> None:

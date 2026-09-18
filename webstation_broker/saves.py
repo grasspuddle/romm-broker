@@ -13,6 +13,7 @@ import secrets
 import stat
 import time
 import zipfile
+import zlib
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Literal, Optional
@@ -392,12 +393,15 @@ def _read_manifest(zf: zipfile.ZipFile, info: zipfile.ZipInfo) -> tuple[Optional
         return None, f"manifest exceeds {MANIFEST_MAX_BYTES} bytes"
     try:
         raw = zf.read(info)
-    except (OSError, ValueError, RuntimeError, NotImplementedError, zipfile.BadZipFile) as exc:
+    except (
+        OSError, ValueError, RuntimeError, NotImplementedError, EOFError, zlib.error, zipfile.BadZipFile
+    ) as exc:
         return None, f"manifest unreadable: {exc}"
     try:
         return json.loads(raw), None
-    except ValueError as exc:
-        # JSONDecodeError and UnicodeDecodeError are both ValueErrors.
+    except (ValueError, RecursionError) as exc:
+        # JSONDecodeError and UnicodeDecodeError are both ValueErrors; a
+        # deeply nested document raises RecursionError.
         return None, f"manifest is not JSON: {exc}"
 
 
@@ -417,7 +421,9 @@ def read_archive(content: bytes) -> ArchiveView:
     """
     try:
         zf = zipfile.ZipFile(io.BytesIO(content))
-    except zipfile.BadZipFile:
+    except (zipfile.BadZipFile, ValueError, RuntimeError, NotImplementedError, EOFError) as exc:
+        # ValueError covers a UTF-8-flagged name that is not valid UTF-8.
+        log.debug("saves: archive could not be opened: %s", exc)
         return ArchiveView("body is not a zip archive", (), ())
     with zf:
         infos = [i for i in zf.infolist() if not i.is_dir()]
@@ -446,7 +452,7 @@ def read_archive(content: bytes) -> ArchiveView:
     return ArchiveView(error, tuple(v1), tuple(imports), manifest, manifest_error)
 
 
-def _under(member: PurePosixPath, subtrees: tuple[str, ...]) -> bool:
+def under_subtrees(member: PurePosixPath, subtrees: tuple[str, ...]) -> bool:
     """Whether an archive member path lies strictly inside one of the subtrees.
 
     A member that is a subtree name rather than a path below one is refused
@@ -464,7 +470,7 @@ def _under(member: PurePosixPath, subtrees: tuple[str, ...]) -> bool:
     return any(rel.startswith(sub + "/") for sub in subtrees)
 
 
-V1Problem = Literal["escapes", "names_subtree", "outside", "symlink"]
+V1Problem = Literal["escapes", "names_subtree", "outside", "symlink", "unreadable"]
 """Why a v1 member was refused, so a v2 caller can fold it into a refusal code."""
 
 
@@ -486,6 +492,41 @@ class V1Plan:
     def error(self) -> Optional[str]:
         """The first problem's legacy message, or None when there is none."""
         return self.problems[0][1] if self.problems else None
+
+
+_READABLE_COMPRESSION = frozenset(
+    {zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED, zipfile.ZIP_BZIP2, zipfile.ZIP_LZMA}
+)
+"""Compression methods `zipfile` can decompress; any other raises on read."""
+_ZIP_ENCRYPTED_FLAG = 0x1
+"""Zip general-purpose flag bit marking an encrypted entry."""
+
+
+def member_problem(info: zipfile.ZipInfo, *, check_date: bool = True) -> Optional[str]:
+    """Find what would make a member fail to write, from its header alone.
+
+    Each of these raises only once the member is read or stamped, and a
+    restore reads after the working slot is cleared, so they are caught here
+    instead.
+
+    Args:
+        info: The member's zip entry.
+        check_date: Also check the stored timestamp, which only a v1 member's
+            write uses.
+
+    Returns:
+        What is wrong, phrased to follow "archive member", or None.
+    """
+    if info.flag_bits & _ZIP_ENCRYPTED_FLAG:
+        return "is encrypted"
+    if info.compress_type not in _READABLE_COMPRESSION:
+        return f"uses unsupported compression method {info.compress_type}"
+    if check_date:
+        try:
+            calendar.timegm(info.date_time)
+        except (ValueError, OverflowError):
+            return f"has an invalid timestamp {info.date_time}"
+    return None
 
 
 def _longest_subtree(rel: str, subtrees: tuple[str, ...]) -> Optional[str]:
@@ -559,8 +600,9 @@ def plan_v1(
     """Run every per-member restore check on the v1 members, writing nothing.
 
     The checks and their messages are the ones restores have always used,
-    in the same order, followed by a new one: a member whose surviving
-    parent chain links out of `root` is refused here rather than failing to
+    in the same order, followed by two new ones: a member whose surviving
+    parent chain links out of `root`, and a member `member_problem` says
+    cannot be read or stamped, are refused here rather than failing to
     write after the slot has already been cleared.
 
     Args:
@@ -596,10 +638,10 @@ def plan_v1(
             # directory, and the mkdir on its next launch would fail.
             problems.append((name, f"archive member names a save subtree: {name}", "names_subtree"))
             continue
-        if _under(member, excluded):
+        if under_subtrees(member, excluded):
             excluded_count += 1
             continue
-        if not _under(member, subtrees):
+        if not under_subtrees(member, subtrees):
             problems.append((name, f"archive member outside save subtrees: {name}", "outside"))
             continue
         sub = _longest_subtree(rel, subtrees)
@@ -607,6 +649,10 @@ def plan_v1(
             escapes_by_subtree[sub] = surviving_chain_escapes(root, member, subtrees)
         if escapes_by_subtree[sub]:
             problems.append((name, f"archive member resolves outside save dir: {name}", "symlink"))
+            continue
+        problem = member_problem(info)
+        if problem is not None:
+            problems.append((name, f"archive member {problem}: {name}", "unreadable"))
             continue
         names.append(name)
     return V1Plan(tuple(names), excluded_count, tuple(problems))
@@ -698,7 +744,11 @@ def _write_member(
         tmp.write_bytes(read())
         os.replace(tmp, target)
         os.utime(target, (mtime, mtime))
-    except (OSError, ValueError, zipfile.BadZipFile) as exc:
+    except (
+        OSError, ValueError, RuntimeError, NotImplementedError, EOFError, zlib.error, zipfile.BadZipFile
+    ) as exc:
+        # `plan_v1` refuses what a header gives away; corrupt data only
+        # shows once it is read.
         log.warning("saves: could not restore %s: %s", label, exc)
         # The staging file is dot-prefixed, so `_iter_save_files` never sees
         # it and no later dump would ever carry it off the disk.
@@ -765,12 +815,17 @@ def write_save_archive(
                 log.warning("saves: %s is not in the archive, skipped", name)
                 result["failed"] += 1
                 continue
+            try:
+                mtime = float(calendar.timegm(info.date_time))
+            except (ValueError, OverflowError) as exc:
+                log.warning("saves: %s has an unusable timestamp, stamping it now: %s", name, exc)
+                mtime = when
             outcome = _write_member(
                 root,
                 root_real,
                 PurePosixPath(name),
                 lambda info=info: zf.read(info),
-                calendar.timegm(info.date_time),
+                mtime,
                 guard=not _guard_exempt(always_restore, name),
                 label=name,
             )
@@ -824,8 +879,9 @@ def extract_save_archive(
         `{"written", "skipped", "excluded", "failed", "imported", "error"}`,
         with `error` set (and nothing written) when the body is not a zip, the
         archive is too large, or a member escapes the save dir, names a
-        subtree itself, lies outside the subtrees, or resolves outside the
-        save dir through a surviving symlink.
+        subtree itself, lies outside the subtrees, resolves outside the
+        save dir through a surviving symlink, or is encrypted, compressed in
+        a way `zipfile` cannot read, or stamped with an impossible date.
     """
     view = read_archive(content)
     error = view.error

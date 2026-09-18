@@ -367,6 +367,7 @@ _V1_REASONS: dict[str, str] = {
     "symlink": "unsafe_path",
     "names_subtree": "unrecognised_layout",
     "outside": "unrecognised_layout",
+    "unreadable": "unsafe_path",
 }
 """Refusal code for each `saves.V1Problem` in an archive that also holds imports."""
 
@@ -604,6 +605,10 @@ def normalise_member(
         problem = _component_problem(part, max_component_bytes)
         if problem:
             return unsafe(problem)
+    # A placed member is stamped with the write time, so its date is never read.
+    problem = saves.member_problem(info, check_date=False)
+    if problem:
+        return unsafe(f"the member {problem}")
     return ImportMember(
         name=name,
         kind=entry.kind,
@@ -1169,6 +1174,8 @@ def _destination_conflicts(
     Returns:
         Each clashing import member's name, mapped to the detail for its refusal.
     """
+    # PurePosixPath drops `.` and empty components, so `saves/./a` keys as the
+    # `saves/a` it writes to; the owner stays the raw name `refuse` matches on.
     entries = [(_dest_key(PurePosixPath(p), fold), p) for p in archive_paths]
     for placement in plan:
         for dest in (placement.dest, *(d for d, _ in placement.sidecars)):
@@ -1258,7 +1265,7 @@ def check_plan(
         dest = placement.dest
         rel = dest.as_posix()
         name = placement.member.name
-        if saves._under(dest, ctx.excluded):
+        if saves.under_subtrees(dest, ctx.excluded):
             refusals.append(
                 ImportRefusal(
                     "memcard_synced_separately",
@@ -1268,7 +1275,7 @@ def check_plan(
                 )
             )
             continue
-        if rel in subtrees or not saves._under(dest, subtrees):
+        if rel in subtrees or not saves.under_subtrees(dest, subtrees):
             refusals.append(
                 ImportRefusal(
                     "unrecognised_layout",
@@ -1430,7 +1437,7 @@ def preflight(
     import_names = [i.filename for i in view.imports]
     entries, refusals = parse_manifest_v2(view.manifest, import_names, view.manifest_error)
     refusals = [*v1_refusals, *refusals]
-    kept = [i for i in view.v1 if not saves._under(PurePosixPath(i.filename), excluded)]
+    kept = [i for i in view.v1 if not saves.under_subtrees(PurePosixPath(i.filename), excluded)]
     archive_paths = frozenset(i.filename for i in kept)
     v1_bytes = sum(i.file_size for i in kept)
     plan: list[Placement] = []
@@ -1458,7 +1465,7 @@ def preflight(
             archive_paths=archive_paths,
             v1_bytes=v1_bytes,
         )
-        platform = rom.platform if rom else None
+        platform = emulator.platform
         for member in members:
             answer = gate_kind(member, spec, ctx) or emulator.place_import(member, spec, ctx)
             if isinstance(answer, ImportRefusal):

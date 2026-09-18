@@ -7,12 +7,15 @@ why the redirect is a monkeypatch of those globals rather than of the env.
 """
 
 import contextlib
+import io
 import os
 import signal
+import struct
 import subprocess
 import sys
 import time
 import uuid
+import zipfile
 from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any, Optional
@@ -32,6 +35,56 @@ SLEEPER_CMD = ["/usr/bin/sleep", "60"]
 
 DETACHED_CMD = ["/usr/bin/sleep", "61"]
 """Argv the stand-in detached app runs, distinct from `SLEEPER_CMD` so the two are told apart."""
+
+
+def mangle_zip_member(
+    body: bytes,
+    name: str,
+    *,
+    flags: int = 0,
+    method: Optional[int] = None,
+    dos_date: Optional[int] = None,
+    raw_name: Optional[bytes] = None,
+) -> bytes:
+    """Patch one member's local and central headers into a shape `zipfile` cannot write.
+
+    Args:
+        body: A zip built by `zipfile`, with `name` stored uncompressed.
+        name: The member to patch.
+        flags: General-purpose flag bits to set on it.
+        method: A compression method number to claim, or None to keep it.
+        dos_date: A raw DOS date to stamp, or None to keep it.
+        raw_name: Replacement name bytes of the same length, or None to keep it.
+
+    Returns:
+        The patched archive.
+    """
+    buf = bytearray(body)
+    with zipfile.ZipFile(io.BytesIO(body)) as zf:
+        local = zf.getinfo(name).header_offset
+    encoded = name.encode()
+    central = buf.find(b"PK\x01\x02")
+    while central != -1:
+        (length,) = struct.unpack_from("<H", buf, central + 28)
+        if bytes(buf[central + 46 : central + 46 + length]) == encoded:
+            break
+        central = buf.find(b"PK\x01\x02", central + 1)
+    assert central != -1, f"{name} has no central directory entry"
+    # (flags, method, date, name) offsets in the local header, then the central one.
+    for flags_at, method_at, date_at, name_at in (
+        (local + 6, local + 8, local + 12, local + 30),
+        (central + 8, central + 10, central + 14, central + 46),
+    ):
+        (old_flags,) = struct.unpack_from("<H", buf, flags_at)
+        struct.pack_into("<H", buf, flags_at, old_flags | flags)
+        if method is not None:
+            struct.pack_into("<H", buf, method_at, method)
+        if dos_date is not None:
+            struct.pack_into("<H", buf, date_at, dos_date)
+        if raw_name is not None:
+            assert len(raw_name) == len(encoded), "the replacement name must keep the length"
+            buf[name_at : name_at + len(raw_name)] = raw_name
+    return bytes(buf)
 
 
 @pytest.fixture(autouse=True)
