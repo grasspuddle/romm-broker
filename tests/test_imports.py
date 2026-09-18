@@ -259,3 +259,100 @@ def test_manifest_v2_reads_an_odd_or_missing_origin_as_unknown(extra: dict[str, 
 
     assert refusals == []
     assert entries[".import/save/a"].origin == "unknown"
+
+
+# ── hygiene ────────────────────────────────────────────────────────────
+
+
+def _info(name: str, *, utf8: bool = True, size: int = 4) -> zipfile.ZipInfo:
+    """Build a zip entry without an archive behind it.
+
+    Args:
+        name: The entry name.
+        utf8: Whether the entry carries the zip UTF-8 flag.
+        size: The uncompressed size to record.
+
+    Returns:
+        The entry.
+    """
+    info = zipfile.ZipInfo(name)
+    info.file_size = size
+    if utf8:
+        info.flag_bits |= 0x800
+    return info
+
+
+def _entry(name: str, kind: str = "save") -> imports.ManifestEntry:
+    """Declare `name` as `kind` with an unknown origin.
+
+    Args:
+        name: The member name.
+        kind: The declared kind.
+
+    Returns:
+        The declaration.
+    """
+    return imports.ManifestEntry(name, kind, "unknown")
+
+
+def test_normalise_member_keeps_the_users_own_path() -> None:
+    """The path below `.import/<kind>/` becomes `rel`, component for component."""
+    name = ".import/save/BASLUS-20001ALL/icon.sys"
+    member = imports.normalise_member(_info(name), _entry(name), zf=None)
+
+    assert isinstance(member, imports.ImportMember)
+    assert member.rel == PurePosixPath("BASLUS-20001ALL/icon.sys")
+    assert member.parts == ("BASLUS-20001ALL", "icon.sys")
+    assert member.size == 4
+
+
+@pytest.mark.parametrize(
+    "tail",
+    [
+        "a\\b",
+        "a:b",
+        "a\x01b",
+        "a\x7fb",
+        "",
+        "a//b",
+        "a/./b",
+        "a/../b",
+        ".DS_Store",
+        "dir/.hidden",
+        "__MACOSX/a",
+        "x" * 256,
+    ],
+)
+def test_normalise_member_refuses_unsafe_paths(tail: str) -> None:
+    """Every hygiene rule answers `unsafe_path`.
+
+    Args:
+        tail: The path below `.import/save/`.
+    """
+    name = f".import/save/{tail}"
+
+    refusal = imports.normalise_member(_info(name), _entry(name), zf=None)
+
+    assert isinstance(refusal, imports.ImportRefusal)
+    assert refusal.reason == "unsafe_path"
+    assert refusal.member == name
+
+
+def test_normalise_member_refuses_non_ascii_without_the_utf8_flag() -> None:
+    """A non-ASCII name only counts when the zip says it is UTF-8."""
+    name = ".import/save/café.srm"
+
+    flagged = imports.normalise_member(_info(name), _entry(name), zf=None)
+    unflagged = imports.normalise_member(_info(name, utf8=False), _entry(name), zf=None)
+
+    assert isinstance(flagged, imports.ImportMember)
+    assert isinstance(unflagged, imports.ImportRefusal) and unflagged.reason == "unsafe_path"
+
+
+def test_normalise_member_honours_a_tighter_component_limit() -> None:
+    """An emulator with a short filesystem limit (xemu's 42) can lower it."""
+    name = ".import/save/" + "x" * 43
+
+    refusal = imports.normalise_member(_info(name), _entry(name), zf=None, max_component_bytes=42)
+
+    assert isinstance(refusal, imports.ImportRefusal) and refusal.reason == "unsafe_path"

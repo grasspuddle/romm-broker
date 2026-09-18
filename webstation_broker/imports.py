@@ -18,7 +18,7 @@ import zipfile
 from collections.abc import Hashable, Iterable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
-from typing import TYPE_CHECKING, Any, Literal, Optional
+from typing import TYPE_CHECKING, Any, Literal, Optional, Union
 
 from . import saves
 
@@ -504,3 +504,109 @@ def parse_manifest_v2(
             seen.add(name)
             refusals.append(_manifest_invalid(name, "not declared in the manifest"))
     return entries, refusals
+
+
+_UTF8_FLAG = 0x800
+"""Zip general-purpose flag bit saying the entry name is UTF-8."""
+_SAFE_EXPECTED = "a relative path of plain names: no hidden, system or oversized components"
+"""The `expected` text on every hygiene refusal."""
+
+
+def _name_problem(name: str) -> Optional[str]:
+    """Check a whole name for characters no save path may hold.
+
+    Args:
+        name: A member name or a single component.
+
+    Returns:
+        What is wrong, or None.
+    """
+    if "\\" in name:
+        return "backslash in name"
+    if ":" in name:
+        return "colon in name"
+    if any(ord(c) < 0x20 or ord(c) == 0x7F for c in name):
+        return "control character in name"
+    return None
+
+
+def _component_problem(part: str, max_component_bytes: int) -> Optional[str]:
+    """Check one path component.
+
+    Args:
+        part: The component.
+        max_component_bytes: The longest component allowed, in UTF-8 bytes.
+
+    Returns:
+        What is wrong, or None.
+    """
+    if part in ("", ".", ".."):
+        return f"empty or relative component {part!r}"
+    if part.startswith("."):
+        return f"hidden component {part!r}"
+    if part == "__MACOSX":
+        return "__MACOSX component"
+    if "/" in part:
+        return f"slash in component {part!r}"
+    if len(part.encode("utf-8")) > max_component_bytes:
+        return f"component longer than {max_component_bytes} bytes"
+    return None
+
+
+def normalise_member(
+    info: zipfile.ZipInfo,
+    entry: ManifestEntry,
+    *,
+    zf: Optional[zipfile.ZipFile],
+    max_component_bytes: int = 255,
+) -> Union[ImportMember, ImportRefusal]:
+    """Apply every `unsafe_path` rule to one member, in one pass.
+
+    This is the only hygiene check: placement hooks can rely on a member's
+    parts being plain names.
+
+    Args:
+        info: The member's zip entry.
+        entry: Its declaration, whose kind has already been matched to the path.
+        zf: The open archive, for `ImportMember.head`; None in tests.
+        max_component_bytes: The longest component the emulator's filesystem takes.
+
+    Returns:
+        The member, or an `unsafe_path` refusal.
+    """
+    name = info.filename
+
+    def unsafe(detail: str) -> ImportRefusal:
+        """Build this member's `unsafe_path` refusal.
+
+        Args:
+            detail: What is wrong.
+
+        Returns:
+            The refusal.
+        """
+        return ImportRefusal("unsafe_path", name, _SAFE_EXPECTED, detail=detail)
+
+    if not name.isascii() and not info.flag_bits & _UTF8_FLAG:
+        return unsafe("non-ASCII name without the zip UTF-8 flag")
+    problem = _name_problem(name)
+    if problem:
+        return unsafe(problem)
+    prefix = f"{saves.IMPORT_PREFIX}{entry.kind}/"
+    if not name.startswith(prefix) or len(name) == len(prefix):
+        return unsafe(f"nothing below {prefix}")
+    tail = name[len(prefix):].split("/")
+    for part in tail:
+        problem = _component_problem(part, max_component_bytes)
+        if problem:
+            return unsafe(problem)
+    return ImportMember(
+        name=name,
+        kind=entry.kind,
+        origin=entry.origin,
+        rel=PurePosixPath(*tail),
+        parts=tuple(tail),
+        size=info.file_size,
+        info=info,
+        _zf=zf,
+    )
