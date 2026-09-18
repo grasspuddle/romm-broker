@@ -1739,10 +1739,23 @@ class Rpcs3(Emulator):
         yet, so the whole game/ prefix is declared to let them through.
         """
         if self._restoring:
-            return ("home/00000001/savedata", "game", "savestates")
+            return self.restore_subtrees
         subtrees = ["home/00000001/savedata", "savestates"]
         subtrees += [f"game/{d.name}" for d in _gamedata_dirs()]
         return tuple(subtrees)
+
+    @property
+    def restore_subtrees(self) -> tuple[str, ...]:
+        """The restore set, whatever `_restoring` says.
+
+        Preflight reads this before `clear_working_slot` has flipped
+        `_restoring`, and a restore needs the whole `game/` prefix: the dirs
+        it brings back do not exist on disk yet.
+
+        Returns:
+            Saves, the whole `game/` prefix, and savestates.
+        """
+        return ("home/00000001/savedata", "game", "savestates")
 
     def prepare_restore(self) -> None:
         """Stop any running instance and mark the session as archive-restoring."""

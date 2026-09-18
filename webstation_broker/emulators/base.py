@@ -14,7 +14,9 @@ import subprocess
 import time
 from collections.abc import Callable, Collection
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Optional, Union
+
+from .. import imports
 
 log = logging.getLogger(__name__)
 
@@ -1248,6 +1250,68 @@ class Emulator:
             nothing, so every member stays under the guard.
         """
         return False
+
+    import_identity: Optional[imports.SessionIdentity] = None
+    """The game id this session runs as, set by activate's preflight."""
+
+    def import_spec(self) -> imports.ImportSpec:
+        """What this emulator accepts as a declared import, on `self.platform`.
+
+        Returns:
+            The spec. The default accepts nothing, so every import member is
+            refused with `kind_not_accepted` before `place_import` is called.
+        """
+        return imports.ImportSpec()
+
+    def place_import(
+        self, member: imports.ImportMember, spec: imports.ImportSpec, ctx: imports.ImportCtx
+    ) -> Union[imports.Placement, imports.ImportRefusal]:
+        """Place one member that passed hygiene and the kind gate.
+
+        Must be pure: nothing is written, nothing is deleted, and the only
+        reads allowed are `member.head()` and the rom through `ctx`.
+
+        Args:
+            member: The member.
+            spec: This emulator's spec, as `import_spec` answered it.
+            ctx: The launch context.
+
+        Returns:
+            Where the member lands, or why it cannot. The default refuses.
+        """
+        return imports.ImportRefusal("kind_not_accepted", member.name, "no imports")
+
+    def validate_import_plan(
+        self, plan: list[imports.Placement], ctx: imports.ImportCtx
+    ) -> list[imports.ImportRefusal]:
+        """Check the placements together, after the shared checks.
+
+        Args:
+            plan: Every placement.
+            ctx: The launch context.
+
+        Returns:
+            Any refusals. The default has none.
+        """
+        return []
+
+    def identity_source(self) -> Optional[imports.IdentitySource]:
+        """Where this emulator's session identity comes from.
+
+        Returns:
+            The source, or None when the emulator checks no identity.
+        """
+        return None
+
+    @property
+    def restore_subtrees(self) -> tuple[str, ...]:
+        """The subtrees an archive may restore into, read before the working slot is cleared.
+
+        Returns:
+            `save_subtrees` by default. An emulator whose `save_subtrees`
+            depends on state the clear sets overrides this.
+        """
+        return self.save_subtrees
 
     def state_target(self, filename: str) -> Optional[Path]:
         """Where a pushed state called `filename` belongs.

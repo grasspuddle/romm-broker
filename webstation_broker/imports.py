@@ -14,6 +14,7 @@ and `identity_source`); this module holds the shared machinery they lean on.
 """
 
 import fnmatch
+import io
 import logging
 import re
 import zipfile
@@ -1388,3 +1389,87 @@ def refine_refusal(
         if suggestion:
             refusal = replace(refusal, suggest_emulator=suggestion)
     return refusal
+
+
+def preflight(
+    emulator: "Emulator",
+    view: saves.ArchiveView,
+    content: bytes,
+    *,
+    rom_file: Optional[Path],
+    rom: Optional[RomRef],
+    memory_card_synced: bool,
+    excluded: tuple[str, ...],
+    resume_slot: Optional[int],
+    v1_refusals: Sequence[ImportRefusal] = (),
+) -> PreflightResult:
+    """Decide every import member's fate before the working slot is touched.
+
+    Runs the manifest, hygiene, the kind gate, the emulator's hook, the plan
+    checks and identity, collecting every refusal instead of stopping at the
+    first, so RomM can show the player the whole list at once.
+
+    Args:
+        emulator: The emulator, with `platform` already set.
+        view: The archive as `saves.read_archive` read it.
+        content: The zip bytes, reopened here so hooks can `head()` members.
+        rom_file: The resolved bootable file, or None.
+        rom: The activate body's rom, or None.
+        memory_card_synced: Whether the card travels on its own routes.
+        excluded: Subtrees the restore leaves alone.
+        resume_slot: The activate's `save.resume_slot`, or None.
+        v1_refusals: The same archive's v1 problems, already folded.
+
+    Returns:
+        The result. `placements` is empty whenever `refusals` is not.
+
+    Raises:
+        TypeError: When `place_import` answers neither a placement nor a refusal.
+    """
+    spec = emulator.import_spec()
+    import_names = [i.filename for i in view.imports]
+    entries, refusals = parse_manifest_v2(view.manifest, import_names, view.manifest_error)
+    refusals = [*v1_refusals, *refusals]
+    kept = [i for i in view.v1 if not saves._under(PurePosixPath(i.filename), excluded)]
+    archive_paths = frozenset(i.filename for i in kept)
+    v1_bytes = sum(i.file_size for i in kept)
+    plan: list[Placement] = []
+    with zipfile.ZipFile(io.BytesIO(content)) as zf:
+        members: list[ImportMember] = []
+        for info in view.imports:
+            entry = entries.get(info.filename)
+            if entry is None:
+                continue
+            # Re-fetched from this handle so `head()` reads through the open archive.
+            got = normalise_member(
+                zf.getinfo(info.filename), entry, zf=zf, max_component_bytes=spec.max_component_bytes
+            )
+            if isinstance(got, ImportRefusal):
+                refusals.append(got)
+            else:
+                members.append(got)
+        ctx = ImportCtx(
+            rom_file=rom_file,
+            rom=rom,
+            memory_card_synced=memory_card_synced,
+            excluded=excluded,
+            resume_slot=resume_slot,
+            members=tuple(members),
+            archive_paths=archive_paths,
+            v1_bytes=v1_bytes,
+        )
+        platform = rom.platform if rom else None
+        for member in members:
+            answer = gate_kind(member, spec, ctx) or emulator.place_import(member, spec, ctx)
+            if isinstance(answer, ImportRefusal):
+                refusals.append(refine_refusal(answer, member, platform, current=emulator.name))
+            elif isinstance(answer, Placement):
+                plan.append(answer)
+            else:
+                raise TypeError(f"{emulator.name}.place_import answered {answer!r} for {member.name}")
+        partial = len(plan) < len(view.imports)
+        refusals.extend(check_plan(plan, ctx, spec, emulator, partial=partial))
+        identity = identity_for(emulator, ctx)
+    emulator.import_identity = identity
+    unique = tuple(dict.fromkeys(refusals))
+    return PreflightResult(() if unique else tuple(plan), unique, identity)

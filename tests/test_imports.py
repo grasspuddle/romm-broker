@@ -10,11 +10,13 @@ import json
 import re
 import zipfile
 from pathlib import Path, PurePosixPath
-from typing import Any, Optional
+from typing import Any, Optional, Union
 
 import pytest
 
 from webstation_broker import imports, saves
+
+from .conftest import FakeEmulator
 
 
 def _zip(members: dict[str, bytes], manifest: Optional[Any] = None) -> bytes:
@@ -1107,9 +1109,9 @@ def test_protected_globs_fold_case_when_the_filesystem_does(tmp_path: Path) -> N
 
 @pytest.fixture
 def _empty_retroarch_spec(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Give RetroArch the empty `import_spec` every emulator has in Wave 1.
+    """Pin RetroArch to the empty `import_spec` every emulator has in Wave 1.
 
-    The base hook lands in a later task; `raising=False` keeps this stub working once it does.
+    Keeps these refinement tests independent of the spec RetroArch gains in its batch.
 
     Args:
         monkeypatch: The pytest monkeypatch fixture.
@@ -1127,7 +1129,7 @@ def _empty_retroarch_spec(monkeypatch: pytest.MonkeyPatch) -> None:
         """
         return imports.ImportSpec()
 
-    monkeypatch.setattr(Retroarch, "import_spec", _spec, raising=False)
+    monkeypatch.setattr(Retroarch, "import_spec", _spec)
 
 
 @pytest.mark.usefixtures("_empty_retroarch_spec")
@@ -1157,3 +1159,176 @@ def test_a_psp_savedata_dir_suggests_ppsspp_but_never_itself() -> None:
 
     assert imports.refine_refusal(refusal, member, "psp", current="retroarch").suggest_emulator == "ppsspp"
     assert imports.refine_refusal(refusal, member, "psp", current="ppsspp").suggest_emulator is None
+
+
+# ── preflight ──────────────────────────────────────────────────────────
+
+
+def _declared(members: dict[str, bytes], kinds: Optional[dict[str, str]] = None) -> bytes:
+    """Build an archive whose `.import/` members are all declared in a v2 manifest.
+
+    Args:
+        members: Member names mapped to bytes.
+        kinds: Kind overrides by name; otherwise the path's kind segment.
+
+    Returns:
+        The zip.
+    """
+    files = [
+        {"path": n, "kind": (kinds or {}).get(n, n.split("/")[1])}
+        for n in members
+        if n.startswith(saves.IMPORT_PREFIX)
+    ]
+    return _zip(members, {"version": 2, "created_at": 0, "files": files})
+
+
+class _Accepting(FakeEmulator):
+    """A fake that takes saves into `saves/` by their file name."""
+
+    save_subtrees = ("saves", "states")
+
+    def import_spec(self) -> imports.ImportSpec:
+        """Accept saves.
+
+        Returns:
+            The spec.
+        """
+        return imports.ImportSpec(kinds=(imports.KindSpec("save", ("<name>",)),))
+
+    def place_import(
+        self, member: imports.ImportMember, spec: imports.ImportSpec, ctx: imports.ImportCtx
+    ) -> Union[imports.Placement, imports.ImportRefusal]:
+        """Place the member under `saves/`.
+
+        Args:
+            member: The member.
+            spec: The spec.
+            ctx: The launch context.
+
+        Returns:
+            The placement.
+        """
+        return imports.Placement(member, PurePosixPath("saves", *member.parts))
+
+
+def _preflight(emu: FakeEmulator, body: bytes, **kwargs: Any) -> imports.PreflightResult:
+    """Run preflight over an archive the way activate does.
+
+    Args:
+        emu: The emulator.
+        body: The zip.
+        **kwargs: Overrides for preflight's keyword arguments.
+
+    Returns:
+        The result.
+    """
+    view = saves.read_archive(body)
+    args: dict[str, Any] = {
+        "rom_file": None,
+        "rom": None,
+        "memory_card_synced": False,
+        "excluded": (),
+        "resume_slot": None,
+    }
+    args.update(kwargs)
+    return imports.preflight(emu, view, body, **args)
+
+
+def test_the_default_emulator_refuses_every_import(tmp_path: Path) -> None:
+    """With no hooks overridden, every member is `kind_not_accepted` and nothing is placed."""
+    emu = FakeEmulator()
+    emu.save_root = tmp_path
+
+    result = _preflight(emu, _declared({".import/save/a.srm": b"x", ".import/state/b": b"y"}))
+
+    assert result.placements == ()
+    assert sorted((r.reason, r.member) for r in result.refusals) == [
+        ("kind_not_accepted", ".import/save/a.srm"),
+        ("kind_not_accepted", ".import/state/b"),
+    ]
+    assert result.identity == imports.SessionIdentity(None, "none")
+
+
+def test_an_accepting_emulator_gets_a_plan(tmp_path: Path) -> None:
+    """A clean import comes back placed, with no refusals."""
+    emu = _Accepting()
+    emu.save_root = tmp_path
+
+    result = _preflight(emu, _declared({".import/save/a.srm": b"x", "saves/v1.srm": b"v"}))
+
+    assert result.refusals == ()
+    assert [(p.member.name, p.dest) for p in result.placements] == [
+        (".import/save/a.srm", PurePosixPath("saves/a.srm"))
+    ]
+    assert emu.import_identity == imports.SessionIdentity(None, "none")
+
+
+def test_one_refusal_empties_the_whole_plan(tmp_path: Path) -> None:
+    """All or nothing: a single refused member leaves no placements at all."""
+    emu = _Accepting()
+    emu.save_root = tmp_path
+
+    result = _preflight(emu, _declared({".import/save/a.srm": b"x", ".import/state/s": b"y"}))
+
+    assert result.placements == ()
+    assert [(r.reason, r.member) for r in result.refusals] == [("kind_not_accepted", ".import/state/s")]
+
+
+def test_manifest_hygiene_and_v1_refusals_all_come_back_together(tmp_path: Path) -> None:
+    """Every problem in the archive is reported at once, de-duplicated."""
+    emu = _Accepting()
+    emu.save_root = tmp_path
+    body = _zip(
+        {".import/save/.hidden": b"x", ".import/save/undeclared": b"y"},
+        {"version": 2, "created_at": 0, "files": [{"path": ".import/save/.hidden", "kind": "save"}]},
+    )
+    v1 = imports.ImportRefusal("unsafe_path", "../x", None)
+
+    result = _preflight(emu, body, v1_refusals=(v1, v1))
+
+    assert sorted((r.reason, r.member) for r in result.refusals) == [
+        ("manifest_invalid", ".import/save/undeclared"),
+        ("unsafe_path", "../x"),
+        ("unsafe_path", ".import/save/.hidden"),
+    ]
+
+
+def test_a_hook_that_answers_nonsense_is_a_bug(tmp_path: Path) -> None:
+    """A `place_import` that returns neither a placement nor a refusal raises."""
+
+    class Broken(_Accepting):
+        """Answers None."""
+
+        def place_import(self, member: Any, spec: Any, ctx: Any) -> Any:
+            """Answer None.
+
+            Args:
+                member: The member.
+                spec: The spec.
+                ctx: The launch context.
+
+            Returns:
+                None.
+            """
+            return None
+
+    emu = Broken()
+    emu.save_root = tmp_path
+
+    with pytest.raises(TypeError, match="place_import"):
+        _preflight(emu, _declared({".import/save/a": b"x"}))
+
+
+def test_an_archive_level_manifest_refusal_refuses_the_whole_import(tmp_path: Path) -> None:
+    """A non-object `files[i]` refuses with no member, and still leaves nothing placed."""
+    emu = _Accepting()
+    emu.save_root = tmp_path
+    body = _zip(
+        {".import/save/a.srm": b"x"},
+        {"version": 2, "created_at": 0, "files": [{"path": ".import/save/a.srm", "kind": "save"}, 7]},
+    )
+
+    result = _preflight(emu, body)
+
+    assert result.placements == ()
+    assert [(r.reason, r.member) for r in result.refusals] == [("manifest_invalid", None)]

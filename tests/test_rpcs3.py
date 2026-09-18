@@ -2750,3 +2750,10 @@ def test_session_save_dirs_is_empty_without_a_launch(
         assert emu._session_save_dirs() == []
 
     assert "no launch" in caplog.text
+
+
+def test_restore_subtrees_is_the_whole_restore_set_before_the_clear() -> None:
+    """Preflight runs before the clear flips `_restoring`, so it must not depend on it."""
+    emu = rpcs3.Rpcs3()
+
+    assert emu.restore_subtrees == ("home/00000001/savedata", "game", "savestates")
