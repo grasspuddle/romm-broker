@@ -6,6 +6,7 @@ test_api.py, and the per-emulator hooks in test_emulators.py.
 
 import io
 import json
+import re
 import zipfile
 from pathlib import PurePosixPath
 from typing import Any, Optional
@@ -356,3 +357,173 @@ def test_normalise_member_honours_a_tighter_component_limit() -> None:
     refusal = imports.normalise_member(_info(name), _entry(name), zf=None, max_component_bytes=42)
 
     assert isinstance(refusal, imports.ImportRefusal) and refusal.reason == "unsafe_path"
+
+
+# ── the kind gate and the placement helpers ────────────────────────────
+
+
+def _member(tail: str, kind: str = "save", size: int = 4, origin: str = "unknown") -> imports.ImportMember:
+    """Build a hygienic member without an archive behind it.
+
+    Args:
+        tail: The path below `.import/<kind>/`.
+        kind: The declared kind.
+        size: The recorded size.
+        origin: The declared origin.
+
+    Returns:
+        The member.
+    """
+    name = f".import/{kind}/{tail}"
+    member = imports.normalise_member(
+        _info(name, size=size), imports.ManifestEntry(name, kind, origin), zf=None
+    )
+    assert isinstance(member, imports.ImportMember)
+    return member
+
+
+def _ctx(**kwargs: Any) -> imports.ImportCtx:
+    """Build a launch context with nothing set but what the test passes.
+
+    Args:
+        **kwargs: Fields to set.
+
+    Returns:
+        The context.
+    """
+    base: dict[str, Any] = {
+        "rom_file": None,
+        "rom": None,
+        "memory_card_synced": False,
+        "excluded": (),
+        "resume_slot": None,
+    }
+    base.update(kwargs)
+    return imports.ImportCtx(**base)
+
+
+def test_gate_kind_answers_for_a_kind_the_spec_lacks() -> None:
+    """No spec for the kind refuses it, naming the kinds that are taken."""
+    spec = imports.ImportSpec(kinds=(imports.KindSpec("memcard", ("a card",)),))
+
+    refusal = imports.gate_kind(_member("a.srm"), spec, _ctx())
+
+    assert refusal is not None
+    assert (refusal.reason, refusal.expected) == ("kind_not_accepted", "memcard")
+    empty = imports.gate_kind(_member("a.srm"), imports.ImportSpec(), _ctx())
+    assert empty is not None and empty.expected == "no imports"
+
+
+def test_gate_kind_sends_states_to_the_push_route() -> None:
+    """A push-channel emulator refuses archive states with `state_uses_push`."""
+    refusal = imports.gate_kind(
+        _member("a.p2s", kind="state"), imports.ImportSpec(state_channel="push"), _ctx()
+    )
+
+    assert refusal is not None and refusal.reason == "state_uses_push"
+
+
+def test_gate_kind_requires_a_resume_slot_when_the_kind_does() -> None:
+    """An archive-channel state without `resume_slot` is refused; with one it passes."""
+    spec = imports.ImportSpec(
+        kinds=(imports.KindSpec("state", ("s",), requires_resume_slot=True),), state_channel="archive"
+    )
+
+    refusal = imports.gate_kind(_member("a.s", kind="state"), spec, _ctx())
+
+    assert refusal is not None and refusal.reason == "resume_slot_required"
+    assert imports.gate_kind(_member("a.s", kind="state"), spec, _ctx(resume_slot=1)) is None
+
+
+_SRM = re.compile(r"[^/]+\.srm", re.I)
+
+
+def test_place_single_file_renames_into_the_subtree() -> None:
+    """A matching single file lands under the subtree with the renamer's name."""
+    dest = imports.place_single_file(
+        _member("wrap/Game (USA).srm"),
+        subtree="saves",
+        pattern=_SRM,
+        rename=lambda _: "Game.srm",
+        expected="<game>.srm",
+        allow_wrappers=("wrap",),
+    )
+
+    assert dest == PurePosixPath("saves/Game.srm")
+
+
+@pytest.mark.parametrize(
+    ("tail", "size", "reason"),
+    [
+        ("a/b/Game.srm", 4, "unrecognised_layout"),
+        ("Game.state3", 4, "source_incompatible"),
+        ("Game.state.auto", 4, "source_incompatible"),
+        ("Game.sav", 4, "unrecognised_layout"),
+        ("Game.srm", 0, "incomplete_unit"),
+    ],
+)
+def test_place_single_file_refusals(tail: str, size: int, reason: str) -> None:
+    """Nested, libretro-state, mismatched and empty members are each refused.
+
+    Args:
+        tail: The path below `.import/save/`.
+        size: The member's size.
+        reason: The expected refusal.
+    """
+    result = imports.place_single_file(
+        _member(tail, size=size),
+        subtree="saves",
+        pattern=re.compile(r".+\.(srm|state\d+|state\.auto)"),
+        rename=lambda n: n,
+        expected="<game>.srm",
+        nonempty=True,
+    )
+
+    assert isinstance(result, imports.ImportRefusal)
+    assert result.reason == reason
+
+
+def test_place_single_file_rechecks_the_renamed_name() -> None:
+    """A renamer that produces an unsafe name is caught."""
+    result = imports.place_single_file(
+        _member("Game.srm"), subtree="saves", pattern=_SRM, rename=lambda _: ".hidden", expected="x"
+    )
+
+    assert isinstance(result, imports.ImportRefusal) and result.reason == "unsafe_path"
+
+
+_SERIAL = re.compile(r"[A-Z]{4}\d{5}")
+
+
+def test_match_anchored_strips_one_wrapper_and_matches_each_level() -> None:
+    """The first matching wrapper wins, each id level must fullmatch, and a tail must remain."""
+    match = imports.match_anchored(
+        ("PSP", "SAVEDATA", "ULUS10064", "DATA.BIN"),
+        wrappers=(("PSP", "SAVEDATA"), ("SAVEDATA",), ()),
+        levels=(_SERIAL,),
+    )
+
+    assert match == imports.AnchoredMatch(("PSP", "SAVEDATA"), ("ULUS10064",), ("DATA.BIN",))
+    assert imports.match_anchored(("ULUS10064",), wrappers=((),), levels=(_SERIAL,)) is None
+    assert imports.match_anchored(("x", "ULUS10064", "a"), wrappers=((),), levels=(_SERIAL,)) is None
+
+
+def test_match_anchored_never_falls_through_to_a_later_wrapper() -> None:
+    """Once a wrapper matches, a failed id level is a miss, not a retry without it."""
+    assert (
+        imports.match_anchored(
+            ("SAVEDATA", "SAVEDATA", "x"), wrappers=(("SAVEDATA",), ()), levels=(_SERIAL,)
+        )
+        is None
+    )
+
+
+def test_build_dest_joins_or_refuses() -> None:
+    """Rewritten ids and the tail join under the subtree, and unsafe ids are refused."""
+    member = _member("x/y")
+
+    assert imports.build_dest(
+        "SAVEDATA", ("ULUS10064",), ("DATA.BIN",), member=member, expected="e"
+    ) == PurePosixPath("SAVEDATA/ULUS10064/DATA.BIN")
+    refused = imports.build_dest("SAVEDATA", ("..",), ("a",), member=member, expected="e")
+    assert isinstance(refused, imports.ImportRefusal) and refused.reason == "unsafe_path"

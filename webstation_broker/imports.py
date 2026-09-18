@@ -14,8 +14,9 @@ and `identity_source`); this module holds the shared machinery they lean on.
 """
 
 import logging
+import re
 import zipfile
-from collections.abc import Hashable, Iterable, Sequence
+from collections.abc import Callable, Hashable, Iterable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any, Literal, Optional, Union
@@ -610,3 +611,180 @@ def normalise_member(
         info=info,
         _zf=zf,
     )
+def _accepted_kinds(spec: ImportSpec) -> str:
+    """Name the kinds an emulator takes, for `expected`.
+
+    Args:
+        spec: The emulator's spec.
+
+    Returns:
+        A comma-separated list, or `no imports`.
+    """
+    return ", ".join(s.kind for s in spec.kinds) or "no imports"
+
+
+def gate_kind(member: ImportMember, spec: ImportSpec, ctx: ImportCtx) -> Optional[ImportRefusal]:
+    """Refuse a member whose kind the emulator does not take, before any hook sees it.
+
+    Args:
+        member: The member.
+        spec: The emulator's spec for this platform.
+        ctx: The launch context.
+
+    Returns:
+        `state_uses_push`, `kind_not_accepted` or `resume_slot_required`, or
+        None when the member may go on to `place_import`.
+    """
+    kind_spec = spec.kind(member.kind)
+    if kind_spec is None:
+        if member.kind == "state" and spec.state_channel == "push":
+            return ImportRefusal(
+                "state_uses_push",
+                member.name,
+                "a state PUT to /api/session/state-file after activate, with resume_slot set",
+            )
+        return ImportRefusal("kind_not_accepted", member.name, _accepted_kinds(spec))
+    if kind_spec.requires_resume_slot and ctx.resume_slot is None:
+        return ImportRefusal(
+            "resume_slot_required",
+            member.name,
+            "save.resume_slot set on the activate",
+            detail="without it the state is never loaded, and the exit dump overwrites it",
+        )
+    return None
+
+
+LIBRETRO_STATE_RE = re.compile(r"^.+\.state(\d+|\.auto)$", re.I)
+"""A RetroArch state name (`.state`, `.state3`, `.state.auto`), which no standalone loads."""
+
+
+def place_single_file(
+    member: ImportMember,
+    *,
+    subtree: str,
+    pattern: re.Pattern[str],
+    rename: Callable[[str], str],
+    expected: str,
+    allow_wrappers: tuple[str, ...] = (),
+    nonempty: bool = False,
+    refuse_libretro_states: bool = True,
+    max_component_bytes: int = 255,
+) -> Union[PurePosixPath, ImportRefusal]:
+    """Place a member that is one file in one directory.
+
+    Args:
+        member: The member.
+        subtree: The directory it lands in, relative to `save_root`.
+        pattern: What the file's name must `fullmatch`.
+        rename: The emulator's own pure renamer, called with pre-launch inputs only.
+        expected: The accepted shape, in words.
+        allow_wrappers: Leading folders (slash-joined) to strip, at most one.
+        nonempty: Whether an empty file is an `incomplete_unit`.
+        refuse_libretro_states: Whether a RetroArch state name is `source_incompatible`.
+        max_component_bytes: Longest name the destination filesystem takes.
+
+    Returns:
+        The destination, or a refusal.
+    """
+    parts = member.parts
+    for wrapper in allow_wrappers:
+        head = tuple(wrapper.split("/"))
+        if parts[: len(head)] == head and len(parts) > len(head):
+            parts = parts[len(head):]
+            break
+    if len(parts) != 1:
+        return ImportRefusal("unrecognised_layout", member.name, expected, detail="expected a single file")
+    leaf = parts[0]
+    if refuse_libretro_states and LIBRETRO_STATE_RE.fullmatch(leaf):
+        return ImportRefusal(
+            "source_incompatible", member.name, expected, detail="a RetroArch (libretro) state"
+        )
+    if not pattern.fullmatch(leaf):
+        return ImportRefusal("unrecognised_layout", member.name, expected)
+    if nonempty and member.size == 0:
+        return ImportRefusal("incomplete_unit", member.name, expected, detail="the file is empty")
+    new = rename(leaf)
+    problem = _name_problem(new) or _component_problem(new, max_component_bytes)
+    if problem:
+        return ImportRefusal("unsafe_path", member.name, expected, detail=f"renamed to {new!r}: {problem}")
+    return PurePosixPath(subtree) / new
+
+
+@dataclass(frozen=True)
+class AnchoredMatch:
+    """A member path split at its id levels.
+
+    Attributes:
+        wrapper: The leading folders that were stripped.
+        ids: One component per id level.
+        tail: Everything below the ids.
+    """
+
+    wrapper: tuple[str, ...]
+    ids: tuple[str, ...]
+    tail: tuple[str, ...]
+
+
+def match_anchored(
+    parts: Sequence[str],
+    *,
+    wrappers: Sequence[tuple[str, ...]],
+    levels: Sequence[re.Pattern[str]],
+    min_tail: int = 1,
+) -> Optional[AnchoredMatch]:
+    """Match a tree whose id folders sit at a fixed depth.
+
+    Exactly one leading wrapper is stripped: the first in `wrappers` that
+    matches, so callers list them longest first and `()` last. There is no
+    fall-through and no substring search.
+
+    Args:
+        parts: The member's components.
+        wrappers: Candidate leading folders.
+        levels: One pattern per id level, each `fullmatch`ed.
+        min_tail: Fewest components required below the ids.
+
+    Returns:
+        The split, or None when the path does not fit.
+    """
+    for wrapper in wrappers:
+        if tuple(parts[: len(wrapper)]) == tuple(wrapper):
+            rest = tuple(parts[len(wrapper):])
+            break
+    else:
+        return None
+    if len(rest) < len(levels) + min_tail:
+        return None
+    ids = rest[: len(levels)]
+    if not all(p.fullmatch(i) for p, i in zip(levels, ids)):
+        return None
+    return AnchoredMatch(tuple(wrapper), ids, rest[len(levels):])
+
+
+def build_dest(
+    subtree: str,
+    ids: Sequence[str],
+    tail: Sequence[str],
+    *,
+    member: ImportMember,
+    expected: str,
+    max_component_bytes: int = 255,
+) -> Union[PurePosixPath, ImportRefusal]:
+    """Join rewritten ids and a tail under a subtree, re-checking every component.
+
+    Args:
+        subtree: The destination subtree, relative to `save_root`.
+        ids: The id components, already rewritten by the caller.
+        tail: The components below them.
+        member: The member, for the refusal.
+        expected: The accepted shape, in words.
+        max_component_bytes: Longest name the destination filesystem takes.
+
+    Returns:
+        The destination, or an `unsafe_path` refusal.
+    """
+    for part in (*ids, *tail):
+        problem = _name_problem(part) or _component_problem(part, max_component_bytes)
+        if problem:
+            return ImportRefusal("unsafe_path", member.name, expected, detail=problem)
+    return PurePosixPath(subtree, *ids, *tail)
