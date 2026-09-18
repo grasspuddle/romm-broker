@@ -506,9 +506,11 @@ def surviving_chain_escapes(root: Path, rel: PurePosixPath, subtrees: tuple[str,
     """Whether a directory the clear leaves standing links `rel` out of the save root.
 
     Only the components from `root` down to and including the subtree
-    directory are checked: the clear empties everything below the subtree,
-    so nothing deeper survives to be a link. A component that does not
-    exist yet cannot be a link, and the ones below it cannot exist either.
+    directory are checked, which the clear always leaves standing. A link
+    below the subtree can survive too (rpcs3, and clears with `keep`, retain
+    some entries), but `_write_member`'s resolve check catches it at write
+    time, as a 422 after the clear. A component that does not exist yet
+    cannot be a link, and the ones below it cannot exist either.
 
     Args:
         root: The emulator's save data root.

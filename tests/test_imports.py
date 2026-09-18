@@ -1043,3 +1043,60 @@ def test_a_unit_missing_a_required_file_is_incomplete(tmp_path: Path) -> None:
 
     assert [(r.reason, r.member) for r in refusals] == [("incomplete_unit", ".import/save/u/a")]
     assert refusals[0].detail == "missing icon.sys; plan is partial: other members were refused"
+
+
+def test_a_file_directory_clash_between_imports_conflicts(tmp_path: Path) -> None:
+    """One member's file cannot also be another's directory, case-folded or not."""
+    spec = imports.ImportSpec(kinds=(imports.KindSpec("save", ("x",)),), case_insensitive_dest=True)
+
+    refusals = _check(tmp_path, [_placed("a", "saves/X"), _placed("b", "saves/x/y")], spec)
+
+    assert sorted(refusals) == [
+        ("destination_conflict", ".import/save/a"),
+        ("destination_conflict", ".import/save/b"),
+    ]
+
+
+@pytest.mark.parametrize(("v1", "dest"), [("saves/x", "saves/x/y"), ("saves/x/y", "saves/x")])
+def test_a_file_directory_clash_with_a_v1_member_conflicts(tmp_path: Path, v1: str, dest: str) -> None:
+    """A v1 file on an import's directory, or the other way round, refuses the import.
+
+    Args:
+        tmp_path: The per-test temporary directory.
+        v1: The v1 member's path.
+        dest: The import's destination.
+    """
+    refusals = _check(tmp_path, [_placed("a", dest)], archive_paths=frozenset({v1}))
+
+    assert refusals == [("destination_conflict", ".import/save/a")]
+
+
+def test_a_v1_only_file_directory_clash_is_left_to_the_restore(tmp_path: Path) -> None:
+    """Two v1 members that clash refuse no import member."""
+    refusals = _check(tmp_path, [_placed("a", "saves/a")], archive_paths=frozenset({"saves/x", "saves/x/y"}))
+
+    assert refusals == []
+
+
+def test_a_colliding_member_over_max_members_is_refused_once(tmp_path: Path) -> None:
+    """A member refused for a collision is not refused again for the count."""
+    spec = imports.ImportSpec(kinds=(imports.KindSpec("save", ("x",), max_members=1),))
+
+    refusals = _check(tmp_path, [_placed("a", "saves/a"), _placed("b", "saves/a")], spec)
+
+    assert sorted(refusals) == [
+        ("destination_conflict", ".import/save/a"),
+        ("destination_conflict", ".import/save/b"),
+    ]
+
+
+def test_protected_globs_fold_case_when_the_filesystem_does(tmp_path: Path) -> None:
+    """On a case-insensitive filesystem, `Saves/CONFIG.INI` is still `saves/*.ini`."""
+    spec = imports.ImportSpec(
+        kinds=(imports.KindSpec("save", ("x",)),), protected=("saves/*.ini",), case_insensitive_dest=True
+    )
+    emu = _PlanEmu(tmp_path / "root", subtrees=("saves", "Saves"))
+
+    refusals = imports.check_plan([_placed("a", "Saves/CONFIG.INI")], _ctx(), spec, emu)  # type: ignore[arg-type]
+
+    assert [(r.reason, r.member) for r in refusals] == [("protected_destination", ".import/save/a")]

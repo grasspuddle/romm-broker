@@ -1134,6 +1134,70 @@ def _v1_kind(emulator: "Emulator", rel: str) -> str:
         return "save"
 
 
+def _is_protected(rel: str, spec: ImportSpec) -> bool:
+    """Whether a destination matches one of the spec's trusted protected globs.
+
+    Args:
+        rel: The destination, as a posix path relative to `save_root`.
+        spec: The emulator's spec; its `case_insensitive_dest` folds both sides.
+
+    Returns:
+        True when any glob in `spec.protected` matches `rel`.
+    """
+    if spec.case_insensitive_dest:
+        return any(fnmatch.fnmatchcase(rel.casefold(), g.casefold()) for g in spec.protected)
+    return any(fnmatch.fnmatchcase(rel, g) for g in spec.protected)
+
+
+def _destination_conflicts(
+    plan: Sequence[Placement], archive_paths: frozenset[str], fold: bool
+) -> dict[str, str]:
+    """Find the import members whose destinations clash with another destination.
+
+    Two destinations clash when they are the same file, or when one is a
+    strict path prefix of the other, so one would need to be both a file and
+    a directory. Either way the write would fail after the working slot was
+    cleared. v1 members take part as the other side of a clash but are never
+    refused here: a v1-only clash is the restore's own business.
+
+    Args:
+        plan: The placements; each member's destination and sidecars count.
+        archive_paths: The same zip's v1 member names.
+        fold: Whether the emulator's filesystem ignores case.
+
+    Returns:
+        Each clashing import member's name, mapped to the detail for its refusal.
+    """
+    entries = [(_dest_key(PurePosixPath(p), fold), p) for p in archive_paths]
+    for placement in plan:
+        for dest in (placement.dest, *(d for d, _ in placement.sidecars)):
+            entries.append((_dest_key(dest, fold), placement.member.name))
+    files: dict[str, str] = {}
+    conflicted: dict[str, str] = {}
+
+    def refuse(owners: set[str], detail: str) -> None:
+        """Record a clash against every import member among its owners.
+
+        Args:
+            owners: The members on either side of the clash.
+            detail: Why they clash.
+        """
+        for name in sorted(owners - archive_paths):
+            conflicted.setdefault(name, detail)
+
+    for key, owner in entries:
+        first = files.setdefault(key, owner)
+        if first != owner:
+            refuse({first, owner}, "another member lands on the same file")
+    for key, owner in entries:
+        parts = key.split("/")
+        for i in range(1, len(parts)):
+            above = files.get("/".join(parts[:i]))
+            if above is not None:
+                refuse({above, owner}, "another member lands on a file this destination needs as a directory")
+    return conflicted
+
+
 def check_plan(
     plan: Sequence[Placement],
     ctx: ImportCtx,
@@ -1157,24 +1221,10 @@ def check_plan(
     """
     refusals: list[ImportRefusal] = []
     fold = spec.case_insensitive_dest
-    taken: dict[str, str] = {_dest_key(PurePosixPath(p), fold): p for p in ctx.archive_paths}
-    conflicted: set[str] = set()
-    for placement in plan:
-        for dest in (placement.dest, *(d for d, _ in placement.sidecars)):
-            key = _dest_key(dest, fold)
-            owner = taken.get(key)
-            if owner is not None and owner != placement.member.name:
-                conflicted.update({owner, placement.member.name} - ctx.archive_paths)
-            else:
-                taken[key] = placement.member.name
-    for name in sorted(conflicted):
+    conflicted = _destination_conflicts(plan, ctx.archive_paths, fold)
+    for name, detail in sorted(conflicted.items()):
         refusals.append(
-            ImportRefusal(
-                "destination_conflict",
-                name,
-                "one member per destination",
-                detail="another member lands on the same file",
-            )
+            ImportRefusal("destination_conflict", name, "one member per destination", detail=detail)
         )
 
     for kind_spec in spec.kinds:
@@ -1182,15 +1232,17 @@ def check_plan(
             continue
         mine = [p for p in plan if p.member.kind == kind_spec.kind]
         count = len(mine)
+        # A member already refused for a collision is not refused a second time.
+        over = [p for p in mine if p.member.name not in conflicted]
         if kind_spec.counts_v1:
             count += sum(
                 1
                 for rel in ctx.archive_paths
-                if not any(fnmatch.fnmatchcase(rel, g) for g in spec.protected)
+                if not _is_protected(rel, spec)
                 and _v1_kind(emulator, rel) == kind_spec.kind
             )
         if count > kind_spec.max_members:
-            for p in mine:
+            for p in over:
                 refusals.append(
                     ImportRefusal(
                         "destination_conflict",
@@ -1225,7 +1277,7 @@ def check_plan(
                 )
             )
             continue
-        if any(fnmatch.fnmatchcase(rel, g) for g in spec.protected):
+        if _is_protected(rel, spec):
             refusals.append(
                 ImportRefusal("protected_destination", name, None, detail=f"{rel} is emulator configuration")
             )
