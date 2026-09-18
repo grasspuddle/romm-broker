@@ -1100,3 +1100,60 @@ def test_protected_globs_fold_case_when_the_filesystem_does(tmp_path: Path) -> N
     refusals = imports.check_plan([_placed("a", "Saves/CONFIG.INI")], _ctx(), spec, emu)  # type: ignore[arg-type]
 
     assert [(r.reason, r.member) for r in refusals] == [("protected_destination", ".import/save/a")]
+
+
+# ── refinement ─────────────────────────────────────────────────────────
+
+
+@pytest.fixture
+def _empty_retroarch_spec(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Give RetroArch the empty `import_spec` every emulator has in Wave 1.
+
+    The base hook lands in a later task; `raising=False` keeps this stub working once it does.
+
+    Args:
+        monkeypatch: The pytest monkeypatch fixture.
+    """
+    from webstation_broker.emulators.retroarch import Retroarch
+
+    def _spec(self: Retroarch) -> imports.ImportSpec:
+        """The empty spec.
+
+        Args:
+            self: The launcher.
+
+        Returns:
+            An `ImportSpec` accepting nothing.
+        """
+        return imports.ImportSpec()
+
+    monkeypatch.setattr(Retroarch, "import_spec", _spec, raising=False)
+
+
+@pytest.mark.usefixtures("_empty_retroarch_spec")
+def test_an_unrecognised_emulatorjs_member_is_source_incompatible() -> None:
+    """A layout miss on a member from EmulatorJS or hardware says where it came from."""
+    member = _member("x.bin", origin="emulatorjs")
+    refusal = imports.ImportRefusal("unrecognised_layout", member.name, "e")
+
+    refined = imports.refine_refusal(refusal, member, "ps2", current="pcsx2")
+
+    assert refined.reason == "source_incompatible"
+    assert refined.detail is not None and "emulatorjs" in refined.detail
+
+
+def test_an_unknown_origin_keeps_its_reason() -> None:
+    """Without a declared origin, the layout miss stands as it is."""
+    member = _member("x.bin")
+    refusal = imports.ImportRefusal("unrecognised_layout", member.name, "e")
+
+    assert imports.refine_refusal(refusal, member, "ps2", current="pcsx2") == refusal
+
+
+def test_a_psp_savedata_dir_suggests_ppsspp_but_never_itself() -> None:
+    """A PSP SAVEDATA dir name points at PPSSPP, unless PPSSPP is the one refusing."""
+    member = _member("ULUS10064DATA00/DATA.BIN", origin="standalone")
+    refusal = imports.ImportRefusal("source_incompatible", member.name, "e")
+
+    assert imports.refine_refusal(refusal, member, "psp", current="retroarch").suggest_emulator == "ppsspp"
+    assert imports.refine_refusal(refusal, member, "psp", current="ppsspp").suggest_emulator is None

@@ -18,7 +18,7 @@ import logging
 import re
 import zipfile
 from collections.abc import Callable, Hashable, Iterable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any, Literal, Optional, Union
 
@@ -1322,3 +1322,69 @@ def check_plan(
 
     refusals.extend(emulator.validate_import_plan(list(plan), ctx))
     return refusals
+
+
+_PSP_SAVEDATA_DIR = re.compile(r"[A-Z]{4}\d{5}[A-Za-z0-9_]*")
+"""A PSP `SAVEDATA/` dir name: the serial plus a game-chosen suffix."""
+
+
+def suggest_for(
+    member: ImportMember, platform: Optional[str], *, current: Optional[str] = None
+) -> Optional[str]:
+    """Name an emulator on the same platform that would take this member.
+
+    Args:
+        member: The refused member.
+        platform: The session's platform slug.
+        current: The emulator that refused it, which is never suggested.
+
+    Returns:
+        An emulator name, or None.
+    """
+    from .emulators import get_emulator
+
+    suggestion: Optional[str] = None
+    if platform == "psp" and any(_PSP_SAVEDATA_DIR.fullmatch(p) for p in member.parts[:-1]):
+        suggestion = "ppsspp"
+    else:
+        ra = get_emulator("retroarch")
+        if ra is not None:
+            ra.platform = platform
+            spec = ra.import_spec()
+            if member.kind == "state" and spec.state_channel == "push":
+                suggestion = "retroarch"
+            save = spec.kind("save")
+            if member.kind == "save" and save and any(s.endswith(".srm") for s in save.shapes):
+                suggestion = "retroarch"
+    return None if suggestion == current else suggestion
+
+
+def refine_refusal(
+    refusal: ImportRefusal, member: ImportMember, platform: Optional[str], *, current: Optional[str] = None
+) -> ImportRefusal:
+    """Sharpen a hook's refusal with what the declared origin and the platform say.
+
+    `replace` re-runs `ImportRefusal.__post_init__`, so a reclassified
+    refusal is validated again.
+
+    Args:
+        refusal: The hook's refusal.
+        member: The member.
+        platform: The session's platform slug.
+        current: The emulator that refused it.
+
+    Returns:
+        The refusal, possibly reclassified or given a suggestion.
+    """
+    if refusal.reason == "unrecognised_layout" and member.origin in ("emulatorjs", "hardware"):
+        note = f"declared origin {member.origin}: this emulator cannot read that source's layout"
+        refusal = replace(
+            refusal,
+            reason="source_incompatible",
+            detail=f"{refusal.detail}; {note}" if refusal.detail else note,
+        )
+    if refusal.reason == "source_incompatible" and refusal.suggest_emulator is None:
+        suggestion = suggest_for(member, platform, current=current)
+        if suggestion:
+            refusal = replace(refusal, suggest_emulator=suggestion)
+    return refusal
