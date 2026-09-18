@@ -7,6 +7,7 @@ SUBFOLDER prefix; the RomM-facing ones require `X-Broker-Secret` when
 `BROKER_SECRET` is set.
 """
 
+import functools
 import hmac
 import logging
 import os
@@ -490,12 +491,12 @@ async def _start_session(body: ActivateIn, request: Request) -> dict[str, Any]:
     """Do the launch itself, with the session lock already held.
 
     Any emulator left behind by an earlier broker process is reaped first. The
-    save archive is located and read before the working slot is emptied, so a
-    request that turns out to name an archive that is not there leaves the slot
-    as it found it. The restore is then extracted into the emptied slot before
-    the emulator boots, so the restore rather than the previous session decides
-    what is in it, and the seat tokens are pushed to selkies once the emulator
-    is launching.
+    save archive is located, read and checked member by member before the
+    working slot is emptied, so a request naming an archive that is missing or
+    would be refused leaves the slot as it found it. The restore is then
+    written into the emptied slot before the emulator boots, so the restore
+    rather than the previous session decides what is in it, and the seat
+    tokens are pushed to selkies once the emulator is launching.
 
     Args:
         body: The launch request: emulator, rom, save data, callback and the multiplayer flag.
@@ -606,19 +607,43 @@ async def _start_session(body: ActivateIn, request: Request) -> dict[str, Any]:
                 restore_skipped,
             )
 
+    v1_plan: Optional[saves.V1Plan] = None
+    if content is not None:
+        view = await anyio.to_thread.run_sync(saves.read_archive, content)
+        if view.error is None:
+            v1_plan = await anyio.to_thread.run_sync(
+                functools.partial(
+                    saves.plan_v1,
+                    view,
+                    emulator.save_root,
+                    subtrees,
+                    excluded,
+                    include_imports=True,
+                )
+            )
+        legacy_error = view.error or (v1_plan.error if v1_plan else None)
+        if legacy_error or v1_plan is None:
+            # Refused while the working slot still holds what it held: after
+            # the clear, a bad archive would leave the player with neither.
+            log.error(
+                "activate: save archive %s refused before the clear: %s",
+                save.archive,
+                legacy_error,
+            )
+            raise HTTPException(status_code=422, detail=f"save restore failed: {legacy_error}")
+
     await anyio.to_thread.run_sync(emulator.clear_working_slot, excluded)
     # Unconditional: the hook is where a subclass drops a stale save that would
     # otherwise be picked up as this session's own, and a session with no
     # archive is exactly the one where nothing else would overwrite it.
     await anyio.to_thread.run_sync(emulator.prepare_restore)
     restore_report = None
-    if content is not None:
+    if content is not None and v1_plan is not None:
         restore_report = await anyio.to_thread.run_sync(
-            saves.extract_save_archive,
+            saves.write_save_archive,
             content,
             emulator.save_root,
-            subtrees,
-            excluded,
+            saves.ArchivePlan(v1_plan.names, v1_plan.excluded_count),
             emulator.always_restore,
         )
         if restore_report["error"]:

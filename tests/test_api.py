@@ -2276,9 +2276,9 @@ def test_a_fully_failed_restore_is_reported_not_launched(
     calls it a restore.
     """
     def _all_fail(*args: object, **kwargs: object) -> dict[str, Any]:
-        return {"written": 0, "skipped": 0, "excluded": 0, "failed": 2, "error": None}
+        return {"written": 0, "skipped": 0, "excluded": 0, "failed": 2, "imported": 0, "error": None}
 
-    monkeypatch.setattr(saves, "extract_save_archive", _all_fail)
+    monkeypatch.setattr(saves, "write_save_archive", _all_fail)
     archive = broker_dirs["imports"] / "sess-1.zip"
     archive.write_bytes(_zip({"saves/card.bin": b"stored"}))
 
@@ -2302,9 +2302,9 @@ def test_a_partially_failed_restore_is_reported_not_launched(
     though the rest of the archive landed fine.
     """
     def _partial_fail(*args: object, **kwargs: object) -> dict[str, Any]:
-        return {"written": 3, "skipped": 0, "excluded": 0, "failed": 1, "error": None}
+        return {"written": 3, "skipped": 0, "excluded": 0, "failed": 1, "imported": 0, "error": None}
 
-    monkeypatch.setattr(saves, "extract_save_archive", _partial_fail)
+    monkeypatch.setattr(saves, "write_save_archive", _partial_fail)
     archive = broker_dirs["imports"] / "sess-1.zip"
     archive.write_bytes(_zip({"saves/card.bin": b"stored"}))
 
@@ -2325,6 +2325,57 @@ def test_a_restored_archive_reports_no_skip(
 
     assert body["save_restore_skipped"] is None
     assert body["save_restore"]["error"] is None
+
+
+@pytest.mark.parametrize(
+    ("members", "patch", "fragment"),
+    [
+        (None, None, "body is not a zip archive"),
+        ({"../escape": b"x"}, None, "archive member escapes save dir"),
+        ({"elsewhere/x": b"x"}, None, "archive member outside save subtrees"),
+        ({"saves": b"x"}, None, "archive member names a save subtree"),
+        ({"saves/a": b"xxxx"}, ("SAVE_FILE_MAX_BYTES", 2), "archive exceeds size limit"),
+        ({"saves/a": b"a", "saves/b": b"b"}, ("SAVE_FILE_MAX_ENTRIES", 1), "more than 1 entries"),
+    ],
+)
+def test_a_bad_archive_is_refused_before_the_slot_is_cleared(
+    client: TestClient,
+    broker_dirs: dict[str, Path],
+    fake_emulator: list[FakeEmulator],
+    monkeypatch: pytest.MonkeyPatch,
+    members: Optional[dict[str, bytes]],
+    patch: Optional[tuple[str, int]],
+    fragment: str,
+) -> None:
+    """Every whole-archive or member problem answers 422 with the slot untouched.
+
+    Refusing after the clear left the player with an emptied slot and no
+    restore: the saves the slot held were gone before the archive was
+    ever checked.
+
+    Args:
+        client: The app client.
+        broker_dirs: The redirected ROM root and archive directories.
+        fake_emulator: The instances the registry built.
+        monkeypatch: Pytest's attribute patcher.
+        members: The archive's members, or None for a body that is not a zip.
+        patch: A limit to lower first, as `(name, value)`, or None.
+        fragment: Text the 422 detail must contain.
+    """
+    calls = _record_activate_hooks(monkeypatch)
+    if patch is not None:
+        name, value = patch
+        target = saves if name == "SAVE_FILE_MAX_BYTES" else settings
+        monkeypatch.setattr(target, name, value)
+    archive = broker_dirs["imports"] / "sess-1.zip"
+    archive.write_bytes(b"not a zip" if members is None else _zip(members))
+
+    response = _activate(client, broker_dirs, save={"archive": str(archive)})
+
+    assert response.status_code == 422
+    assert response.json()["detail"].startswith("save restore failed: ")
+    assert fragment in response.json()["detail"]
+    assert calls == []
 
 
 # ── the activate hooks run on every launch ─────────────────────────────
