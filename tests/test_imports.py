@@ -861,3 +861,185 @@ def test_serials_are_read_as_ascii_only(family: str, raw: str) -> None:
         raw: A near-serial with one non-ASCII character.
     """
     assert imports.NORMALISERS[family](raw) is None
+
+
+# ── check_plan ─────────────────────────────────────────────────────────
+
+
+class _PlanEmu:
+    """The emulator surface `check_plan` reads, and nothing more."""
+
+    def __init__(self, root: Path, subtrees: tuple[str, ...] = ("saves", "states")) -> None:
+        """Root the stand-in.
+
+        Args:
+            root: Its `save_root`.
+            subtrees: Its `restore_subtrees`.
+        """
+        self.save_root = root
+        self.restore_subtrees = subtrees
+        self.validated: list[int] = []
+
+    def save_file_kind(self, rel: str) -> str:
+        """Classify by first component.
+
+        Args:
+            rel: The member path.
+
+        Returns:
+            `state` under `states/`, else `save`.
+        """
+        return "state" if rel.startswith("states/") else "save"
+
+    def validate_import_plan(
+        self, plan: list[imports.Placement], ctx: imports.ImportCtx
+    ) -> list[imports.ImportRefusal]:
+        """Record the call and refuse nothing.
+
+        Args:
+            plan: The placements.
+            ctx: The launch context.
+
+        Returns:
+            No refusals.
+        """
+        self.validated.append(len(plan))
+        return []
+
+
+def _placed(tail: str, dest: str, kind: str = "save", size: int = 4) -> imports.Placement:
+    """Place a member at `dest`.
+
+    Args:
+        tail: The member path below `.import/<kind>/`.
+        dest: The destination.
+        kind: The declared kind.
+        size: The member's size.
+
+    Returns:
+        The placement.
+    """
+    return imports.Placement(_member(tail, kind=kind, size=size), PurePosixPath(dest))
+
+
+def _check(
+    tmp_path: Path, plan: list[imports.Placement], spec: Optional[imports.ImportSpec] = None, **ctx: Any
+) -> list[tuple[str, Optional[str]]]:
+    """Run `check_plan` and reduce each refusal to `(reason, member)`.
+
+    Args:
+        tmp_path: The per-test temporary directory; the save root lives under it.
+        plan: The placements.
+        spec: The spec, or an accepting default.
+        **ctx: Launch-context fields.
+
+    Returns:
+        The refusals, reduced.
+    """
+    spec = spec or imports.ImportSpec(kinds=(imports.KindSpec("save", ("x",)),))
+    return [
+        (r.reason, r.member)
+        for r in imports.check_plan(plan, _ctx(**ctx), spec, _PlanEmu(tmp_path / "root"))  # type: ignore[arg-type]
+    ]
+
+
+def test_a_clean_plan_passes_and_reaches_the_hook(tmp_path: Path) -> None:
+    """A plan with nothing wrong has no refusals, and the emulator's own check runs."""
+    emu = _PlanEmu(tmp_path / "root")
+    spec = imports.ImportSpec(kinds=(imports.KindSpec("save", ("x",)),))
+
+    refusals = imports.check_plan([_placed("a", "saves/a.srm")], _ctx(), spec, emu)  # type: ignore[arg-type]
+
+    assert refusals == []
+    assert emu.validated == [1]
+
+
+def test_two_members_on_one_destination_conflict(tmp_path: Path) -> None:
+    """Colliding destinations, including a case-folded collision, refuse both members."""
+    spec = imports.ImportSpec(kinds=(imports.KindSpec("save", ("x",)),), case_insensitive_dest=True)
+
+    refusals = _check(tmp_path, [_placed("a", "saves/A.srm"), _placed("b", "saves/a.srm")], spec)
+
+    assert sorted(refusals) == [
+        ("destination_conflict", ".import/save/a"),
+        ("destination_conflict", ".import/save/b"),
+    ]
+
+
+def test_a_destination_a_v1_member_also_writes_conflicts(tmp_path: Path) -> None:
+    """An import may not land where the same archive's v1 member lands."""
+    refusals = _check(tmp_path, [_placed("a", "saves/a.srm")], archive_paths=frozenset({"saves/a.srm"}))
+
+    assert refusals == [("destination_conflict", ".import/save/a")]
+
+
+def test_max_members_counts_v1_members_when_asked(tmp_path: Path) -> None:
+    """With `counts_v1`, a v1 member of the kind uses up the one allowed place."""
+    spec = imports.ImportSpec(kinds=(imports.KindSpec("state", ("x",), max_members=1, counts_v1=True),))
+
+    refusals = _check(
+        tmp_path, [_placed("a", "states/a.s", kind="state")], spec, archive_paths=frozenset({"states/old.s"})
+    )
+
+    assert refusals == [("destination_conflict", ".import/state/a")]
+
+
+@pytest.mark.parametrize(
+    ("dest", "reason", "ctx"),
+    [
+        ("saves/a", "memcard_synced_separately", {"excluded": ("saves",)}),
+        ("elsewhere/a", "unrecognised_layout", {}),
+        ("saves", "unrecognised_layout", {}),
+        ("saves/config.ini", "protected_destination", {}),
+    ],
+)
+def test_each_placement_is_checked_against_the_save_tree(
+    tmp_path: Path, dest: str, reason: str, ctx: dict[str, Any]
+) -> None:
+    """Excluded, outside, subtree-itself and protected destinations are each refused.
+
+    Args:
+        tmp_path: The per-test temporary directory.
+        dest: The destination.
+        reason: The expected refusal.
+        ctx: Launch-context fields.
+    """
+    spec = imports.ImportSpec(kinds=(imports.KindSpec("save", ("x",)),), protected=("saves/*.ini",))
+
+    assert _check(tmp_path, [_placed("a", dest)], spec, **ctx) == [(reason, ".import/save/a")]
+
+
+def test_a_destination_through_an_escaping_symlink_is_unsafe(tmp_path: Path) -> None:
+    """A subtree the clear leaves standing as a link out of the save root is never written through.
+
+    Only the chain down to the subtree survives the clear, so that is where
+    the link goes; anything deeper is emptied before the write.
+    """
+    root = tmp_path / "root"
+    root.mkdir()
+    (tmp_path / "outside").mkdir()
+    (root / "saves").symlink_to(tmp_path / "outside")
+
+    assert _check(tmp_path, [_placed("a", "saves/a")]) == [("unsafe_path", ".import/save/a")]
+
+
+def test_the_size_cap_counts_v1_bytes_too(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Imports plus v1 members over the cap refuse the whole import."""
+    monkeypatch.setattr(saves, "SAVE_FILE_MAX_BYTES", 10)
+
+    assert _check(tmp_path, [_placed("a", "saves/a", size=6)], v1_bytes=6) == [("too_large", None)]
+
+
+def test_a_unit_missing_a_required_file_is_incomplete(tmp_path: Path) -> None:
+    """Every unit must hold `unit_requires`, and a partial plan says so."""
+    spec = imports.ImportSpec(
+        kinds=(imports.KindSpec("save", ("x",)),), unit_depth=2, unit_requires=frozenset({"icon.sys"})
+    )
+    emu = _PlanEmu(tmp_path / "root")
+
+    refusals = imports.check_plan(
+        [_placed("u/a", "saves/U/a")], _ctx(), spec, emu, partial=True  # type: ignore[arg-type]
+    )
+
+    assert [(r.reason, r.member) for r in refusals] == [("incomplete_unit", ".import/save/u/a")]
+    assert refusals[0].detail == "missing icon.sys; plan is partial: other members were refused"

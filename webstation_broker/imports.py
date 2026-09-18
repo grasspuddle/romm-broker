@@ -13,6 +13,7 @@ hooks on `Emulator` (`import_spec`, `place_import`, `validate_import_plan`
 and `identity_source`); this module holds the shared machinery they lean on.
 """
 
+import fnmatch
 import logging
 import re
 import zipfile
@@ -21,7 +22,7 @@ from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any, Literal, Optional, Union
 
-from . import saves
+from . import saves, settings
 
 if TYPE_CHECKING:
     from .api import RomIn
@@ -1100,3 +1101,172 @@ def resolve_activate_identity(
     """
     ctx = ImportCtx(rom_file=rom_file, rom=rom, memory_card_synced=False, excluded=(), resume_slot=None)
     return identity_for(emulator, ctx)
+
+
+def _dest_key(dest: PurePosixPath, fold: bool) -> str:
+    """Key a destination for collision checks.
+
+    Args:
+        dest: The destination.
+        fold: Whether the emulator's filesystem ignores case.
+
+    Returns:
+        The posix path, casefolded when `fold`.
+    """
+    text = dest.as_posix()
+    return text.casefold() if fold else text
+
+
+def _v1_kind(emulator: "Emulator", rel: str) -> str:
+    """Classify a v1 member, falling back to `save` if the classifier fails.
+
+    Args:
+        emulator: The emulator.
+        rel: The member path.
+
+    Returns:
+        The member's kind.
+    """
+    try:
+        return emulator.save_file_kind(rel)
+    except Exception as exc:
+        log.warning("imports: could not classify %s, counting it as a save: %s", rel, exc)
+        return "save"
+
+
+def check_plan(
+    plan: Sequence[Placement],
+    ctx: ImportCtx,
+    spec: ImportSpec,
+    emulator: "Emulator",
+    *,
+    partial: bool = False,
+) -> list[ImportRefusal]:
+    """Check the placements as a whole: collisions, counts, the save tree, size and units.
+
+    Args:
+        plan: Every placement that survived the per-member hooks.
+        ctx: The launch context.
+        spec: The emulator's spec.
+        emulator: The emulator, for its save tree and its own plan check.
+        partial: Whether some members were already refused, which makes an
+            incomplete unit a likely knock-on rather than a real gap.
+
+    Returns:
+        Every refusal; empty when the plan may be written.
+    """
+    refusals: list[ImportRefusal] = []
+    fold = spec.case_insensitive_dest
+    taken: dict[str, str] = {_dest_key(PurePosixPath(p), fold): p for p in ctx.archive_paths}
+    conflicted: set[str] = set()
+    for placement in plan:
+        for dest in (placement.dest, *(d for d, _ in placement.sidecars)):
+            key = _dest_key(dest, fold)
+            owner = taken.get(key)
+            if owner is not None and owner != placement.member.name:
+                conflicted.update({owner, placement.member.name} - ctx.archive_paths)
+            else:
+                taken[key] = placement.member.name
+    for name in sorted(conflicted):
+        refusals.append(
+            ImportRefusal(
+                "destination_conflict",
+                name,
+                "one member per destination",
+                detail="another member lands on the same file",
+            )
+        )
+
+    for kind_spec in spec.kinds:
+        if kind_spec.max_members is None:
+            continue
+        mine = [p for p in plan if p.member.kind == kind_spec.kind]
+        count = len(mine)
+        if kind_spec.counts_v1:
+            count += sum(
+                1
+                for rel in ctx.archive_paths
+                if not any(fnmatch.fnmatchcase(rel, g) for g in spec.protected)
+                and _v1_kind(emulator, rel) == kind_spec.kind
+            )
+        if count > kind_spec.max_members:
+            for p in mine:
+                refusals.append(
+                    ImportRefusal(
+                        "destination_conflict",
+                        p.member.name,
+                        f"at most {kind_spec.max_members} {kind_spec.kind} member(s)",
+                        detail=f"{count} {kind_spec.kind} members in the archive",
+                    )
+                )
+
+    subtrees = tuple(emulator.restore_subtrees)
+    for placement in plan:
+        dest = placement.dest
+        rel = dest.as_posix()
+        name = placement.member.name
+        if saves._under(dest, ctx.excluded):
+            refusals.append(
+                ImportRefusal(
+                    "memcard_synced_separately",
+                    name,
+                    "the memory card through PUT /api/session/memory-card",
+                    detail="the card travels on its own routes this session",
+                )
+            )
+            continue
+        if rel in subtrees or not saves._under(dest, subtrees):
+            refusals.append(
+                ImportRefusal(
+                    "unrecognised_layout",
+                    name,
+                    ", ".join(subtrees),
+                    detail=f"{rel} is not inside a save subtree",
+                )
+            )
+            continue
+        if any(fnmatch.fnmatchcase(rel, g) for g in spec.protected):
+            refusals.append(
+                ImportRefusal("protected_destination", name, None, detail=f"{rel} is emulator configuration")
+            )
+            continue
+        if saves.surviving_chain_escapes(emulator.save_root, dest, subtrees):
+            refusals.append(
+                ImportRefusal(
+                    "unsafe_path", name, _SAFE_EXPECTED, detail=f"{rel} resolves outside the save root"
+                )
+            )
+
+    total_bytes = ctx.v1_bytes + sum(p.member.size + sum(len(b) for _, b in p.sidecars) for p in plan)
+    total_entries = len(ctx.archive_paths) + sum(1 + len(p.sidecars) for p in plan)
+    if total_bytes > saves.SAVE_FILE_MAX_BYTES or total_entries > settings.SAVE_FILE_MAX_ENTRIES:
+        refusals.append(
+            ImportRefusal(
+                "too_large",
+                None,
+                f"at most {saves.SAVE_FILE_MAX_BYTES} bytes in {settings.SAVE_FILE_MAX_ENTRIES} files",
+                detail=f"{total_bytes} bytes in {total_entries} files",
+            )
+        )
+
+    if spec.unit_depth and spec.unit_requires:
+        units: dict[tuple[str, ...], list[Placement]] = {}
+        for p in plan:
+            units.setdefault(p.dest.parts[: spec.unit_depth], []).append(p)
+        for members in units.values():
+            held = {PurePosixPath(*p.dest.parts[spec.unit_depth :]).as_posix() for p in members}
+            missing = sorted(spec.unit_requires - held)
+            if not missing:
+                continue
+            detail = f"missing {', '.join(missing)}"
+            if partial:
+                detail += "; plan is partial: other members were refused"
+            for p in members:
+                refusals.append(
+                    ImportRefusal(
+                        "incomplete_unit", p.member.name, ", ".join(sorted(spec.unit_requires)), detail=detail
+                    )
+                )
+
+    refusals.extend(emulator.validate_import_plan(list(plan), ctx))
+    return refusals
