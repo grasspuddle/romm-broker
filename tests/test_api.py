@@ -2800,13 +2800,15 @@ def test_an_import_nobody_accepts_is_refused_with_the_slot_untouched(
     broker_dirs: dict[str, Path],
     fake_emulator: list[FakeEmulator],
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """Every emulator refuses imports in Wave 1, before anything is cleared."""
+    """Every emulator refuses imports in Wave 1, before anything is cleared, and says so at warning."""
     calls = _record_activate_hooks(monkeypatch)
     archive = broker_dirs["imports"] / "sess-1.zip"
     archive.write_bytes(_import_zip({".import/save/a.srm": b"new", "saves/v1.srm": b"v1"}))
 
-    response = _activate(client, broker_dirs, save={"archive": str(archive)})
+    with caplog.at_level(logging.WARNING, logger="webstation_broker.api"):
+        response = _activate(client, broker_dirs, save={"archive": str(archive)})
 
     assert response.status_code == 422
     detail = response.json()["detail"]
@@ -2816,6 +2818,7 @@ def test_an_import_nobody_accepts_is_refused_with_the_slot_untouched(
     ]
     assert calls == []
     assert session.SESSION is None
+    assert [r.levelname for r in caplog.records if "refused" in r.getMessage()] == ["WARNING"]
 
 
 def test_an_accepted_import_is_placed_recorded_and_reported(
@@ -2875,16 +2878,19 @@ def test_imports_in_an_oversized_archive_get_the_structured_refusal(
     broker_dirs: dict[str, Path],
     fake_emulator: list[FakeEmulator],
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """A whole-archive limit on an archive with imports answers `too_large`, not the legacy string."""
+    """A whole-archive limit on an archive with imports answers `too_large`, logged as a refusal."""
     monkeypatch.setattr(settings, "SAVE_FILE_MAX_ENTRIES", 1)
     archive = broker_dirs["imports"] / "sess-1.zip"
     archive.write_bytes(_import_zip({".import/save/a.srm": b"x", "saves/b.srm": b"y"}))
 
-    response = _activate(client, broker_dirs, save={"archive": str(archive)})
+    with caplog.at_level(logging.WARNING, logger="webstation_broker.api"):
+        response = _activate(client, broker_dirs, save={"archive": str(archive)})
 
     assert response.status_code == 422
     assert [r["reason"] for r in response.json()["detail"]["refusals"]] == ["too_large"]
+    assert [r.levelname for r in caplog.records if "refused" in r.getMessage()] == ["WARNING"]
 
 
 def test_a_preflight_crash_is_a_500_with_the_slot_untouched(
@@ -2924,18 +2930,23 @@ def test_imports_in_an_archive_that_is_not_restored_are_refused(
     broker_dirs: dict[str, Path],
     fake_emulator: list[FakeEmulator],
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """With no subtree to restore into, imports are refused rather than silently dropped."""
+    """With no subtree to restore into, imports are refused rather than silently dropped, and logged."""
     from webstation_broker import emulators
 
     monkeypatch.setattr(emulators.REGISTRY["fake"], "save_subtrees", ())
     archive = broker_dirs["imports"] / "sess-1.zip"
     archive.write_bytes(_import_zip({".import/save/a.srm": b"x"}))
 
-    response = _activate(client, broker_dirs, save={"archive": str(archive)})
+    with caplog.at_level(logging.WARNING, logger="webstation_broker.api"):
+        response = _activate(client, broker_dirs, save={"archive": str(archive)})
 
     assert response.status_code == 422
     assert [r["reason"] for r in response.json()["detail"]["refusals"]] == ["kind_not_accepted"]
+    refused = [r for r in caplog.records if "refused" in r.getMessage()]
+    assert [r.levelname for r in refused] == ["WARNING"]
+    assert "kind_not_accepted" in refused[0].getMessage()
 
 
 def test_imports_in_an_archive_held_back_by_the_card_sync_are_refused(

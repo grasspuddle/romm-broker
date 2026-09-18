@@ -665,6 +665,12 @@ async def _start_session(body: ActivateIn, request: Request) -> dict[str, Any]:
                 # Dropping a declared import is exactly the silent loss the
                 # refusal list exists to prevent.
                 reason = "memcard_synced_separately" if excluded else "kind_not_accepted"
+                log.warning(
+                    "activate: save archive %s refused: %d import member(s) are %s",
+                    save.archive,
+                    len(skipped.imports),
+                    reason,
+                )
                 raise HTTPException(
                     status_code=422,
                     detail=imports.refusal_body(
@@ -696,7 +702,7 @@ async def _start_session(body: ActivateIn, request: Request) -> dict[str, Any]:
         else:
             folded = imports.fold_v1_problems(view.error, v1_plan)
             if view.error is not None:
-                log.error("activate: import archive %s refused: %s", save.archive, view.error)
+                log.warning("activate: import archive %s refused: %s", save.archive, view.error)
                 raise HTTPException(status_code=422, detail=imports.refusal_body(folded))
             try:
                 preflight = await anyio.to_thread.run_sync(

@@ -267,6 +267,18 @@ def test_manifest_v2_reads_an_odd_or_missing_origin_as_unknown(extra: dict[str, 
     assert entries[".import/save/a"].origin == "unknown"
 
 
+def test_the_logged_import_block_is_bounded(caplog: pytest.LogCaptureFixture) -> None:
+    """RomM's free-form `import` block is logged, but never more than 200 characters of it."""
+    manifest = {"version": 2, "files": [], "import": {"note": "x" * 5000}}
+
+    with caplog.at_level("INFO", logger="webstation_broker.imports"):
+        imports.parse_manifest_v2(manifest, [".import/save/a"])
+
+    [line] = [r.getMessage() for r in caplog.records if "import block" in r.getMessage()]
+    assert "{'note': 'xxx" in line
+    assert len(line) < 300
+
+
 # ── hygiene ────────────────────────────────────────────────────────────
 
 

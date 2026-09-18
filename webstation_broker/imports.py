@@ -462,7 +462,7 @@ def parse_manifest_v2(
     if not isinstance(files, list):
         return {}, [_manifest_invalid(None, "manifest files is not a list")]
     if "import" in manifest:
-        log.info("imports: manifest import block: %r", manifest["import"])
+        log.info("imports: manifest import block: %.200r", manifest["import"])
 
     present = set(import_names)
     entries: dict[str, ManifestEntry] = {}
