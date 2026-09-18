@@ -240,3 +240,22 @@ def test_a_non_object_entry_is_refused_at_archive_level() -> None:
     )
 
     assert [(r.reason, r.member) for r in refusals] == [("manifest_invalid", None)]
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [{"origin": []}, {"origin": {}}, {}],
+    ids=["list-origin", "dict-origin", "no-origin"],
+)
+def test_manifest_v2_reads_an_odd_or_missing_origin_as_unknown(extra: dict[str, Any]) -> None:
+    """An origin that is not a known string, or no origin at all, reads as `unknown` and is not refused.
+
+    Args:
+        extra: The origin field to add to the entry, if any.
+    """
+    entries, refusals = imports.parse_manifest_v2(
+        _v2({"path": ".import/save/a", "kind": "save", **extra}), [".import/save/a"]
+    )
+
+    assert refusals == []
+    assert entries[".import/save/a"].origin == "unknown"

@@ -495,7 +495,7 @@ def parse_manifest_v2(
             refusals.append(_manifest_invalid(path, "declared but not in the archive"))
             continue
         origin = entry.get("origin", "unknown")
-        if origin not in _ORIGINS:
+        if not isinstance(origin, str) or origin not in _ORIGINS:
             log.info("imports: %s declares unknown origin %r, reading it as unknown", path, origin)
             origin = "unknown"
         entries[path] = ManifestEntry(path, kind, origin)
