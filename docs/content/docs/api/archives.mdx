@@ -54,8 +54,12 @@ An archive is a zip file of the emulator's save subtrees (the specific
 folders inside its save data that actually hold saves and states). The
 paths inside the zip are relative to the emulator's save root folder: for
 PCSX2, that means paths like `memcards/...` and `sstates/...`. When an
-archive is restored, any file outside those folders is skipped, and a file
-already on disk is never overwritten by an older copy from the archive.
+archive is restored, a file already on disk is never overwritten by an
+older copy from the archive. A file outside those folders refuses the whole
+restore before anything is cleared (it is listed as `unrecognised_layout` in
+an archive with imports), and so does an encrypted file or one with a
+compression method the broker cannot read. Only a synced memory card in an
+older archive is skipped.
 That's what keeps an old archive from rolling a session backward. When an
 archive is built at exit, only the files that changed since launch go into
 it, so an archive holds just the changes, not a full copy of the save data.

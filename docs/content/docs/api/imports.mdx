@@ -47,12 +47,17 @@ any member is refused, nothing is written and activate answers 422:
 ```
 
 At most 200 refusals are listed; `truncated` counts the rest. A crash while
-placing imports answers 500 with `{"error": "import_preflight_failed"}`, still
-before anything is cleared.
+checking imports answers 500 with
+`{"detail": {"error": "import_preflight_failed"}}`, still before anything is
+cleared.
 
-**No emulator accepts imports yet.** The framework is in place and every
-emulator refuses each member with `kind_not_accepted`. Emulators opt in
-one at a time.
+**No emulator accepts imports yet.** The framework is in place, but no
+emulator accepts any kind, so an import member that passes the structural
+checks is refused with `kind_not_accepted`. The structural checks still run
+first: a bad manifest answers `manifest_invalid` and a bad path answers
+`unsafe_path`. When the session syncs the memory card on its own routes, the
+archive is not restored at all and every import member answers
+`memcard_synced_separately`. Emulators opt in one at a time.
 
 The refusals are sorted by member, then by reason; an archive-level refusal
 has `member: null` and sorts first. In an archive that holds imports, a
@@ -94,6 +99,10 @@ it was asked about, the accepted `kinds` (each with its `shapes`,
 answers 403 without it. An unrecognised emulator answers 422
 `unknown emulator: <name>`.
 
+A 404 from this route means the broker predates imports. Never send
+`.import/` members to that broker: it cannot place them, and they would
+never reach the emulator.
+
 Today every emulator answers `kinds: []` and `state_channel: "none"`.
 
 For an emulator author, the answer comes from `Emulator.import_spec()`. It
@@ -104,14 +113,16 @@ accepts nothing.
 
 ### `manifest_invalid` [#manifest-invalid]
 The archive holds `.import/` members but no usable version 2 manifest, or a
-member is undeclared, declared twice, or declared as a kind that does not
-match its path.
+member is undeclared, declared twice, declared but absent from the archive,
+declared with a kind other than `save`, `state` or `memcard`, or declared as
+a kind that does not match its path.
 
 ### `unsafe_path` [#unsafe-path]
 A path component is empty, hidden, `..`, `__MACOSX` or too long, or the name
 has a backslash, colon or control character, or it is non-ASCII without
-the zip UTF-8 flag. Also used when the destination would resolve outside the
-save root through a symlink.
+the zip UTF-8 flag. Also used when a member is encrypted or uses a
+compression method the broker cannot read, and when the destination would
+resolve outside the save root through a symlink.
 
 ### `kind_not_accepted` [#kind-not-accepted]
 This emulator does not take this kind. `expected` lists the kinds it does.
@@ -139,7 +150,9 @@ The data is right but in a container this emulator does not read directly.
 The member's path does not match any shape this emulator accepts.
 
 ### `shape_unverified` [#shape-unverified]
-The file's contents do not look like what its name claims.
+The shape is recognised, but loading it is unproven or blocked by a known
+broker limit, so the broker refuses rather than place a file that silently
+won't load.
 
 ### `incomplete_unit` [#incomplete-unit]
 A save that spans several files is missing one, or a file is empty. When
