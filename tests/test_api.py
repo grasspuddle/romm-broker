@@ -14,15 +14,15 @@ import subprocess
 import time
 import zipfile
 from collections.abc import Callable
-from pathlib import Path
-from typing import Any, Optional
+from pathlib import Path, PurePosixPath
+from typing import Any, Optional, Union
 
 import httpx
 import pytest
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketState
 
-from webstation_broker import api, callback, saves, screenshot, selkies, session, settings
+from webstation_broker import api, callback, imports, saves, screenshot, selkies, session, settings
 from webstation_broker.app import create_app
 from webstation_broker.emulators import base, rpcs3, shadps4
 
@@ -2615,3 +2615,207 @@ def test_activate_takes_romm_identity_fields_and_never_refuses_a_layout(
     assert "folder-sideways" in caplog.text
     assert session.SESSION is not None
     assert session.SESSION["rom"]["title_id"] == "SLUS-20001"
+
+
+# ── declared imports on activate ───────────────────────────────────────
+
+
+def _import_zip(members: dict[str, bytes]) -> bytes:
+    """Build an archive declaring each `.import/` member by its path's kind.
+
+    Args:
+        members: Member names mapped to bytes.
+
+    Returns:
+        The zip.
+    """
+    files = [{"path": n, "kind": n.split("/")[1]} for n in members if n.startswith(".import/")]
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        for name, data in members.items():
+            zf.writestr(name, data)
+        zf.writestr(saves.MANIFEST_NAME, json.dumps({"version": 2, "created_at": 0, "files": files}))
+    return buf.getvalue()
+
+
+def _accept_save_imports(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Have the fake emulator accept `save` imports, placing each under `saves/`.
+
+    Args:
+        monkeypatch: Pytest's attribute patcher, undone when the test ends.
+    """
+
+    def spec(self: FakeEmulator) -> imports.ImportSpec:
+        """Accept saves.
+
+        Args:
+            self: The emulator.
+
+        Returns:
+            The spec.
+        """
+        return imports.ImportSpec(kinds=(imports.KindSpec("save", ("<name>.srm",)),))
+
+    def place(
+        self: FakeEmulator, member: imports.ImportMember, spec: imports.ImportSpec, ctx: imports.ImportCtx
+    ) -> Union[imports.Placement, imports.ImportRefusal]:
+        """Place the member under `saves/`.
+
+        Args:
+            self: The emulator.
+            member: The member.
+            spec: The spec.
+            ctx: The launch context.
+
+        Returns:
+            The placement.
+        """
+        return imports.Placement(member, PurePosixPath("saves", *member.parts))
+
+    monkeypatch.setattr(FakeEmulator, "import_spec", spec)
+    monkeypatch.setattr(FakeEmulator, "place_import", place)
+
+
+def test_an_import_nobody_accepts_is_refused_with_the_slot_untouched(
+    client: TestClient,
+    broker_dirs: dict[str, Path],
+    fake_emulator: list[FakeEmulator],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every emulator refuses imports in Wave 1, before anything is cleared."""
+    calls = _record_activate_hooks(monkeypatch)
+    archive = broker_dirs["imports"] / "sess-1.zip"
+    archive.write_bytes(_import_zip({".import/save/a.srm": b"new", "saves/v1.srm": b"v1"}))
+
+    response = _activate(client, broker_dirs, save={"archive": str(archive)})
+
+    assert response.status_code == 422
+    detail = response.json()["detail"]
+    assert detail["error"] == "import_refused"
+    assert [(r["reason"], r["member"]) for r in detail["refusals"]] == [
+        ("kind_not_accepted", ".import/save/a.srm")
+    ]
+    assert calls == []
+    assert session.SESSION is None
+
+
+def test_an_accepted_import_is_placed_recorded_and_reported(
+    client: TestClient,
+    broker_dirs: dict[str, Path],
+    fake_emulator: list[FakeEmulator],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A placed import is written, listed in the report, and remembered for the exit dump."""
+    _accept_save_imports(monkeypatch)
+    archive = broker_dirs["imports"] / "sess-1.zip"
+    archive.write_bytes(_import_zip({".import/save/a.srm": b"new"}))
+
+    response = _activate(client, broker_dirs, save={"archive": str(archive)})
+
+    assert response.status_code == 200
+    report = response.json()["save_restore"]
+    assert report["imported"] == [{"member": ".import/save/a.srm", "dest": "saves/a.srm", "sidecars": []}]
+    assert (fake_emulator[0].save_root / "saves" / "a.srm").read_bytes() == b"new"
+    assert session.SESSION is not None
+    assert session.SESSION["import_paths"] == ["saves/a.srm"]
+    assert session.SESSION["import_identity"] == {"value": None, "source": "none"}
+
+
+def test_a_placed_import_the_game_never_touches_still_ships_in_the_exit_dump(
+    client: TestClient,
+    broker_dirs: dict[str, Path],
+    fake_emulator: list[FakeEmulator],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`import_paths` is recorded in the dump walk's own form, so the file survives the mtime baseline."""
+    monkeypatch.setattr(settings, "DEV_MODE", True)
+    _accept_save_imports(monkeypatch)
+    archive = broker_dirs["imports"] / "sess-1.zip"
+    archive.write_bytes(_import_zip({".import/save/a.srm": b"new"}))
+    assert _activate(client, broker_dirs, save={"archive": str(archive)}).status_code == 200
+
+    body = client.post(f"{API}/session/exit").json()
+
+    assert [f["path"] for f in body["save_dump"]["files"]] == ["saves/a.srm"]
+    dumped = Path(body["upload"]["would_send"]["archive_path"])
+    with zipfile.ZipFile(dumped) as zf:
+        assert zf.read("saves/a.srm") == b"new"
+
+
+def test_imports_in_an_oversized_archive_get_the_structured_refusal(
+    client: TestClient,
+    broker_dirs: dict[str, Path],
+    fake_emulator: list[FakeEmulator],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A whole-archive limit on an archive with imports answers `too_large`, not the legacy string."""
+    monkeypatch.setattr(settings, "SAVE_FILE_MAX_ENTRIES", 1)
+    archive = broker_dirs["imports"] / "sess-1.zip"
+    archive.write_bytes(_import_zip({".import/save/a.srm": b"x", "saves/b.srm": b"y"}))
+
+    response = _activate(client, broker_dirs, save={"archive": str(archive)})
+
+    assert response.status_code == 422
+    assert [r["reason"] for r in response.json()["detail"]["refusals"]] == ["too_large"]
+
+
+def test_a_preflight_crash_is_a_500_with_the_slot_untouched(
+    client: TestClient,
+    broker_dirs: dict[str, Path],
+    fake_emulator: list[FakeEmulator],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A bug in a hook fails the activate loudly, before the clear."""
+    calls = _record_activate_hooks(monkeypatch)
+
+    def boom(*args: object, **kwargs: object) -> imports.PreflightResult:
+        """Fail like a buggy hook.
+
+        Args:
+            *args: Ignored.
+            **kwargs: Ignored.
+
+        Raises:
+            RuntimeError: Always.
+        """
+        raise RuntimeError("hook bug")
+
+    monkeypatch.setattr(imports, "preflight", boom)
+    archive = broker_dirs["imports"] / "sess-1.zip"
+    archive.write_bytes(_import_zip({".import/save/a.srm": b"x"}))
+
+    response = _activate(client, broker_dirs, save={"archive": str(archive)})
+
+    assert response.status_code == 500
+    assert response.json()["detail"] == {"error": "import_preflight_failed"}
+    assert calls == []
+
+
+def test_imports_in_an_archive_that_is_not_restored_are_refused(
+    client: TestClient,
+    broker_dirs: dict[str, Path],
+    fake_emulator: list[FakeEmulator],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With no subtree to restore into, imports are refused rather than silently dropped."""
+    from webstation_broker import emulators
+
+    monkeypatch.setattr(emulators.REGISTRY["fake"], "save_subtrees", ())
+    archive = broker_dirs["imports"] / "sess-1.zip"
+    archive.write_bytes(_import_zip({".import/save/a.srm": b"x"}))
+
+    response = _activate(client, broker_dirs, save={"archive": str(archive)})
+
+    assert response.status_code == 422
+    assert [r["reason"] for r in response.json()["detail"]["refusals"]] == ["kind_not_accepted"]
+
+
+def test_a_plain_launch_records_no_imports(
+    client: TestClient, broker_dirs: dict[str, Path], fake_emulator: list[FakeEmulator]
+) -> None:
+    """Without an archive the session still gets an identity and an empty import list."""
+    assert _activate(client, broker_dirs).status_code == 200
+
+    assert session.SESSION is not None
+    assert session.SESSION["import_paths"] == []
+    assert session.SESSION["import_identity"] == {"value": None, "source": "none"}
