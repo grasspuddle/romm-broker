@@ -10,7 +10,7 @@ import logging
 import os
 import time
 import zipfile
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Optional
 
 import pytest
@@ -712,3 +712,123 @@ def test_read_archive_reports_an_unusable_manifest_beside_imports(
     assert view.error is None
     assert view.manifest is None
     assert fragment in (view.manifest_error or "")
+
+
+# ── plan_v1: every v1 check, with nothing written ──────────────────────
+
+
+def _plan(tmp_path: Path, members: dict[str, bytes], **kwargs: Any) -> saves.V1Plan:
+    """Plan a v1 restore of `members` into `tmp_path / "root"`.
+
+    Args:
+        tmp_path: The per-test temporary directory.
+        members: Archive member names mapped to their bytes.
+        **kwargs: Passed through to `plan_v1`.
+
+    Returns:
+        The plan.
+    """
+    root = tmp_path / "root"
+    root.mkdir(exist_ok=True)
+    view = saves.read_archive(_zip(members))
+    return saves.plan_v1(view, root, ("GC", "states"), kwargs.pop("excluded", ()), **kwargs)
+
+
+def test_plan_v1_accepts_members_under_the_subtrees(tmp_path: Path) -> None:
+    """Members under a subtree are planned in zip order and nothing is written."""
+    plan = _plan(tmp_path, {"GC/a.raw": b"a", "states/b.s": b"b"})
+
+    assert plan.names == ("GC/a.raw", "states/b.s")
+    assert plan.problems == ()
+    assert plan.error is None
+    assert not (tmp_path / "root" / "GC").exists()
+
+
+@pytest.mark.parametrize(
+    ("name", "message", "kind"),
+    [
+        ("../x", "archive member escapes save dir: ../x", "escapes"),
+        ("/abs", "archive member escapes save dir: /abs", "escapes"),
+        ("GC", "archive member names a save subtree: GC", "names_subtree"),
+        ("other/x", "archive member outside save subtrees: other/x", "outside"),
+    ],
+)
+def test_plan_v1_keeps_the_legacy_messages(tmp_path: Path, name: str, message: str, kind: str) -> None:
+    """Each check keeps today's wording, and the problem carries its kind.
+
+    Args:
+        tmp_path: The per-test temporary directory.
+        name: The offending member name.
+        message: The legacy error text.
+        kind: The problem kind recorded beside it.
+    """
+    plan = _plan(tmp_path, {name: b"x"})
+
+    assert plan.problems == ((name, message, kind),)
+    assert plan.error == message
+
+
+def test_plan_v1_collects_every_problem(tmp_path: Path) -> None:
+    """All problems are collected, not just the first, and `error` is the first."""
+    plan = _plan(tmp_path, {"../x": b"x", "other/y": b"y", "GC/ok": b"z"})
+
+    assert [p[2] for p in plan.problems] == ["escapes", "outside"]
+    assert plan.names == ("GC/ok",)
+    assert plan.error == "archive member escapes save dir: ../x"
+
+
+def test_plan_v1_counts_excluded_members(tmp_path: Path) -> None:
+    """A member under an excluded subtree is counted and dropped."""
+    root = tmp_path / "root"
+    root.mkdir()
+    view = saves.read_archive(_zip({"card/a": b"a", "GC/b": b"b"}))
+
+    plan = saves.plan_v1(view, root, ("GC",), ("card",))
+
+    assert plan.excluded_count == 1
+    assert plan.names == ("GC/b",)
+
+
+def test_plan_v1_skips_imports_unless_asked(tmp_path: Path) -> None:
+    """`.import/` members are left out, unless the legacy path asks for them."""
+    members = {"GC/a": b"a", ".import/save/x": b"x"}
+
+    assert _plan(tmp_path, members).problems == ()
+    legacy = _plan(tmp_path, members, include_imports=True)
+    assert legacy.error == "archive member outside save subtrees: .import/save/x"
+
+
+def test_plan_v1_refuses_a_subtree_whose_link_leaves_the_root(tmp_path: Path) -> None:
+    """A subtree that is a symlink out of the root is refused before any clear."""
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / "states").symlink_to(outside)
+
+    plan = _plan(tmp_path, {"states/a.s": b"a"})
+
+    assert plan.problems == (
+        ("states/a.s", "archive member resolves outside save dir: states/a.s", "symlink"),
+    )
+
+
+def test_surviving_chain_escapes_ignores_links_that_stay_inside(tmp_path: Path) -> None:
+    """A link that resolves inside the root is harmless, and a missing chain cannot escape."""
+    root = tmp_path / "root"
+    (root / "real").mkdir(parents=True)
+    (root / "GC").symlink_to(root / "real")
+
+    assert saves.surviving_chain_escapes(root, PurePosixPath("GC/a"), ("GC",)) is False
+    assert saves.surviving_chain_escapes(root, PurePosixPath("states/a"), ("states",)) is False
+
+
+def test_surviving_chain_escapes_checks_every_level_of_a_nested_subtree(tmp_path: Path) -> None:
+    """A link part-way down a multi-level subtree is caught, using the longest match."""
+    outside = tmp_path / "outside"
+    (outside / "b").mkdir(parents=True)
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / "a").symlink_to(outside)
+
+    assert saves.surviving_chain_escapes(root, PurePosixPath("a/b/f"), ("a", "a/b")) is True

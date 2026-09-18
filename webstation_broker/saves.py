@@ -10,11 +10,12 @@ import json
 import logging
 import os
 import secrets
+import stat
 import time
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Literal, Optional
 
 from . import settings
 
@@ -440,7 +441,7 @@ def _under(member: PurePosixPath, subtrees: tuple[str, ...]) -> bool:
     """Whether an archive member path lies strictly inside one of the subtrees.
 
     A member that is a subtree name rather than a path below one is refused
-    outright by `extract_save_archive` before it reaches here, so equality
+    outright by `plan_v1` before it reaches here, so equality
     never has to count as inside.
 
     Args:
@@ -452,6 +453,152 @@ def _under(member: PurePosixPath, subtrees: tuple[str, ...]) -> bool:
     """
     rel = member.as_posix()
     return any(rel.startswith(sub + "/") for sub in subtrees)
+
+
+V1Problem = Literal["escapes", "names_subtree", "outside", "symlink"]
+"""Why a v1 member was refused, so a v2 caller can fold it into a refusal code."""
+
+
+@dataclass(frozen=True)
+class V1Plan:
+    """What a v1 restore would write, decided before the working slot is cleared.
+
+    Attributes:
+        names: Member names to write, in zip order.
+        excluded_count: Members dropped because they sit under an excluded subtree.
+        problems: Every refused member as `(name, legacy message, kind)`, in zip order.
+    """
+
+    names: tuple[str, ...]
+    excluded_count: int
+    problems: tuple[tuple[str, str, V1Problem], ...]
+
+    @property
+    def error(self) -> Optional[str]:
+        """The first problem's legacy message, or None when there is none."""
+        return self.problems[0][1] if self.problems else None
+
+
+def _longest_subtree(rel: str, subtrees: tuple[str, ...]) -> Optional[str]:
+    """The deepest subtree `rel` sits strictly inside.
+
+    Args:
+        rel: A posix path relative to the save root.
+        subtrees: Subtree names to test.
+
+    Returns:
+        The longest matching subtree, or None.
+    """
+    hits = [s for s in subtrees if rel.startswith(s + "/")]
+    return max(hits, key=len) if hits else None
+
+
+def surviving_chain_escapes(root: Path, rel: PurePosixPath, subtrees: tuple[str, ...]) -> bool:
+    """Whether a directory the clear leaves standing links `rel` out of the save root.
+
+    Only the components from `root` down to and including the subtree
+    directory are checked: the clear empties everything below the subtree,
+    so nothing deeper survives to be a link. A component that does not
+    exist yet cannot be a link, and the ones below it cannot exist either.
+
+    Args:
+        root: The emulator's save data root.
+        rel: The destination, relative to `root`.
+        subtrees: The subtrees `rel` may sit under; the longest match is used.
+
+    Returns:
+        True when a surviving component is a symlink that resolves outside
+        `root`, or when a component cannot be inspected. Refusing is the
+        choice that cannot write outside the save root.
+    """
+    sub = _longest_subtree(rel.as_posix(), subtrees)
+    if sub is None:
+        return False
+    try:
+        root_real = root.resolve()
+    except (OSError, RuntimeError):
+        return True
+    path = root
+    for part in PurePosixPath(sub).parts:
+        path = path / part
+        try:
+            st = path.lstat()
+        except FileNotFoundError:
+            return False
+        except OSError:
+            return True
+        if stat.S_ISLNK(st.st_mode):
+            try:
+                target = path.resolve()
+            except (OSError, RuntimeError):
+                return True
+            if not target.is_relative_to(root_real):
+                return True
+    return False
+
+
+def plan_v1(
+    view: ArchiveView,
+    root: Path,
+    subtrees: tuple[str, ...],
+    excluded: tuple[str, ...],
+    *,
+    include_imports: bool = False,
+) -> V1Plan:
+    """Run every per-member restore check on the v1 members, writing nothing.
+
+    The checks and their messages are the ones restores have always used,
+    in the same order, followed by a new one: a member whose surviving
+    parent chain links out of `root` is refused here rather than failing to
+    write after the slot has already been cleared.
+
+    Args:
+        view: The archive, from `read_archive`.
+        root: The emulator's save data root.
+        subtrees: Subdirectory names members may be restored into.
+        excluded: Subdirectory names whose members are counted and dropped.
+        include_imports: Also check `.import/` members as if they were v1,
+            merged back in zip order, which is how the legacy
+            `extract_save_archive` path refuses them.
+
+    Returns:
+        The plan, with every problem collected.
+    """
+    infos = list(view.v1)
+    if include_imports and view.imports:
+        infos = sorted(infos + list(view.imports), key=lambda i: i.header_offset)
+    names: list[str] = []
+    problems: list[tuple[str, str, V1Problem]] = []
+    excluded_count = 0
+    escapes_by_subtree: dict[Optional[str], bool] = {}
+    for info in infos:
+        name = info.filename
+        member = PurePosixPath(name)
+        if member.is_absolute() or ".." in member.parts:
+            problems.append((name, f"archive member escapes save dir: {name}", "escapes"))
+            continue
+        rel = member.as_posix()
+        if rel in subtrees or rel in excluded:
+            # A save file always sits inside a subtree, never is one: a dump
+            # only ever walks below `root / sub`. Writing such a member would
+            # leave a plain file where the emulator expects its save
+            # directory, and the mkdir on its next launch would fail.
+            problems.append((name, f"archive member names a save subtree: {name}", "names_subtree"))
+            continue
+        if _under(member, excluded):
+            excluded_count += 1
+            continue
+        if not _under(member, subtrees):
+            problems.append((name, f"archive member outside save subtrees: {name}", "outside"))
+            continue
+        sub = _longest_subtree(rel, subtrees)
+        if sub not in escapes_by_subtree:
+            escapes_by_subtree[sub] = surviving_chain_escapes(root, member, subtrees)
+        if escapes_by_subtree[sub]:
+            problems.append((name, f"archive member resolves outside save dir: {name}", "symlink"))
+            continue
+        names.append(name)
+    return V1Plan(tuple(names), excluded_count, tuple(problems))
 
 
 def _guard_exempt(always_restore: Optional[Callable[[str], bool]], rel: str) -> bool:
