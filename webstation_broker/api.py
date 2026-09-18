@@ -1834,6 +1834,44 @@ def _memory_card(name: str, platform: Optional[str]) -> tuple[Path, Optional[str
     return card, emulator.memory_card_marker
 
 
+@router.get("/api/session/import-spec")
+async def get_import_spec(
+    emulator: str = Query(...),
+    platform: Optional[str] = Query(default=None),
+    x_broker_secret: Optional[str] = Header(default=None),
+) -> dict[str, Any]:
+    """Tell RomM what an emulator accepts as a declared import, before it builds an archive.
+
+    Args:
+        emulator: The emulator's name.
+        platform: The platform slug, for an emulator whose spec depends on it.
+        x_broker_secret: The shared secret RomM sends; required when `BROKER_SECRET` is set.
+
+    Returns:
+        The API and manifest versions, the emulator's spec, its state slot
+        (None when it has no states) and every refusal code.
+
+    Raises:
+        HTTPException: 403 on a bad secret; 422 for an unknown emulator.
+    """
+    _check_secret(x_broker_secret)
+    inst = get_emulator(emulator)
+    if inst is None:
+        log.debug("import-spec: unknown emulator: %s", emulator)
+        raise HTTPException(status_code=422, detail=f"unknown emulator: {emulator}")
+    inst.platform = platform
+    spec = inst.import_spec()
+    return {
+        "import_api": 1,
+        "manifest_version": 2,
+        "emulator": inst.name,
+        "platform": platform,
+        **spec.as_dict(),
+        "state_slot": inst.state_slot if inst.supports_states else None,
+        "reasons": sorted(imports.REASONS),
+    }
+
+
 @router.get("/api/session/memory-card")
 async def get_memory_card(
     emulator: str = Query(...),

@@ -2853,3 +2853,42 @@ def test_a_plain_launch_records_no_imports(
     assert session.SESSION is not None
     assert session.SESSION["import_paths"] == []
     assert session.SESSION["import_identity"] == {"value": None, "source": "none"}
+
+
+def test_import_spec_describes_what_an_emulator_takes(
+    client: TestClient, fake_emulator: list[FakeEmulator]
+) -> None:
+    """The discovery route answers the spec, the state slot and every refusal code."""
+    response = client.get(f"{API}/session/import-spec", params={"emulator": "fake", "platform": "ps2"})
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "import_api": 1,
+        "manifest_version": 2,
+        "emulator": "fake",
+        "platform": "ps2",
+        "kinds": [],
+        "state_channel": "none",
+        "card_subtree": None,
+        "state_slot": 3,
+        "reasons": sorted(imports.REASONS),
+    }
+    assert fake_emulator[0].platform == "ps2"
+
+
+def test_import_spec_refuses_an_unknown_emulator(client: TestClient) -> None:
+    """An unknown emulator is a 422, as on the memory-card routes."""
+    response = client.get(f"{API}/session/import-spec", params={"emulator": "gameboy"})
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == "unknown emulator: gameboy"
+
+
+def test_import_spec_requires_the_broker_secret(
+    secret_client: TestClient, fake_emulator: list[FakeEmulator]
+) -> None:
+    """The route is gated like every other RomM-facing route."""
+    assert secret_client.get(f"{API}/session/import-spec", params={"emulator": "fake"}).status_code == 403
+
+    secret_client.headers["X-Broker-Secret"] = "s3cret"
+    assert secret_client.get(f"{API}/session/import-spec", params={"emulator": "fake"}).status_code == 200
