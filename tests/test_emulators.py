@@ -619,12 +619,29 @@ def test_no_emulator_accepts_imports_yet(name: str) -> None:
 
 
 @pytest.mark.parametrize("name", sorted(emulators.REGISTRY))
-def test_every_emulator_refuses_a_declared_import(name: str, tmp_path: Path) -> None:
+def test_no_emulator_overrides_an_import_hook_yet(name: str) -> None:
+    """Every emulator inherits the base import hooks, which refuse everything.
+
+    The behavioural tests only reach the kind gate, so an override past it, or a
+    platform-dependent spec, would slip by them. Wave 2 relaxes this test per
+    emulator as it gains real hooks.
+
+    Args:
+        name: The registry name.
+    """
+    emu = emulators.get_emulator(name)
+    assert emu is not None
+
+    for hook in ("import_spec", "place_import", "validate_import_plan", "identity_source"):
+        assert getattr(type(emu), hook) is getattr(base.Emulator, hook), f"{name} overrides {hook}"
+
+
+@pytest.mark.parametrize("name", sorted(emulators.REGISTRY))
+def test_every_emulator_refuses_a_declared_import(name: str) -> None:
     """Preflight refuses each member with `kind_not_accepted` on every emulator.
 
     Args:
         name: The registry name.
-        tmp_path: The per-test temporary directory.
     """
     emu = emulators.get_emulator(name)
     assert emu is not None
