@@ -9,7 +9,7 @@ import io
 import json
 import re
 import zipfile
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 from typing import Any, Optional
 
 import pytest
@@ -593,3 +593,208 @@ def test_build_dest_refuses_an_unsafe_tail_component(tail: str) -> None:
     refused = imports.build_dest("SAVEDATA", ("ULUS10064",), (tail,), member=_member("x/y"), expected="e")
 
     assert isinstance(refused, imports.ImportRefusal) and refused.reason == "unsafe_path"
+
+
+# ── identity ───────────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    ("family", "raw", "canonical"),
+    [
+        ("ps_serial_dashed", "slus_200.01", "SLUS-20001"),
+        ("ps_serial_dashed", "SLUS20001", "SLUS-20001"),
+        ("ps_serial_dashed", "not a serial", None),
+        ("ps2_card_dir", "baslus-20001all", "BASLUS-20001ALL"),
+        ("ps_serial_nodash", "ULUS-10064", "ULUS10064"),
+        ("hex8", "0x0100abcd", "0100ABCD"),
+        ("hex8", "0100ABC", None),
+        ("xbox", "MS-100", "4D530064"),
+        ("xbox", "4d530064", "4D530064"),
+        ("gc_wii_disc", "GZLE01", "475A4C45"),
+        ("gc_wii_disc", "0x475a4c45", "475A4C45"),
+        ("hex16", "0100/0000/0000/1000", "0100000000001000"),
+        ("dc_product", "T-8101N", None),
+        ("scummvm_target", "Monkey1", "monkey1"),
+    ],
+)
+def test_normalisers_bring_each_notation_to_one_form(family: str, raw: str, canonical: Optional[str]) -> None:
+    """Each family's notations all normalise to one canonical id, or to None.
+
+    Args:
+        family: The id family.
+        raw: The id as some source writes it.
+        canonical: What it must normalise to.
+    """
+    assert imports.NORMALISERS[family](raw) == canonical
+
+
+def _rom(title_id: Optional[str] = None, save_target: Optional[str] = None) -> imports.RomRef:
+    """Build a rom reference carrying RomM's ids.
+
+    Args:
+        title_id: RomM's game id.
+        save_target: RomM's save-target name.
+
+    Returns:
+        The reference.
+    """
+    return imports.RomRef(5, "Game", "ps2", title_id, save_target)
+
+
+def test_session_identity_prefers_the_rom_over_romm(caplog: pytest.LogCaptureFixture) -> None:
+    """The id read off the rom wins over RomM's, and a disagreement is logged."""
+    ctx = _ctx(rom_file=Path("/roms/g.iso"), rom=_rom("SLUS-20002"))
+
+    with caplog.at_level("WARNING", logger="webstation_broker.imports"):
+        identity = imports.resolve_session_identity(
+            ctx, family="ps_serial_dashed", rom_reader=lambda _: "SLUS_200.01"
+        )
+
+    assert identity == imports.SessionIdentity("SLUS-20001", "rom")
+    assert "SLUS-20002" in caplog.text
+
+
+def test_session_identity_falls_back_to_romm_then_none() -> None:
+    """With no id on the rom RomM's is used; with neither, the source is `none`."""
+    romm = imports.resolve_session_identity(
+        _ctx(rom=_rom(save_target="baslus-20001all")), family="ps2_card_dir", use_save_target=True
+    )
+    nothing = imports.resolve_session_identity(_ctx(), family="ps_serial_dashed")
+
+    assert romm == imports.SessionIdentity("BASLUS-20001ALL", "romm")
+    assert nothing == imports.SessionIdentity(None, "none")
+
+
+def test_a_rom_reader_that_raises_reads_as_no_id() -> None:
+    """A reader that throws is logged and treated as finding nothing."""
+
+    def boom(_: Path) -> Optional[str]:
+        """Fail the way a corrupt image does.
+
+        Args:
+            _: The rom file.
+
+        Raises:
+            OSError: Always.
+        """
+        raise OSError("bad image")
+
+    identity = imports.resolve_session_identity(
+        _ctx(rom_file=Path("/r"), rom=_rom("SLUS-20001")), family="ps_serial_dashed", rom_reader=boom
+    )
+
+    assert identity == imports.SessionIdentity("SLUS-20001", "romm")
+
+
+def test_session_identity_is_memoised_per_preflight() -> None:
+    """The rom is read once per preflight, whoever asks."""
+    reads: list[Path] = []
+    ctx = _ctx(rom_file=Path("/r"))
+
+    def reader(path: Path) -> Optional[str]:
+        """Record the read and answer a serial.
+
+        Args:
+            path: The rom file.
+
+        Returns:
+            A serial.
+        """
+        reads.append(path)
+        return "SLUS-20001"
+
+    for _ in range(3):
+        imports.resolve_session_identity(ctx, family="ps_serial_dashed", rom_reader=reader)
+
+    assert reads == [Path("/r")]
+
+
+@pytest.mark.parametrize(
+    ("member_id", "session", "policy", "keyed", "reason"),
+    [
+        ("SLUS-20001", imports.SessionIdentity("SLUS-20001", "rom"), "strict", True, None),
+        ("SLUS-20002", imports.SessionIdentity("SLUS-20001", "rom"), "strict", True, "identity_mismatch"),
+        ("SLUS-20002", imports.SessionIdentity("SLUS-20001", "rom"), "advisory", True, None),
+        ("SLUS-20002", imports.SessionIdentity("SLUS-20001", "rom"), "none", True, None),
+        ("SLUS-20001", imports.SessionIdentity(None, "none"), "required", True, "identity_unknown"),
+        ("SLUS-20001", imports.SessionIdentity(None, "none"), "strict", True, None),
+        (None, imports.SessionIdentity("SLUS-20001", "rom"), "strict", True, "unrecognised_layout"),
+        (None, imports.SessionIdentity("SLUS-20001", "rom"), "strict", False, None),
+    ],
+)
+def test_check_member_identity_applies_the_policy(
+    member_id: Optional[str],
+    session: imports.SessionIdentity,
+    policy: str,
+    keyed: bool,
+    reason: Optional[str],
+) -> None:
+    """Each policy refuses exactly what it says it does.
+
+    Args:
+        member_id: The id read off the member, or None.
+        session: The session's identity.
+        policy: The emulator's policy.
+        keyed: Whether the layout carries an id at all.
+        reason: The expected refusal, or None for none.
+    """
+    refusal = imports.check_member_identity(
+        _member("x"), member_id, session, family="ps_serial_dashed", policy=policy, expected="e", keyed=keyed
+    )
+
+    assert (refusal.reason if refusal else None) == reason
+
+
+def test_a_ps2_card_dir_matches_by_prefix() -> None:
+    """A PS2 card dir is the serial plus a suffix, so it matches by prefix."""
+    session = imports.SessionIdentity("BASLUS-20001", "romm")
+
+    assert imports.check_member_identity(
+        _member("x"), "BASLUS-20001ALL", session, family="ps2_card_dir", policy="strict", expected="e"
+    ) is None
+
+
+def test_a_mismatch_against_romm_says_how_to_fix_romm() -> None:
+    """When RomM supplied the id, the refusal names the route that corrects it."""
+    refusal = imports.check_member_identity(
+        _member("x"),
+        "SLUS-20002",
+        imports.SessionIdentity("SLUS-20001", "romm"),
+        family="ps_serial_dashed",
+        policy="strict",
+        expected="e",
+    )
+
+    assert refusal is not None and refusal.detail is not None
+    assert "PUT /api/roms/" in refusal.detail
+
+
+class _Source:
+    """A stand-in emulator with an identity source and nothing else."""
+
+    def __init__(self, source: Optional[imports.IdentitySource]) -> None:
+        """Keep the source.
+
+        Args:
+            source: What `identity_source` answers.
+        """
+        self._source = source
+
+    def identity_source(self) -> Optional[imports.IdentitySource]:
+        """Answer the source.
+
+        Returns:
+            The source, or None.
+        """
+        return self._source
+
+
+def test_resolve_activate_identity_uses_the_emulators_source() -> None:
+    """An emulator without a source runs as `none`; one with a source is resolved."""
+    none = imports.resolve_activate_identity(_Source(None), None, _rom("SLUS-20001"))  # type: ignore[arg-type]
+    some = imports.resolve_activate_identity(
+        _Source(imports.IdentitySource("ps_serial_dashed")), None, _rom("SLUS-20001")  # type: ignore[arg-type]
+    )
+
+    assert none == imports.SessionIdentity(None, "none")
+    assert some == imports.SessionIdentity("SLUS-20001", "romm")

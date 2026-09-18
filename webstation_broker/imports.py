@@ -25,6 +25,7 @@ from . import saves
 
 if TYPE_CHECKING:
     from .api import RomIn
+    from .emulators.base import Emulator
 
 log = logging.getLogger(__name__)
 
@@ -798,3 +799,303 @@ def build_dest(
         if problem:
             return ImportRefusal("unsafe_path", member.name, expected, detail=problem)
     return PurePosixPath(subtree, *ids, *tail)
+
+
+_PS_DASHED = re.compile(r"([A-Z]{4})[-_ ]?(\d{3})\.?(\d{2})", re.I)
+"""A PlayStation serial in any of its spellings: `SLUS-20001`, `SLUS_200.01`, `slus20001`."""
+_PS_NODASH = re.compile(r"([A-Za-z]{4})[-_ ]?(\d{5})")
+"""A PSP/PS3 serial with or without its separator."""
+_HEX8 = re.compile(r"(?:0x)?([0-9A-Fa-f]{8})")
+"""An eight-digit hex title id, optionally `0x`-prefixed."""
+_XBOX_CODE = re.compile(r"([A-Za-z]{2})-(\d{3})")
+"""An Xbox publisher-code-and-number id such as `MS-100`."""
+_GAME_ID = re.compile(r"[A-Za-z0-9]{4}(?:[A-Za-z0-9]{2})?")
+"""A GameCube/Wii game id: four characters, plus two for the maker."""
+_HEX16 = re.compile(r"(?:0x)?([0-9A-Fa-f]{16})")
+"""A sixteen-digit hex title id, as the Switch writes it."""
+
+
+def _ps_serial_dashed(raw: str) -> Optional[str]:
+    """Normalise a PlayStation serial to `XXXX-NNNNN`.
+
+    Args:
+        raw: The id as found.
+
+    Returns:
+        The canonical id, or None.
+    """
+    m = _PS_DASHED.fullmatch(raw.strip())
+    return f"{m[1].upper()}-{m[2]}{m[3]}" if m else None
+
+
+def _ps_serial_nodash(raw: str) -> Optional[str]:
+    """Normalise a PSP/PS3 serial to `XXXXNNNNN`.
+
+    Args:
+        raw: The id as found.
+
+    Returns:
+        The canonical id, or None.
+    """
+    m = _PS_NODASH.fullmatch(raw.strip())
+    return f"{m[1].upper()}{m[2]}" if m else None
+
+
+def _hex8(raw: str) -> Optional[str]:
+    """Normalise an eight-digit hex id to upper case, without `0x`.
+
+    Args:
+        raw: The id as found.
+
+    Returns:
+        The canonical id, or None.
+    """
+    m = _HEX8.fullmatch(raw.strip())
+    return m[1].upper() if m else None
+
+
+def _xbox(raw: str) -> Optional[str]:
+    """Normalise an Xbox title id: hex, or a publisher code like `MS-100`.
+
+    Args:
+        raw: The id as found.
+
+    Returns:
+        The canonical eight-digit hex id, or None.
+    """
+    hexed = _hex8(raw)
+    if hexed:
+        return hexed
+    m = _XBOX_CODE.fullmatch(raw.strip())
+    if not m:
+        return None
+    a, b = m[1].upper()
+    return f"{ord(a):02X}{ord(b):02X}{int(m[2]):04X}"
+
+
+def _gc_wii_disc(raw: str) -> Optional[str]:
+    """Normalise a GameCube/Wii id to the hex of its four-character game code.
+
+    Args:
+        raw: The id as found: a game id like `GZLE01`, or its hex.
+
+    Returns:
+        The canonical eight-digit hex id, or None.
+    """
+    hexed = _hex8(raw)
+    if hexed:
+        return hexed
+    value = raw.strip()
+    if not _GAME_ID.fullmatch(value):
+        return None
+    return value[:4].upper().encode("ascii").hex().upper()
+
+
+def _hex16(raw: str) -> Optional[str]:
+    """Normalise a sixteen-digit hex id, dropping any `/` separators.
+
+    Args:
+        raw: The id as found.
+
+    Returns:
+        The canonical id, or None.
+    """
+    m = _HEX16.fullmatch(raw.strip().replace("/", ""))
+    return m[1].upper() if m else None
+
+
+def _dc_product(raw: str) -> Optional[str]:
+    """Dreamcast product numbers are not unique enough to compare.
+
+    Args:
+        raw: The id as found.
+
+    Returns:
+        None, always: identity is not checked for this family.
+    """
+    return None
+
+
+NORMALISERS: dict[str, Callable[[str], Optional[str]]] = {
+    "ps_serial_dashed": _ps_serial_dashed,
+    "ps2_card_dir": lambda raw: raw.strip().upper() or None,
+    "ps_serial_nodash": _ps_serial_nodash,
+    "hex8": _hex8,
+    "xbox": _xbox,
+    "gc_wii_disc": _gc_wii_disc,
+    "hex16": _hex16,
+    "dc_product": _dc_product,
+    "scummvm_target": lambda raw: raw.strip().casefold() or None,
+}
+"""One normaliser per `IdFamily`: each brings every notation of an id to one form."""
+
+IdentityPolicy = Literal["none", "advisory", "strict", "required"]
+"""How hard a hook holds a member to the session's id."""
+
+
+@dataclass(frozen=True)
+class IdentitySource:
+    """Where an emulator's session identity comes from.
+
+    Attributes:
+        family: The id family the session id is normalised in.
+        rom_reader: Reads the id off the rom file, or None when it cannot.
+        use_save_target: Whether RomM's value is `save_target` rather than `title_id`.
+        romm_family: The family RomM's value is written in, when it differs from `family`.
+    """
+
+    family: IdFamily
+    rom_reader: Optional[Callable[[Path], Optional[str]]] = None
+    use_save_target: bool = False
+    romm_family: Optional[IdFamily] = None
+
+
+def resolve_session_identity(
+    ctx: ImportCtx,
+    *,
+    family: IdFamily,
+    rom_reader: Optional[Callable[[Path], Optional[str]]] = None,
+    use_save_target: bool = False,
+    romm_family: Optional[IdFamily] = None,
+) -> SessionIdentity:
+    """Work out the game id the session runs as, once per preflight.
+
+    The rom wins over RomM: RomM's id is metadata a user can get wrong,
+    while the id read off the rom is what the emulator will actually use.
+
+    Args:
+        ctx: The launch context; its `memo` caches the answer.
+        family: The id family to normalise into.
+        rom_reader: Reads the id off `ctx.rom_file`, or None.
+        use_save_target: Whether RomM's value is `save_target` rather than `title_id`.
+        romm_family: The family RomM's value is written in, when it differs.
+
+    Returns:
+        The identity, with the source it came from.
+    """
+    key = ("identity", family, use_save_target)
+    cached = ctx.memo.get(key)
+    if isinstance(cached, SessionIdentity):
+        return cached
+    normalise = NORMALISERS[family]
+    from_rom: Optional[str] = None
+    if rom_reader is not None and ctx.rom_file is not None:
+        try:
+            raw = rom_reader(ctx.rom_file)
+        except Exception as exc:
+            log.warning("imports: could not read an id off %s: %s", ctx.rom_file, exc)
+            raw = None
+        from_rom = normalise(raw) if raw else None
+    from_romm: Optional[str] = None
+    raw_romm = (ctx.rom.save_target if use_save_target else ctx.rom.title_id) if ctx.rom else None
+    if raw_romm:
+        from_romm = NORMALISERS[romm_family or family](raw_romm)
+        if from_romm is None:
+            log.info("imports: RomM id %r is not a %s id, ignoring it", raw_romm, romm_family or family)
+    if from_rom and from_romm and from_rom != from_romm:
+        log.warning("imports: the rom says %s but RomM says %s; going with the rom", from_rom, from_romm)
+    if from_rom:
+        identity = SessionIdentity(from_rom, "rom")
+    elif from_romm:
+        identity = SessionIdentity(from_romm, "romm")
+    else:
+        identity = SessionIdentity(None, "none")
+    ctx.memo[key] = identity
+    return identity
+
+
+def check_member_identity(
+    member: ImportMember,
+    member_id: Optional[str],
+    session: SessionIdentity,
+    *,
+    family: IdFamily,
+    policy: IdentityPolicy,
+    expected: str,
+    keyed: bool = True,
+) -> Optional[ImportRefusal]:
+    """Hold one member's id to the session's, under the hook's policy.
+
+    Args:
+        member: The member.
+        member_id: The id the hook read off the member, already normalised, or None.
+        session: The session's identity.
+        family: The id family; `ps2_card_dir` matches by prefix.
+        policy: `none` never refuses; `advisory` logs a mismatch; `strict`
+            refuses one; `required` also refuses when the session has no id.
+        expected: The accepted shape, in words.
+        keyed: Whether the layout carries an id at all; an unkeyed layout is
+            never refused for lacking one.
+
+    Returns:
+        A refusal, or None.
+    """
+    if policy == "none":
+        return None
+    if session.value is None:
+        if policy == "required":
+            return ImportRefusal(
+                "identity_unknown",
+                member.name,
+                expected,
+                detail="neither the rom nor RomM says which game this is",
+            )
+        return None
+    if member_id is None:
+        if keyed and policy in ("strict", "required"):
+            return ImportRefusal(
+                "unrecognised_layout", member.name, expected, detail="no game id in the path"
+            )
+        return None
+    if family == "ps2_card_dir":
+        matches = member_id.startswith(session.value)
+    else:
+        matches = member_id == session.value
+    if matches:
+        return None
+    detail = f"member {member_id}, session {session.value} (from {session.source})"
+    if policy == "advisory":
+        log.info("imports: %s id mismatch, allowed: %s", member.name, detail)
+        return None
+    if session.source == "romm":
+        detail += " - fix via PUT /api/roms/{id}/identity if RomM is wrong"
+    return ImportRefusal("identity_mismatch", member.name, expected, detail=detail)
+
+
+def identity_for(emulator: "Emulator", ctx: ImportCtx) -> SessionIdentity:
+    """Resolve the session identity through the emulator's declared source.
+
+    Args:
+        emulator: The emulator.
+        ctx: The launch context.
+
+    Returns:
+        The identity, or `none` when the emulator declares no source.
+    """
+    source = emulator.identity_source()
+    if source is None:
+        return SessionIdentity(None, "none")
+    return resolve_session_identity(
+        ctx,
+        family=source.family,
+        rom_reader=source.rom_reader,
+        use_save_target=source.use_save_target,
+        romm_family=source.romm_family,
+    )
+
+
+def resolve_activate_identity(
+    emulator: "Emulator", rom_file: Optional[Path], rom: Optional[RomRef]
+) -> SessionIdentity:
+    """Resolve the identity for a launch that ran no preflight.
+
+    Args:
+        emulator: The emulator.
+        rom_file: The resolved bootable file, or None.
+        rom: The activate body's rom, or None.
+
+    Returns:
+        The identity.
+    """
+    ctx = ImportCtx(rom_file=rom_file, rom=rom, memory_card_synced=False, excluded=(), resume_slot=None)
+    return identity_for(emulator, ctx)
