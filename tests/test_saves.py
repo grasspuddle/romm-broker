@@ -913,3 +913,66 @@ def test_extract_save_archive_still_refuses_import_members(tmp_path: Path) -> No
 
     assert result["error"] == "archive member outside save subtrees: .import/save/x"
     assert not (root / "GC").exists()
+
+
+# ── always_include: placed imports ship even if untouched ──────────────
+
+
+def test_always_include_ships_an_untouched_placed_file(tmp_path: Path) -> None:
+    """A placed import older than the baseline still ships, and the manifest names it."""
+    root = tmp_path / "root"
+    _write(root / "GC" / "placed.raw", b"p", mtime=OLD)
+    _write(root / "GC" / "other.raw", b"o", mtime=OLD)
+
+    report = saves.build_save_archive(
+        root,
+        ("GC",),
+        BASELINE,
+        identity={"emulator": "fake"},
+        always_include=frozenset({"GC/placed.raw"}),
+    )
+
+    assert [f["path"] for f in report["files"]] == ["GC/placed.raw"]
+    with zipfile.ZipFile(io.BytesIO(report["zip_bytes"])) as zf:
+        manifest = json.loads(zf.read(saves.MANIFEST_NAME))
+    assert manifest["imported"] == ["GC/placed.raw"]
+    assert manifest["version"] == 1
+
+
+def test_always_include_never_resurrects_a_file_that_is_gone(tmp_path: Path) -> None:
+    """A placed path that was deleted or set aside is simply absent."""
+    root = tmp_path / "root"
+    _write(root / "GC" / "placed.raw.untrusted", b"p", mtime=OLD)
+
+    report = saves.build_save_archive(
+        root, ("GC",), BASELINE, always_include=frozenset({"GC/placed.raw", "GC/gone.raw"})
+    )
+
+    assert report["files"] == []
+    assert report["zip_bytes"] is None
+
+
+def test_always_include_still_respects_the_size_cap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Forcing a file in never lets a dump past the size cap."""
+    monkeypatch.setattr(saves, "SAVE_FILE_MAX_BYTES", 1)
+    root = tmp_path / "root"
+    _write(root / "GC" / "placed.raw", b"big", mtime=OLD)
+
+    report = saves.build_save_archive(
+        root, ("GC",), BASELINE, always_include=frozenset({"GC/placed.raw"})
+    )
+
+    assert report["error"] is not None and "size limit" in report["error"]
+
+
+def test_a_dump_without_imports_has_no_imported_key(tmp_path: Path) -> None:
+    """A plain dump's manifest is byte-for-byte the v1 shape it always was."""
+    root = tmp_path / "root"
+    _write(root / "GC" / "a.raw", b"a", mtime=NEW)
+
+    report = saves.build_save_archive(root, ("GC",), BASELINE, identity={"emulator": "fake"})
+
+    with zipfile.ZipFile(io.BytesIO(report["zip_bytes"])) as zf:
+        assert "imported" not in json.loads(zf.read(saves.MANIFEST_NAME))

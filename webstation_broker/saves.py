@@ -217,6 +217,8 @@ def build_save_archive(
     baseline: float,
     identity: Optional[dict[str, Any]] = None,
     classify: Optional[Callable[[str], str]] = None,
+    *,
+    always_include: frozenset[str] = frozenset(),
 ) -> dict[str, Any]:
     """Zip every save file modified since `baseline` (the launch timestamp).
 
@@ -238,6 +240,10 @@ def build_save_archive(
             the manifest out entirely.
         classify: Maps a member path to its kind, usually
             `Emulator.save_file_kind`; members go in unlabelled without it.
+        always_include: Paths relative to `root` that ship whatever their
+            mtime: the files this session's declared imports placed. The walk
+            still decides what exists, so a placed file that was deleted or
+            set aside is simply absent.
 
     Returns:
         A report dict of the shape
@@ -281,7 +287,7 @@ def build_save_archive(
             report["skipped"] += 1
             report["skipped_files"].append(rel)
             continue
-        if st.st_mtime >= cutoff:
+        if st.st_mtime >= cutoff or rel in always_include:
             changed.append(p)
             total += st.st_size
     if not changed:
@@ -336,6 +342,9 @@ def build_save_archive(
                 "session": identity,
                 "files": manifest_files,
             }
+            imported = sorted(f["path"] for f in report["files"] if f["path"] in always_include)
+            if imported:
+                manifest["imported"] = imported
             zf.writestr(
                 zipfile.ZipInfo(MANIFEST_NAME, date_time=time.gmtime()[:6]),
                 json.dumps(manifest, indent=2),

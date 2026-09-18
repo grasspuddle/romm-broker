@@ -2561,3 +2561,30 @@ async def test_the_screenshot_body_is_read_before_the_session_lock_is_released(
     assert response.body == b"png bytes"
     assert api._SESSION_LOCK.acquire(blocking=False)
     api._SESSION_LOCK.release()
+
+
+def test_dump_saves_forces_the_session_import_paths_in(
+    broker_dirs: dict[str, Path], fake_emulator: list[FakeEmulator]
+) -> None:
+    """`_dump_saves` hands the session's placed paths to the dump."""
+    import anyio
+
+    from webstation_broker import emulators
+
+    emulator = emulators.get_emulator("fake")
+    assert emulator is not None
+    placed = emulator.save_root / "saves" / "placed.srm"
+    placed.write_bytes(b"p")
+    os.utime(placed, (1_600_000_000, 1_600_000_000))
+    sess = {
+        "id": "s",
+        "save_baseline": time.time(),
+        "save": {},
+        "import_paths": ["saves/placed.srm"],
+        "user": {"id": 1},
+        "rom": {},
+    }
+
+    report = anyio.run(api._dump_saves, emulator, sess)
+
+    assert [f["path"] for f in report["files"]] == ["saves/placed.srm"]

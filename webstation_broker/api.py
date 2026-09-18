@@ -984,12 +984,15 @@ async def _dump_saves(emulator: Emulator, sess: dict[str, Any]) -> dict[str, Any
             emulator, bool((sess.get("save") or {}).get("memory_card_synced"))
         )
         return await anyio.to_thread.run_sync(
-            saves.build_save_archive,
-            emulator.save_root,
-            dump_subtrees,
-            sess["save_baseline"],
-            _archive_identity(sess, emulator),
-            emulator.save_file_kind,
+            functools.partial(
+                saves.build_save_archive,
+                emulator.save_root,
+                dump_subtrees,
+                sess["save_baseline"],
+                _archive_identity(sess, emulator),
+                emulator.save_file_kind,
+                always_include=frozenset(sess.get("import_paths") or ()),
+            )
         )
     except Exception as exc:
         log.error(
