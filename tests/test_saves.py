@@ -331,7 +331,9 @@ def test_archive_round_trips_through_a_restore(tmp_path: Path) -> None:
     target.mkdir()
     result = saves.extract_save_archive(report["zip_bytes"], target, ("GC",))
 
-    assert result == {"written": 1, "skipped": 0, "excluded": 0, "failed": 0, "error": None}
+    assert result == {
+        "written": 1, "skipped": 0, "excluded": 0, "failed": 0, "imported": 0, "error": None
+    }
     assert (target / "GC" / "card.raw").read_bytes() == b"payload"
 
 
@@ -548,7 +550,9 @@ def test_restore_drops_the_manifest_instead_of_refusing_the_archive(tmp_path: Pa
 
     result = saves.extract_save_archive(body, target, ("GC",))
 
-    assert result == {"written": 1, "skipped": 0, "excluded": 0, "failed": 0, "error": None}
+    assert result == {
+        "written": 1, "skipped": 0, "excluded": 0, "failed": 0, "imported": 0, "error": None
+    }
     assert (target / "GC" / "card.raw").read_bytes() == b"payload"
     assert not (target / saves.MANIFEST_NAME).exists()
 
@@ -565,7 +569,9 @@ def test_manifest_archive_round_trips_through_a_restore(tmp_path: Path) -> None:
     target.mkdir()
     result = saves.extract_save_archive(report["zip_bytes"], target, ("GC",))
 
-    assert result == {"written": 1, "skipped": 0, "excluded": 0, "failed": 0, "error": None}
+    assert result == {
+        "written": 1, "skipped": 0, "excluded": 0, "failed": 0, "imported": 0, "error": None
+    }
     assert (target / "GC" / "card.raw").read_bytes() == b"payload"
 
 
@@ -832,3 +838,78 @@ def test_surviving_chain_escapes_checks_every_level_of_a_nested_subtree(tmp_path
     (root / "a").symlink_to(outside)
 
     assert saves.surviving_chain_escapes(root, PurePosixPath("a/b/f"), ("a", "a/b")) is True
+
+
+# ── write_save_archive: the write half of a restore ────────────────────
+
+
+def test_write_save_archive_writes_v1_members_under_the_guard(tmp_path: Path) -> None:
+    """v1 members keep the zip mtime and the newer-file guard."""
+    root = tmp_path / "root"
+    _write(root / "GC" / "kept.raw", b"newer", mtime=NEW)
+    body = _zip({"GC/kept.raw": b"older", "GC/new.raw": b"fresh"})
+
+    result = saves.write_save_archive(body, root, saves.ArchivePlan(("GC/kept.raw", "GC/new.raw"), 2))
+
+    assert result == {
+        "written": 1, "skipped": 1, "excluded": 2, "failed": 0, "imported": 0, "error": None
+    }
+    assert (root / "GC" / "kept.raw").read_bytes() == b"newer"
+    assert (root / "GC" / "new.raw").read_bytes() == b"fresh"
+
+
+def test_write_save_archive_places_imports_unguarded_and_stamped(tmp_path: Path) -> None:
+    """Placed members skip the guard and carry the write stamp, not the zip mtime."""
+    root = tmp_path / "root"
+    _write(root / "GC" / "slot.raw", b"newer", mtime=NEW)
+    body = _zip({".import/save/x.raw": b"imported"})
+    plan = saves.ArchivePlan(
+        (), 0, placed=((".import/save/x.raw", PurePosixPath("GC/slot.raw")),)
+    )
+
+    result = saves.write_save_archive(body, root, plan, stamp=NEW + 50)
+
+    assert result["imported"] == 1
+    assert result["written"] == 0
+    assert (root / "GC" / "slot.raw").read_bytes() == b"imported"
+    assert (root / "GC" / "slot.raw").stat().st_mtime == NEW + 50
+
+
+def test_write_save_archive_writes_sidecars(tmp_path: Path) -> None:
+    """Sidecars are written with the stamp and only their failures are counted."""
+    root = tmp_path / "root"
+    root.mkdir()
+    plan = saves.ArchivePlan((), 0, sidecars=((PurePosixPath("GC/a.rom"), b"id\n"),))
+
+    result = saves.write_save_archive(_zip({}), root, plan, stamp=NEW)
+
+    assert result["written"] == 0 and result["failed"] == 0
+    assert (root / "GC" / "a.rom").read_bytes() == b"id\n"
+
+
+def test_write_save_archive_counts_a_link_out_of_the_root_as_failed(tmp_path: Path) -> None:
+    """The resolve check still guards every write, placed members included."""
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / "GC").symlink_to(outside)
+    body = _zip({".import/save/x": b"x"})
+    plan = saves.ArchivePlan((), 0, placed=((".import/save/x", PurePosixPath("GC/x")),))
+
+    result = saves.write_save_archive(body, root, plan)
+
+    assert result["failed"] == 1 and result["imported"] == 0
+    assert not (outside / "x").exists()
+
+
+def test_extract_save_archive_still_refuses_import_members(tmp_path: Path) -> None:
+    """The legacy path refuses `.import/` members exactly as it always has."""
+    root = tmp_path / "root"
+    root.mkdir()
+    body = _zip({"GC/a": b"a", ".import/save/x": b"x"})
+
+    result = saves.extract_save_archive(body, root, ("GC",))
+
+    assert result["error"] == "archive member outside save subtrees: .import/save/x"
+    assert not (root / "GC").exists()

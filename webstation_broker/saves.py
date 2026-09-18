@@ -627,6 +627,160 @@ def _guard_exempt(always_restore: Optional[Callable[[str], bool]], rel: str) -> 
         return False
 
 
+@dataclass(frozen=True)
+class ArchivePlan:
+    """Everything a restore writes, fixed before the working slot is cleared.
+
+    Attributes:
+        v1: v1 member names, written to their own path under the newer-file guard.
+        excluded_count: v1 members dropped for sitting under an excluded subtree.
+        placed: `(member name, destination)` pairs for declared imports.
+        sidecars: `(destination, bytes)` pairs the broker writes beside placed members.
+    """
+
+    v1: tuple[str, ...]
+    excluded_count: int
+    placed: tuple[tuple[str, PurePosixPath], ...] = ()
+    sidecars: tuple[tuple[PurePosixPath, bytes], ...] = ()
+
+
+def _write_member(
+    root: Path,
+    root_real: Path,
+    rel: PurePosixPath,
+    read: Callable[[], bytes],
+    mtime: float,
+    *,
+    guard: bool,
+    label: str,
+) -> Literal["written", "skipped", "failed"]:
+    """Write one file into the save tree through a staging file.
+
+    Args:
+        root: The emulator's save data root.
+        root_real: `root` resolved, for the escape check.
+        rel: The destination, relative to `root`.
+        read: Returns the bytes to write.
+        mtime: The mtime to stamp on the written file.
+        guard: Whether a newer file already on disk is kept.
+        label: The name to log the file under.
+
+    Returns:
+        How the write went.
+    """
+    target = root / rel
+    tmp: Optional[Path] = None
+    try:
+        # Belt-and-suspenders on top of the member-path checks: confirms the
+        # resolved write location is still under root even if some ancestor
+        # directory turned out to be a symlink.
+        if not target.parent.resolve().is_relative_to(root_real):
+            log.warning("saves: %s resolves outside save dir, skipped", label)
+            return "failed"
+        if guard and target.exists() and target.stat().st_mtime > mtime + _SAVE_MTIME_SLACK:
+            return "skipped"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        # Unique per member: two restores sharing one staging name interleave
+        # their writes, and the os.replace below then publishes the mixture
+        # as the player's save.
+        tmp = target.parent / f".{target.name}.{secrets.token_hex(8)}.tmp"
+        tmp.write_bytes(read())
+        os.replace(tmp, target)
+        os.utime(target, (mtime, mtime))
+    except (OSError, ValueError, zipfile.BadZipFile) as exc:
+        log.warning("saves: could not restore %s: %s", label, exc)
+        # The staging file is dot-prefixed, so `_iter_save_files` never sees
+        # it and no later dump would ever carry it off the disk.
+        if tmp is not None:
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError as cleanup_exc:
+                log.warning("saves: could not remove the staging file %s: %s", tmp, cleanup_exc)
+        return "failed"
+    return "written"
+
+
+def write_save_archive(
+    content: bytes,
+    root: Path,
+    plan: ArchivePlan,
+    always_restore: Optional[Callable[[str], bool]] = None,
+    *,
+    stamp: Optional[float] = None,
+) -> dict[str, Any]:
+    """Write a restore that `plan_v1` (and, for imports, preflight) already approved.
+
+    v1 members are restored as they always have been: existing files newer
+    than their member are skipped, so a restore can never roll back saves
+    made since the archive was taken, unless `always_restore` exempts the
+    member. Placed imports and sidecars skip that guard, because preflight
+    refused any collision, and are stamped with the write time rather than a
+    zip mtime.
+
+    Args:
+        content: The zip archive body, the same bytes the plan was made from.
+        root: The emulator's save data root.
+        plan: What to write.
+        always_restore: Maps a v1 member path to whether it is exempt from the
+            newer-file guard, usually `Emulator.always_restore`.
+        stamp: The mtime for placed members and sidecars; defaults to now.
+
+    Returns:
+        `{"written", "skipped", "excluded", "failed", "imported", "error"}`.
+        `written` and `skipped` count v1 members, `imported` counts placed
+        members written, `failed` counts every failed write, and `error` is
+        set only when the body is not a zip.
+    """
+    result: dict[str, Any] = {
+        "written": 0,
+        "skipped": 0,
+        "excluded": plan.excluded_count,
+        "failed": 0,
+        "imported": 0,
+        "error": None,
+    }
+    try:
+        zf = zipfile.ZipFile(io.BytesIO(content))
+    except zipfile.BadZipFile:
+        result["error"] = "body is not a zip archive"
+        return result
+    when = time.time() if stamp is None else stamp
+    root_real = root.resolve()
+    with zf:
+        for name in plan.v1:
+            try:
+                info = zf.getinfo(name)
+            except KeyError:
+                log.warning("saves: %s is not in the archive, skipped", name)
+                result["failed"] += 1
+                continue
+            outcome = _write_member(
+                root,
+                root_real,
+                PurePosixPath(name),
+                lambda info=info: zf.read(info),
+                calendar.timegm(info.date_time),
+                guard=not _guard_exempt(always_restore, name),
+                label=name,
+            )
+            result[outcome] += 1
+        for name, dest in plan.placed:
+            outcome = _write_member(
+                root, root_real, dest, lambda name=name: zf.read(name), when, guard=False, label=name
+            )
+            if outcome == "written":
+                result["imported"] += 1
+            else:
+                result["failed"] += 1
+        for dest, data in plan.sidecars:
+            outcome = _write_member(
+                root, root_real, dest, lambda data=data: data, when, guard=False, label=dest.as_posix()
+            )
+            if outcome == "failed":
+                result["failed"] += 1
+    return result
+
+
 def extract_save_archive(
     content: bytes,
     root: Path,
@@ -634,22 +788,16 @@ def extract_save_archive(
     excluded: tuple[str, ...] = (),
     always_restore: Optional[Callable[[str], bool]] = None,
 ) -> dict[str, Any]:
-    """Restore an archive into the emulator's data dir.
+    """Restore an archive into the emulator's data dir in one call.
+
+    Composed from `read_archive`, `plan_v1` and `write_save_archive`. It is
+    kept for callers that validate and write in one step: activate uses the
+    pieces instead, so it can validate before the working slot is cleared.
+    `.import/` members are checked as v1 here and refused as lying outside
+    the subtrees, which is how this path has always treated them.
 
     `excluded` names subtrees the emulator owns but this session syncs some
-    other way. Those members are dropped rather than refused: archives taken
-    before that sync was turned on still carry them, and restoring one would
-    undo what the other route just wrote. A member under neither is still a
-    hard error, since that is the guard against an archive writing outside the
-    save area.
-
-    Existing files newer than their archive member are skipped so a restore
-    can never roll back saves made since the archive was taken. `always_restore`
-    exempts the members an emulator says that guard does not describe: a file
-    whose mtime on disk records which player last used the container rather
-    than progress this player would lose. Each file is written through a temp
-    file and renamed into place.
-
+    other way; their members are counted and dropped rather than refused.
     An archive's `MANIFEST_NAME` is dropped: it describes the archive for the
     parent and is not save data.
 
@@ -659,99 +807,28 @@ def extract_save_archive(
         subtrees: Subdirectory names under `root` that members may be restored into.
         excluded: Subdirectory names whose members are counted and dropped.
         always_restore: Maps a member path to whether it is exempt from the
-            newer-file guard, usually `Emulator.always_restore`; without it
-            every member is subject to the guard.
+            newer-file guard, usually `Emulator.always_restore`.
 
     Returns:
-        A dict of the shape `{"written", "skipped", "excluded", "failed", "error"}`
-        with counts for the first four and `error` set (and nothing written) when
-        the body is not a zip, the archive is too large, or a member escapes the
-        save dir, names a subtree itself, or lies outside the subtrees.
+        `{"written", "skipped", "excluded", "failed", "imported", "error"}`,
+        with `error` set (and nothing written) when the body is not a zip, the
+        archive is too large, or a member escapes the save dir, names a
+        subtree itself, lies outside the subtrees, or resolves outside the
+        save dir through a surviving symlink.
     """
-    result = {"written": 0, "skipped": 0, "excluded": 0, "failed": 0, "error": None}
-    try:
-        zf = zipfile.ZipFile(io.BytesIO(content))
-    except zipfile.BadZipFile:
-        result["error"] = "body is not a zip archive"
-        return result
-    with zf:
-        infos = [i for i in zf.infolist() if not i.is_dir()]
-        if sum(i.file_size for i in infos) > SAVE_FILE_MAX_BYTES:
-            result["error"] = "archive exceeds size limit when extracted"
-            return result
-        if len(infos) > settings.SAVE_FILE_MAX_ENTRIES:
-            result["error"] = f"archive holds more than {settings.SAVE_FILE_MAX_ENTRIES} entries"
-            return result
-        wanted = []
-        for info in infos:
-            member = PurePosixPath(info.filename)
-            if member.is_absolute() or ".." in member.parts:
-                result["error"] = f"archive member escapes save dir: {info.filename}"
-                return result
-            if info.filename == MANIFEST_NAME:
-                # The broker's own index, not save data: it sits outside every
-                # subtree, so it has to be dropped before the subtree check.
-                continue
-            rel = member.as_posix()
-            if rel in subtrees or rel in excluded:
-                # A save file always sits inside a subtree, never is one: a dump
-                # only ever walks below `root / sub`. Writing such a member would
-                # leave a plain file where the emulator expects its save
-                # directory, and the mkdir on its next launch would fail.
-                result["error"] = f"archive member names a save subtree: {info.filename}"
-                return result
-            if _under(member, excluded):
-                result["excluded"] += 1
-                continue
-            if not _under(member, subtrees):
-                result["error"] = f"archive member outside save subtrees: {info.filename}"
-                return result
-            wanted.append(info)
-
-        root_real = root.resolve()
-        for info in wanted:
-            target = root / PurePosixPath(info.filename)
-            mtime = calendar.timegm(info.date_time)
-            exempt = _guard_exempt(always_restore, info.filename)
-            tmp: Optional[Path] = None
-            try:
-                # Belt-and-suspenders on top of the member-path check above:
-                # confirms the resolved write location is still under root
-                # even if some ancestor directory turned out to be a symlink.
-                if not target.parent.resolve().is_relative_to(root_real):
-                    log.warning("saves: %s resolves outside save dir, skipped", info.filename)
-                    result["failed"] += 1
-                    continue
-                if (
-                    not exempt
-                    and target.exists()
-                    and target.stat().st_mtime > mtime + _SAVE_MTIME_SLACK
-                ):
-                    result["skipped"] += 1
-                    continue
-                target.parent.mkdir(parents=True, exist_ok=True)
-                # Unique per member: two restores sharing one staging name
-                # interleave their writes, and the os.replace below then
-                # publishes the mixture as the player's save.
-                tmp = target.parent / f".{target.name}.{secrets.token_hex(8)}.tmp"
-                tmp.write_bytes(zf.read(info))
-                os.replace(tmp, target)
-                os.utime(target, (mtime, mtime))
-            except (OSError, ValueError, zipfile.BadZipFile) as exc:
-                log.warning("saves: could not restore %s: %s", info.filename, exc)
-                # The staging file is dot-prefixed, so `_iter_save_files` never
-                # sees it and no later dump would ever carry it off the disk.
-                if tmp is not None:
-                    try:
-                        tmp.unlink(missing_ok=True)
-                    except OSError as cleanup_exc:
-                        log.warning(
-                            "saves: could not remove the staging file %s: %s", tmp, cleanup_exc
-                        )
-                result["failed"] += 1
-                continue
-            result["written"] += 1
-    return result
+    view = read_archive(content)
+    error = view.error
+    plan: Optional[V1Plan] = None
+    if error is None:
+        plan = plan_v1(view, root, subtrees, excluded, include_imports=True)
+        error = plan.error
+    if error is not None or plan is None:
+        return {
+            "written": 0, "skipped": 0, "excluded": 0, "failed": 0, "imported": 0, "error": error
+        }
+    return write_save_archive(
+        content, root, ArchivePlan(plan.names, plan.excluded_count), always_restore
+    )
 
 
 def write_export(zip_bytes: bytes, name: str) -> str:
