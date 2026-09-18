@@ -2727,12 +2727,20 @@ def test_a_placed_import_the_game_never_touches_still_ships_in_the_exit_dump(
     fake_emulator: list[FakeEmulator],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`import_paths` is recorded in the dump walk's own form, so the file survives the mtime baseline."""
+    """A placed file older than the dump's baseline ships only because `import_paths` names it.
+
+    The file is back-dated past the baseline cutoff, so the mtime check alone
+    would leave it out. It ships only if `import_paths` is recorded in the
+    dump walk's own form.
+    """
     monkeypatch.setattr(settings, "DEV_MODE", True)
     _accept_save_imports(monkeypatch)
     archive = broker_dirs["imports"] / "sess-1.zip"
     archive.write_bytes(_import_zip({".import/save/a.srm": b"new"}))
     assert _activate(client, broker_dirs, save={"archive": str(archive)}).status_code == 200
+    assert session.SESSION is not None
+    stale = session.SESSION["save_baseline"] - 3600
+    os.utime(fake_emulator[0].save_root / "saves" / "a.srm", (stale, stale))
 
     body = client.post(f"{API}/session/exit").json()
 
@@ -2740,6 +2748,7 @@ def test_a_placed_import_the_game_never_touches_still_ships_in_the_exit_dump(
     dumped = Path(body["upload"]["would_send"]["archive_path"])
     with zipfile.ZipFile(dumped) as zf:
         assert zf.read("saves/a.srm") == b"new"
+        assert json.loads(zf.read(saves.MANIFEST_NAME))["imported"] == ["saves/a.srm"]
 
 
 def test_imports_in_an_oversized_archive_get_the_structured_refusal(
@@ -2808,6 +2817,31 @@ def test_imports_in_an_archive_that_is_not_restored_are_refused(
 
     assert response.status_code == 422
     assert [r["reason"] for r in response.json()["detail"]["refusals"]] == ["kind_not_accepted"]
+
+
+def test_imports_in_an_archive_held_back_by_the_card_sync_are_refused(
+    client: TestClient,
+    broker_dirs: dict[str, Path],
+    fake_emulator: list[FakeEmulator],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With the only subtree on the card routes, imports are refused as synced separately."""
+    from webstation_broker import emulators
+
+    calls = _record_activate_hooks(monkeypatch)
+    monkeypatch.setattr(emulators.REGISTRY["fake"], "save_subtrees", ("saves",))
+    monkeypatch.setattr(emulators.REGISTRY["fake"], "memory_card_subtree", "saves")
+    archive = broker_dirs["imports"] / "sess-1.zip"
+    archive.write_bytes(_import_zip({".import/save/a.srm": b"x"}))
+
+    response = _activate(client, broker_dirs, save={"archive": str(archive), "memory_card_synced": True})
+
+    assert response.status_code == 422
+    refusals = response.json()["detail"]["refusals"]
+    assert [(r["reason"], r["member"]) for r in refusals] == [
+        ("memcard_synced_separately", ".import/save/a.srm")
+    ]
+    assert calls == []
 
 
 def test_a_plain_launch_records_no_imports(

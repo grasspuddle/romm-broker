@@ -541,17 +541,19 @@ async def _start_session(body: ActivateIn, request: Request) -> dict[str, Any]:
 
     Returns:
         A dict with `status`, `session_id`, `rom_file`, `save_restore` (the
-        extraction report, or None when nothing was restored),
-        `selkies_tokens_pushed` and the controller's landing `url`.
+        restore report, its `imported` a list of `{member, dest, sidecars}`
+        for each placed import, or None when nothing was restored),
+        `save_restore_skipped`, `selkies_tokens_pushed` and the controller's
+        landing `url`.
 
     Raises:
         HTTPException: 409 when a session is already active; 422 for an unknown
             emulator, a missing rom on an emulator that needs one, no bootable
-            file, or a failed restore; 422 with an `import_refused` body when an
-            archive's declared imports cannot be placed; 500 with
-            `import_preflight_failed` when placing them crashed; 400 for a rom path that cannot be
-            resolved or lies outside ROM_ROOT; 404 for a rom path or save
-            archive that does not exist.
+            file, or a failed restore; 422 with an `import_refused` body when
+            an archive's declared imports cannot be placed; 500 with
+            `import_preflight_failed` when placing them crashed; 400 for a rom
+            path that cannot be resolved or lies outside ROM_ROOT; 404 for a
+            rom path or save archive that does not exist.
     """
     if session.SESSION is not None and session.SESSION.get("active"):
         log.warning(
@@ -661,6 +663,7 @@ async def _start_session(body: ActivateIn, request: Request) -> dict[str, Any]:
                         ),
                     )
 
+    rom_ref = imports.RomRef.from_body(body.rom) if body.rom else None
     v1_plan: Optional[saves.V1Plan] = None
     preflight: Optional[imports.PreflightResult] = None
     if content is not None:
@@ -693,7 +696,7 @@ async def _start_session(body: ActivateIn, request: Request) -> dict[str, Any]:
                         view,
                         content,
                         rom_file=rom_file,
-                        rom=imports.RomRef.from_body(body.rom) if body.rom else None,
+                        rom=rom_ref,
                         memory_card_synced=bool(save.memory_card_synced),
                         excluded=excluded,
                         resume_slot=save.resume_slot,
@@ -718,7 +721,7 @@ async def _start_session(body: ActivateIn, request: Request) -> dict[str, Any]:
                 imports.resolve_activate_identity,
                 emulator,
                 rom_file,
-                imports.RomRef.from_body(body.rom) if body.rom else None,
+                rom_ref,
             )
         except Exception:
             # Identity only informs imports; a launch never fails over it.
