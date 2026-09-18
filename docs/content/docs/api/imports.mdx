@@ -1,0 +1,168 @@
+---
+title: "Declared imports"
+description: "Handing the broker a save, state or memory card it did not write, and what each refusal means."
+---
+
+## What an import is
+
+A save archive the broker wrote is restored path for path. A save from
+somewhere else (another emulator, real hardware, an EmulatorJS export)
+has no path the broker knows. So RomM declares it instead: the member goes
+under `.import/<kind>/` in the archive, and the manifest says what it is.
+
+```json
+{
+  "version": 2,
+  "created_at": 1789000000,
+  "files": [
+    { "path": ".import/save/Game.srm", "kind": "save", "origin": "standalone" }
+  ]
+}
+```
+
+`kind` is `save`, `state` or `memcard`, and it must match the path's second
+segment. `origin` is `emulatorjs`, `standalone`, `hardware` or `unknown`.
+It is advisory: it sharpens a refusal but never changes where a member lands.
+
+Every import member is checked before the working slot is cleared. If
+any member is refused, nothing is written and activate answers 422:
+
+```json
+{
+  "detail": {
+    "error": "import_refused",
+    "refusals": [
+      {
+        "reason": "kind_not_accepted",
+        "member": ".import/save/Game.srm",
+        "expected": "no imports",
+        "detail": null,
+        "suggest_emulator": null,
+        "docs": "/docs/api/imports#kind-not-accepted"
+      }
+    ],
+    "truncated": 0
+  }
+}
+```
+
+At most 200 refusals are listed; `truncated` counts the rest. A crash while
+placing imports answers 500 with `{"error": "import_preflight_failed"}`, still
+before anything is cleared.
+
+**No emulator accepts imports yet.** The framework is in place and every
+emulator refuses each member with `kind_not_accepted`. Emulators opt in
+one at a time.
+
+The refusals are sorted by member, then by reason; an archive-level refusal
+has `member: null` and sorts first. In an archive that holds imports, a
+regular member that would have failed the restore is listed here too, as
+`unsafe_path` or `unrecognised_layout`, with the old error text as its
+`detail`. An archive without imports keeps its old
+`save restore failed: <message>` answer.
+
+Activate's response lists each placed import under `save_restore.imported`,
+as `{member, dest, sidecars}`. The exit dump then ships every placed file
+even if the game never touched it, and lists those paths under the
+manifest's `imported` key, so an import is never lost to the "only what
+changed" rule.
+
+## What RomM can tell the broker
+
+Three optional `rom` fields on activate help an emulator place an import:
+
+| Field | Purpose |
+| --- | --- |
+| `title_id` | RomM's game id for the rom: a serial, title id or game code. |
+| `save_target` | RomM's name for where this game keeps its saves, such as a PS2 card folder. |
+| `save_target_layout` | How `save_target` names that place: `folder-exact`, `folder-prefix`, `file-exact`, `file-prefix` or `folder-split`. |
+
+A `save_target_layout` the broker does not know is logged and passed
+through; it never fails the launch.
+
+## Asking what an emulator takes
+
+```
+GET /streaming/api/session/import-spec?emulator=pcsx2&platform=ps2
+```
+
+This answers `import_api`, `manifest_version`, the `emulator` and `platform`
+it was asked about, the accepted `kinds` (each with its `shapes`,
+`requires_resume_slot` and `max_members`), `state_channel`, `card_subtree`,
+`state_slot` (`null` when the emulator has no states) and the full list of
+`reasons`. It needs `X-Broker-Secret` like every other RomM-facing route and
+answers 403 without it. An unrecognised emulator answers 422
+`unknown emulator: <name>`.
+
+Today every emulator answers `kinds: []` and `state_channel: "none"`.
+
+For an emulator author, the answer comes from `Emulator.import_spec()`. It
+takes no arguments and reads the platform from `self.platform`; the default
+accepts nothing.
+
+## Refusal reasons
+
+### `manifest_invalid` [#manifest-invalid]
+The archive holds `.import/` members but no usable version 2 manifest, or a
+member is undeclared, declared twice, or declared as a kind that does not
+match its path.
+
+### `unsafe_path` [#unsafe-path]
+A path component is empty, hidden, `..`, `__MACOSX` or too long, or the name
+has a backslash, colon or control character, or it is non-ASCII without
+the zip UTF-8 flag. Also used when the destination would resolve outside the
+save root through a symlink.
+
+### `kind_not_accepted` [#kind-not-accepted]
+This emulator does not take this kind. `expected` lists the kinds it does.
+
+### `state_uses_push` [#state-uses-push]
+This emulator takes states through `PUT /api/session/state-file` after
+activate, not inside the archive.
+
+### `resume_slot_required` [#resume-slot-required]
+The state only loads when `save.resume_slot` is set on the activate.
+
+### `memcard_synced_separately` [#memcard-synced-separately]
+The memory card travels on the memory-card routes this session, so it cannot
+also come in through the archive.
+
+### `source_incompatible` [#source-incompatible]
+The member is in a format this emulator cannot read, such as a RetroArch
+state given to a standalone emulator. `suggest_emulator` names one that
+can, when there is one.
+
+### `needs_conversion` [#needs-conversion]
+The data is right but in a container this emulator does not read directly.
+
+### `unrecognised_layout` [#unrecognised-layout]
+The member's path does not match any shape this emulator accepts.
+
+### `shape_unverified` [#shape-unverified]
+The file's contents do not look like what its name claims.
+
+### `incomplete_unit` [#incomplete-unit]
+A save that spans several files is missing one, or a file is empty. When
+other members were also refused, the detail says this may be a knock-on
+effect of those refusals.
+
+### `destination_unresolvable` [#destination-unresolvable]
+The emulator cannot work out where this member belongs for this rom.
+
+### `identity_unknown` [#identity-unknown]
+The emulator needs to know which game this is, and neither the rom nor
+RomM says.
+
+### `identity_mismatch` [#identity-mismatch]
+The member belongs to a different game than the one being launched. When
+RomM supplied the session's id, the detail says how to correct it.
+
+### `protected_destination` [#protected-destination]
+The member would overwrite emulator configuration, not save data.
+
+### `destination_conflict` [#destination-conflict]
+Two members land on the same file, a member lands where a restored save
+already goes, or there are more members of a kind than the emulator allows.
+
+### `too_large` [#too-large]
+The archive, imports included, is over the size or file-count limit.

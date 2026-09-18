@@ -45,6 +45,9 @@ curl -k -X DELETE https://localhost:3001/streaming/api/session/exports/abc123-17
   -H 'X-Broker-Secret: <shared secret>'
 ```
 
+Members under `.import/` are not restored path for path; they are placed by
+the emulator's own rules. See [Declared imports](/docs/api/imports).
+
 ## What an archive holds
 
 An archive is a zip file of the emulator's save subtrees (the specific
@@ -89,7 +92,9 @@ at its root, naming the session and labelling each file:
 only set for a launcher that can run several different emulator cores, like
 RetroArch, so a RetroArch PSP archive can be told apart from a standalone
 PPSSPP one. `state_slot` is `null` when the emulator has no save states at
-all.
+all. When the session placed [declared imports](/docs/api/imports), an
+`imported` list names the placed files, which ship whether or not the game
+changed them.
 
 The manifest describes what's in the archive, it isn't save data itself: it
 doesn't appear in the `save_dump.files` list, and when an archive is

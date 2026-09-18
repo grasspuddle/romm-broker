@@ -1332,3 +1332,13 @@ def test_an_archive_level_manifest_refusal_refuses_the_whole_import(tmp_path: Pa
 
     assert result.placements == ()
     assert [(r.reason, r.member) for r in result.refusals] == [("manifest_invalid", None)]
+
+
+def test_every_refusal_code_has_a_docs_anchor() -> None:
+    """Each `docs` link a refusal carries lands on a heading in the imports page."""
+    page = Path(__file__).resolve().parents[1] / "docs" / "content" / "docs" / "api" / "imports.mdx"
+    text = page.read_text(encoding="utf-8")
+
+    missing = [r for r in sorted(imports.REASONS) if f"[#{r.replace('_', '-')}]" not in text]
+
+    assert missing == []

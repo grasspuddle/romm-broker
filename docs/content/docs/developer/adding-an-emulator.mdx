@@ -26,6 +26,10 @@ driven from outside the process:
   5 s; some need a protocol message first.
 - What `rom.path` looks like for its platform (a disc image, a folder, a
   package that has to be installed first).
+- Whether it can take saves the broker did not write. The default
+  `import_spec()` accepts none, so every declared import is refused; an
+  override reads the platform from `self.platform`. See
+  [Declared imports](/docs/api/imports).
 </Step>
 <Step>
 ### Write the launcher
