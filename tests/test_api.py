@@ -6,6 +6,7 @@ exports, context, exit and disc swap.
 
 import io
 import json
+import logging
 import os
 import shutil
 import signal
@@ -2588,3 +2589,29 @@ def test_dump_saves_forces_the_session_import_paths_in(
     report = anyio.run(api._dump_saves, emulator, sess)
 
     assert [f["path"] for f in report["files"]] == ["saves/placed.srm"]
+
+
+def test_activate_takes_romm_identity_fields_and_never_refuses_a_layout(
+    client: TestClient,
+    broker_dirs: dict[str, Path],
+    fake_emulator: list[FakeEmulator],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The identity fields are accepted, and an unknown layout is logged, never refused."""
+    rom = {
+        "id": 5,
+        "name": "Game",
+        "platform": "ps2",
+        "path": str(_rom(broker_dirs)),
+        "title_id": "SLUS-20001",
+        "save_target": "BASLUS-20001",
+        "save_target_layout": "folder-sideways",
+    }
+    with caplog.at_level(logging.WARNING, logger="webstation_broker.api"):
+        response = _activate(client, broker_dirs, rom=rom)
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "launching"
+    assert "folder-sideways" in caplog.text
+    assert session.SESSION is not None
+    assert session.SESSION["rom"]["title_id"] == "SLUS-20001"

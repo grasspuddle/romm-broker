@@ -23,7 +23,7 @@ from urllib.parse import urlsplit
 import anyio
 from fastapi import APIRouter, Header, HTTPException, Query, Request
 from fastapi.responses import FileResponse, Response
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from starlette.websockets import WebSocketState
 
 from . import callback, memcard, saves, screenshot, selkies, session, settings
@@ -99,6 +99,16 @@ class SaveIn(BaseModel):
     """
 
 
+KNOWN_SAVE_TARGET_LAYOUTS = frozenset(
+    {"folder-exact", "folder-prefix", "file-exact", "file-prefix", "folder-split"}
+)
+"""The `save_target_layout` values RomM is known to send.
+
+Any other value is logged and passed through: RomM may add layouts before
+the broker learns them, and a launch must never fail over a hint.
+"""
+
+
 class RomIn(BaseModel):
     """The rom RomM resolved for the launch.
 
@@ -107,6 +117,9 @@ class RomIn(BaseModel):
         name: The rom's display name, if known.
         platform: The platform slug, which general-purpose emulators use to pick a core.
         language: The rom's language, for emulators whose games ship several in one folder.
+        title_id: RomM's game id for the rom (a serial, title id or game code), if it has one.
+        save_target: RomM's name for where this game keeps its saves, if it has one.
+        save_target_layout: How `save_target` names that place; see `KNOWN_SAVE_TARGET_LAYOUTS`.
         path: Absolute container path to the rom, validated against ROM_ROOT on activate.
     """
 
@@ -121,7 +134,28 @@ class RomIn(BaseModel):
     language sorts first. Unknown or absent values leave the emulator on its
     own default rather than failing the launch.
     """
+    title_id: Optional[str] = None
+    """RomM's game id for the rom (a serial, title id or game code), if it has one."""
+    save_target: Optional[str] = None
+    """RomM's name for where this game keeps its saves, if it has one (a PS2 card dir, say)."""
+    save_target_layout: Optional[str] = None
+    """How `save_target` names that place; see `KNOWN_SAVE_TARGET_LAYOUTS`."""
     path: str
+
+    @field_validator("save_target_layout")
+    @classmethod
+    def _log_unknown_layout(cls, value: Optional[str]) -> Optional[str]:
+        """Log a layout this broker does not know, and keep it.
+
+        Args:
+            value: The layout RomM sent.
+
+        Returns:
+            The value, unchanged.
+        """
+        if value is not None and value not in KNOWN_SAVE_TARGET_LAYOUTS:
+            log.warning("activate: unknown save_target_layout %r, ignoring it", value)
+        return value
 
 
 class CallbackIn(BaseModel):
