@@ -154,7 +154,7 @@ class RomIn(BaseModel):
             The value, unchanged.
         """
         if value is not None and value not in KNOWN_SAVE_TARGET_LAYOUTS:
-            log.warning("activate: unknown save_target_layout %r, ignoring it", value)
+            log.warning("activate: unknown save_target_layout %r, passing it through", value)
         return value
 
 
