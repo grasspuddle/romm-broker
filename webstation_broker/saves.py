@@ -12,6 +12,7 @@ import os
 import secrets
 import time
 import zipfile
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Optional
 
@@ -29,6 +30,18 @@ and so a restore can tell the broker's own index from real save data.
 """
 MANIFEST_VERSION = 1
 """Schema version of the archive manifest, for a parent reading old archives."""
+IMPORT_PREFIX = ".import/"
+"""Archive prefix that marks a member as a declared import rather than a restored dump.
+
+The broker never dumps a dot-prefixed path, so no v1 archive can carry one. A
+member under it is placed by the emulator's own import rules, not by path.
+"""
+MANIFEST_MAX_BYTES = 1024 * 1024
+"""Largest manifest a restore will parse, and only when the archive holds imports.
+
+A v1 dump listing ten thousand files can pass this, which is why a v1-only
+archive never has its manifest parsed at all.
+"""
 _SAVE_MTIME_SLACK = 2.0
 """Seconds of slack on the newer-file guard.
 
@@ -330,6 +343,97 @@ def build_save_archive(
     if report["files"]:
         report["zip_bytes"] = buf.getvalue()
     return _finish_dump(report, changed_skipped)
+
+
+@dataclass(frozen=True)
+class ArchiveView:
+    """One pass over an archive's member list, taken before anything is cleared.
+
+    Attributes:
+        error: The legacy whole-archive error (not a zip, too large, too many
+            entries), or None.
+        v1: Non-directory members that are neither the manifest nor under
+            `IMPORT_PREFIX`, in zip order.
+        imports: Non-directory members under `IMPORT_PREFIX`, in zip order.
+        manifest: The parsed manifest, read only when `imports` is non-empty
+            and `error` is None.
+        manifest_error: Why the manifest could not be used, under the same
+            condition.
+    """
+
+    error: Optional[str]
+    v1: tuple[zipfile.ZipInfo, ...]
+    imports: tuple[zipfile.ZipInfo, ...]
+    manifest: Optional[Any] = None
+    manifest_error: Optional[str] = None
+
+
+def _read_manifest(zf: zipfile.ZipFile, info: zipfile.ZipInfo) -> tuple[Optional[Any], Optional[str]]:
+    """Parse the archive's manifest, reporting rather than raising on a bad one.
+
+    Args:
+        zf: The open archive.
+        info: The manifest's entry.
+
+    Returns:
+        The parsed JSON and None, or None and the reason it is unusable.
+    """
+    if info.file_size > MANIFEST_MAX_BYTES:
+        return None, f"manifest exceeds {MANIFEST_MAX_BYTES} bytes"
+    try:
+        raw = zf.read(info)
+    except (OSError, ValueError, RuntimeError, NotImplementedError, zipfile.BadZipFile) as exc:
+        return None, f"manifest unreadable: {exc}"
+    try:
+        return json.loads(raw), None
+    except ValueError as exc:
+        # JSONDecodeError and UnicodeDecodeError are both ValueErrors.
+        return None, f"manifest is not JSON: {exc}"
+
+
+def read_archive(content: bytes) -> ArchiveView:
+    """Partition an archive's members and apply the whole-archive limits.
+
+    The members are split even when a limit trips, so the caller can still
+    tell whether the archive held imports and choose which kind of refusal
+    to answer with.
+
+    Args:
+        content: The zip archive body.
+
+    Returns:
+        The view. Its `error` uses the wording restores have always used, and
+        the manifest counts toward both limits, as it always has.
+    """
+    try:
+        zf = zipfile.ZipFile(io.BytesIO(content))
+    except zipfile.BadZipFile:
+        return ArchiveView("body is not a zip archive", (), ())
+    with zf:
+        infos = [i for i in zf.infolist() if not i.is_dir()]
+        manifest_info: Optional[zipfile.ZipInfo] = None
+        v1: list[zipfile.ZipInfo] = []
+        imports: list[zipfile.ZipInfo] = []
+        for info in infos:
+            if info.filename == MANIFEST_NAME:
+                manifest_info = info
+            elif info.filename.startswith(IMPORT_PREFIX):
+                imports.append(info)
+            else:
+                v1.append(info)
+        error: Optional[str] = None
+        if sum(i.file_size for i in infos) > SAVE_FILE_MAX_BYTES:
+            error = "archive exceeds size limit when extracted"
+        elif len(infos) > settings.SAVE_FILE_MAX_ENTRIES:
+            error = f"archive holds more than {settings.SAVE_FILE_MAX_ENTRIES} entries"
+        manifest: Optional[Any] = None
+        manifest_error: Optional[str] = None
+        if imports and error is None:
+            if manifest_info is None:
+                manifest_error = "archive has no manifest"
+            else:
+                manifest, manifest_error = _read_manifest(zf, manifest_info)
+    return ArchiveView(error, tuple(v1), tuple(imports), manifest, manifest_error)
 
 
 def _under(member: PurePosixPath, subtrees: tuple[str, ...]) -> bool:

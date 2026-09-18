@@ -616,3 +616,99 @@ def test_restore_leaves_no_staging_file_behind_when_a_member_fails(
     assert result["failed"] == 1
     assert result["written"] == 0
     assert list((tmp_path / "GC").iterdir()) == []
+
+
+# ── read_archive: the partition every restore starts from ──────────────
+
+
+def test_read_archive_partitions_v1_imports_and_the_manifest() -> None:
+    """Members split into v1 and `.import/`, and the manifest is neither."""
+    manifest = {"version": 2, "files": []}
+    body = _zip(
+        {
+            "saves/a.srm": b"a",
+            ".import/save/b.srm": b"b",
+            saves.MANIFEST_NAME: json.dumps(manifest).encode(),
+        }
+    )
+
+    view = saves.read_archive(body)
+
+    assert view.error is None
+    assert [i.filename for i in view.v1] == ["saves/a.srm"]
+    assert [i.filename for i in view.imports] == [".import/save/b.srm"]
+    assert view.manifest == manifest
+    assert view.manifest_error is None
+
+
+def test_read_archive_leaves_the_manifest_unparsed_without_imports() -> None:
+    """A v1 dump's manifest is never parsed, so a large one can never refuse a restore."""
+    body = _zip({"saves/a.srm": b"a", saves.MANIFEST_NAME: b"not json"})
+
+    view = saves.read_archive(body)
+
+    assert view.error is None
+    assert view.manifest is None
+    assert view.manifest_error is None
+
+
+def test_read_archive_rejects_a_body_that_is_not_a_zip() -> None:
+    """A non-zip body keeps today's error wording."""
+    view = saves.read_archive(b"nope")
+
+    assert view.error == "body is not a zip archive"
+    assert view.v1 == () and view.imports == ()
+
+
+def test_read_archive_reports_the_size_cap_but_still_partitions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A tripped cap keeps the partition, so the caller can tell whether imports exist."""
+    monkeypatch.setattr(saves, "SAVE_FILE_MAX_BYTES", 3)
+    body = _zip({"saves/a.srm": b"aa", ".import/save/b.srm": b"bb"})
+
+    view = saves.read_archive(body)
+
+    assert view.error == "archive exceeds size limit when extracted"
+    assert len(view.imports) == 1
+    assert view.manifest is None
+
+
+def test_read_archive_counts_the_manifest_toward_the_entry_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The manifest is an entry like any other, as it is today."""
+    monkeypatch.setattr(saves.settings, "SAVE_FILE_MAX_ENTRIES", 1)
+    body = _zip({"saves/a.srm": b"a", saves.MANIFEST_NAME: b"{}"})
+
+    view = saves.read_archive(body)
+
+    assert view.error == "archive holds more than 1 entries"
+
+
+@pytest.mark.parametrize(
+    ("manifest", "fragment"),
+    [
+        (b"{not json", "not JSON"),
+        (b"x" * (1024 * 1024 + 1), "exceeds"),
+        (None, "no manifest"),
+    ],
+    ids=["not-json", "oversized", "missing"],
+)
+def test_read_archive_reports_an_unusable_manifest_beside_imports(
+    manifest: Optional[bytes], fragment: str
+) -> None:
+    """With imports present, a manifest that cannot be used is recorded rather than raised.
+
+    Args:
+        manifest: The manifest bytes, or None to leave it out.
+        fragment: Text the recorded manifest error must contain.
+    """
+    members = {".import/save/b.srm": b"b"}
+    if manifest is not None:
+        members[saves.MANIFEST_NAME] = manifest
+    view = saves.read_archive(_zip(members))
+
+    assert view.error is None
+    assert view.manifest is None
+    assert fragment in (view.manifest_error or "")
