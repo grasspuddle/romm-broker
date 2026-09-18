@@ -801,9 +801,9 @@ def build_dest(
     return PurePosixPath(subtree, *ids, *tail)
 
 
-_PS_DASHED = re.compile(r"([A-Z]{4})[-_ ]?(\d{3})\.?(\d{2})", re.I)
+_PS_DASHED = re.compile(r"([A-Z]{4})[-_ ]?(\d{3})\.?(\d{2})", re.I | re.ASCII)
 """A PlayStation serial in any of its spellings: `SLUS-20001`, `SLUS_200.01`, `slus20001`."""
-_PS_NODASH = re.compile(r"([A-Za-z]{4})[-_ ]?(\d{5})")
+_PS_NODASH = re.compile(r"([A-Za-z]{4})[-_ ]?(\d{5})", re.ASCII)
 """A PSP/PS3 serial with or without its separator."""
 _HEX8 = re.compile(r"(?:0x)?([0-9A-Fa-f]{8})")
 """An eight-digit hex title id, optionally `0x`-prefixed."""
@@ -973,7 +973,7 @@ def resolve_session_identity(
     Returns:
         The identity, with the source it came from.
     """
-    key = ("identity", family, use_save_target)
+    key = ("identity", family, rom_reader, use_save_target, romm_family)
     cached = ctx.memo.get(key)
     if isinstance(cached, SessionIdentity):
         return cached
@@ -982,10 +982,11 @@ def resolve_session_identity(
     if rom_reader is not None and ctx.rom_file is not None:
         try:
             raw = rom_reader(ctx.rom_file)
+            from_rom = normalise(raw) if raw else None
+            if raw and from_rom is None:
+                log.info("imports: rom id %r is not a %s id, ignoring it", raw, family)
         except Exception as exc:
             log.warning("imports: could not read an id off %s: %s", ctx.rom_file, exc)
-            raw = None
-        from_rom = normalise(raw) if raw else None
     from_romm: Optional[str] = None
     raw_romm = (ctx.rom.save_target if use_save_target else ctx.rom.title_id) if ctx.rom else None
     if raw_romm:

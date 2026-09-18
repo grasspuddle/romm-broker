@@ -798,3 +798,66 @@ def test_resolve_activate_identity_uses_the_emulators_source() -> None:
 
     assert none == imports.SessionIdentity(None, "none")
     assert some == imports.SessionIdentity("SLUS-20001", "romm")
+
+
+def test_the_memo_does_not_serve_a_readerless_answer_to_a_reader() -> None:
+    """A lookup without a reader never answers for a later one that has a reader."""
+    ctx = _ctx(rom_file=Path("/r"), rom=_rom("SLUS-20002"))
+
+    first = imports.resolve_session_identity(ctx, family="ps_serial_dashed")
+    second = imports.resolve_session_identity(
+        ctx, family="ps_serial_dashed", rom_reader=lambda _: "SLUS-20001"
+    )
+
+    assert first == imports.SessionIdentity("SLUS-20002", "romm")
+    assert second == imports.SessionIdentity("SLUS-20001", "rom")
+
+
+def test_a_rom_reader_answering_a_non_string_reads_as_no_id(caplog: pytest.LogCaptureFixture) -> None:
+    """A reader that answers bytes is logged and treated as finding nothing, not a crash.
+
+    Args:
+        caplog: Captures the module's log.
+    """
+    with caplog.at_level("WARNING", logger="webstation_broker.imports"):
+        identity = imports.resolve_session_identity(
+            _ctx(rom_file=Path("/r"), rom=_rom("SLUS-20001")),
+            family="ps_serial_dashed",
+            rom_reader=lambda _: b"SLUS-20001",  # type: ignore[arg-type,return-value]
+        )
+
+    assert identity == imports.SessionIdentity("SLUS-20001", "romm")
+    assert "/r" in caplog.text
+
+
+def test_a_rom_id_outside_the_family_is_logged(caplog: pytest.LogCaptureFixture) -> None:
+    """An id read off the rom that is not in the family is logged and ignored.
+
+    Args:
+        caplog: Captures the module's log.
+    """
+    with caplog.at_level("INFO", logger="webstation_broker.imports"):
+        identity = imports.resolve_session_identity(
+            _ctx(rom_file=Path("/r")), family="ps_serial_dashed", rom_reader=lambda _: "not a serial"
+        )
+
+    assert identity == imports.SessionIdentity(None, "none")
+    assert "not a serial" in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("family", "raw"),
+    [
+        ("ps_serial_dashed", "SLUS-٢0001"),
+        ("ps_serial_dashed", "ſlus-20001"),
+        ("ps_serial_nodash", "ULUS٢0064"),
+    ],
+)
+def test_serials_are_read_as_ascii_only(family: str, raw: str) -> None:
+    """Non-ASCII digits and letters that fold to ASCII are not a serial.
+
+    Args:
+        family: The id family.
+        raw: A near-serial with one non-ASCII character.
+    """
+    assert imports.NORMALISERS[family](raw) is None
