@@ -1887,7 +1887,8 @@ async def get_import_spec(
 
     Returns:
         The API and manifest versions, the emulator's spec, its state slot
-        (None when it has no states) and every refusal code.
+        (None when it takes no states, neither mid-session nor in the
+        archive) and every refusal code.
 
     Raises:
         HTTPException: 403 on a bad secret; 422 for an unknown emulator.
@@ -1905,7 +1906,9 @@ async def get_import_spec(
         "emulator": inst.name,
         "platform": platform,
         **spec.as_dict(),
-        "state_slot": inst.state_slot if inst.supports_states else None,
+        # An archive state resumes through save.resume_slot, so RomM needs the
+        # slot even from an emulator with no mid-session states.
+        "state_slot": inst.state_slot if (inst.supports_states or spec.state_channel == "archive") else None,
         "reasons": sorted(imports.REASONS),
     }
 

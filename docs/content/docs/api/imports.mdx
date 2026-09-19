@@ -94,10 +94,11 @@ GET /streaming/api/session/import-spec?emulator=pcsx2&platform=ps2
 This answers `import_api`, `manifest_version`, the `emulator` and `platform`
 it was asked about, the accepted `kinds` (each with its `shapes`,
 `requires_resume_slot` and `max_members`), `state_channel`, `card_subtree`,
-`state_slot` (`null` when the emulator has no states) and the full list of
-`reasons`. It needs `X-Broker-Secret` like every other RomM-facing route and
-answers 403 without it. An unrecognised emulator answers 422
-`unknown emulator: <name>`.
+`state_slot`, the value to send as `save.resume_slot` (`null` when the
+emulator takes no states, neither mid-session nor in the archive) and the
+full list of `reasons`. It needs `X-Broker-Secret` like every other
+RomM-facing route and answers 403 without it. An unrecognised emulator
+answers 422 `unknown emulator: <name>`.
 
 A 404 from this route means the broker predates imports. Never send
 `.import/` members to that broker: it cannot place them, and they would

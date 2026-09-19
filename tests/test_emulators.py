@@ -5,7 +5,6 @@ record.
 """
 
 import inspect
-import io
 import json
 import os
 import signal
@@ -13,17 +12,16 @@ import subprocess
 import sys
 import time
 import uuid
-import zipfile
 from collections.abc import Callable
 from pathlib import Path
 from typing import Optional
 
 import pytest
 
-from webstation_broker import emulators, imports, saves
+from webstation_broker import emulators
 from webstation_broker.emulators import base
 
-from .conftest import DETACHED_CMD, SLEEPER_CMD, await_cmdline, await_gone
+from .conftest import DETACHED_CMD, SLEEPER_CMD, await_cmdline, await_gone, import_zip, preflight_import
 
 
 def test_an_unknown_name_resolves_to_nothing() -> None:
@@ -649,9 +647,13 @@ def test_the_launch_env_points_at_the_labwc_session(monkeypatch: pytest.MonkeyPa
     assert env["DISPLAY"] == ":0"
 
 
-@pytest.mark.parametrize("name", sorted(emulators.REGISTRY))
-def test_no_emulator_accepts_imports_yet(name: str) -> None:
-    """Wave 1 ships the framework with every emulator's spec empty.
+_IMPORTING: frozenset[str] = frozenset({"flycast"})
+"""The emulators that accept declared imports; every other one inherits the refusing base hooks."""
+
+
+@pytest.mark.parametrize("name", sorted(set(emulators.REGISTRY) - _IMPORTING))
+def test_an_emulator_without_import_support_accepts_nothing(name: str) -> None:
+    """An emulator that has not opted in declares an empty spec.
 
     Args:
         name: The registry name.
@@ -662,13 +664,13 @@ def test_no_emulator_accepts_imports_yet(name: str) -> None:
     assert emu.import_spec().kinds == ()
 
 
-@pytest.mark.parametrize("name", sorted(emulators.REGISTRY))
-def test_no_emulator_overrides_an_import_hook_yet(name: str) -> None:
-    """Every emulator inherits the base import hooks, which refuse everything.
+@pytest.mark.parametrize("name", sorted(set(emulators.REGISTRY) - _IMPORTING))
+def test_an_emulator_without_import_support_keeps_the_base_hooks(name: str) -> None:
+    """An emulator that has not opted in inherits the base import hooks, which refuse everything.
 
-    The behavioural tests only reach the kind gate, so an override past it, or a
-    platform-dependent spec, would slip by them. Wave 2 relaxes this test per
-    emulator as it gains real hooks.
+    The behavioural test below only reaches the kind gate, so an override past
+    it, or a platform-dependent spec, would slip by it. An emulator that gains
+    real hooks moves into `_IMPORTING`.
 
     Args:
         name: The registry name.
@@ -680,39 +682,38 @@ def test_no_emulator_overrides_an_import_hook_yet(name: str) -> None:
         assert getattr(type(emu), hook) is getattr(base.Emulator, hook), f"{name} overrides {hook}"
 
 
-@pytest.mark.parametrize("name", sorted(emulators.REGISTRY))
-def test_every_emulator_refuses_a_declared_import(name: str) -> None:
-    """Preflight refuses each member with `kind_not_accepted` on every emulator.
+@pytest.mark.parametrize("name", sorted(set(emulators.REGISTRY) - _IMPORTING))
+def test_an_emulator_without_import_support_refuses_a_declared_import(name: str) -> None:
+    """Preflight refuses each member with `kind_not_accepted`.
 
     Args:
         name: The registry name.
     """
     emu = emulators.get_emulator(name)
     assert emu is not None
-    buf = io.BytesIO()
-    with zipfile.ZipFile(buf, "w") as zf:
-        zf.writestr(".import/save/a.sav", b"x")
-        zf.writestr(
-            saves.MANIFEST_NAME,
-            json.dumps(
-                {"version": 2, "created_at": 0, "files": [{"path": ".import/save/a.sav", "kind": "save"}]}
-            ),
-        )
-    body = buf.getvalue()
+    body = import_zip({".import/save/a.sav": b"x"})
 
-    result = imports.preflight(
-        emu,
-        saves.read_archive(body),
-        body,
-        rom_file=None,
-        rom=None,
-        memory_card_synced=False,
-        excluded=(),
-        resume_slot=None,
-    )
+    result = preflight_import(emu, body, rom_file=None)
 
     assert [(r.reason, r.member) for r in result.refusals] == [("kind_not_accepted", ".import/save/a.sav")]
     assert result.placements == ()
+
+
+@pytest.mark.parametrize("name", sorted(_IMPORTING))
+def test_an_importing_emulator_places_members_itself(name: str) -> None:
+    """An emulator listed as importing overrides the spec and placement hooks.
+
+    Guards the list itself: a name left in it after its hooks were removed
+    would otherwise escape every test above.
+
+    Args:
+        name: The registry name.
+    """
+    emu = emulators.get_emulator(name)
+    assert emu is not None
+
+    for hook in ("import_spec", "place_import"):
+        assert getattr(type(emu), hook) is not getattr(base.Emulator, hook), f"{name} inherits {hook}"
 
 
 @pytest.mark.parametrize("name", sorted(emulators.REGISTRY))

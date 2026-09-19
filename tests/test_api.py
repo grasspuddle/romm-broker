@@ -3096,6 +3096,46 @@ def test_import_spec_describes_what_an_emulator_takes(
     assert fake_emulator[0].platform == "ps2"
 
 
+@pytest.mark.parametrize(("channel", "slot"), [("archive", 3), ("none", None)])
+def test_import_spec_names_the_slot_for_an_archive_state_channel(
+    client: TestClient,
+    fake_emulator: list[FakeEmulator],
+    monkeypatch: pytest.MonkeyPatch,
+    channel: str,
+    slot: Optional[int],
+) -> None:
+    """An emulator with no mid-session states still names its slot when states ride the archive.
+
+    RomM sends that slot as `save.resume_slot`, and the state never loads without it.
+
+    Args:
+        client: The app, served without a secret.
+        fake_emulator: The registered fake.
+        monkeypatch: Pytest's attribute patcher.
+        channel: The spec's state channel.
+        slot: The `state_slot` discovery must answer.
+    """
+    monkeypatch.setattr(FakeEmulator, "supports_states", False)
+
+    def spec(self: FakeEmulator) -> imports.ImportSpec:
+        """Answer a spec with only the state channel set.
+
+        Args:
+            self: The emulator.
+
+        Returns:
+            The spec.
+        """
+        return imports.ImportSpec(state_channel=channel)
+
+    monkeypatch.setattr(FakeEmulator, "import_spec", spec)
+
+    response = client.get(f"{API}/session/import-spec", params={"emulator": "fake"})
+
+    assert response.status_code == 200
+    assert response.json()["state_slot"] == slot
+
+
 def test_import_spec_refuses_an_unknown_emulator(client: TestClient) -> None:
     """An unknown emulator is a 422, as on the memory-card routes."""
     response = client.get(f"{API}/session/import-spec", params={"emulator": "gameboy"})
