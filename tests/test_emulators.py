@@ -647,7 +647,7 @@ def test_the_launch_env_points_at_the_labwc_session(monkeypatch: pytest.MonkeyPa
     assert env["DISPLAY"] == ":0"
 
 
-_IMPORTING: frozenset[str] = frozenset({"dolphin", "duckstation", "flycast", "ppsspp", "retroarch"})
+_IMPORTING: frozenset[str] = frozenset({"dolphin", "duckstation", "flycast", "pcsx2", "ppsspp", "retroarch"})
 """The emulators that accept declared imports; every other one inherits the refusing base hooks."""
 
 
@@ -915,6 +915,7 @@ _EXAMPLE_PLATFORM: dict[str, str] = {
     "dolphin": "ngc",
     "duckstation": "psx",
     "flycast": "dc",
+    "pcsx2": "ps2",
     "ppsspp": "psp",
     "retroarch": "gb",
 }
@@ -931,6 +932,8 @@ _EXAMPLES: list[tuple[str, str, bytes]] = [
     ("flycast", ".import/save/dc_nvmem.bin", b"flash"),
     ("flycast", ".import/memcard/card.bin", bytes(131072)),
     ("flycast", ".import/state/Game.state", b"progress"),
+    ("pcsx2", ".import/save/mycard/_pcsx2_superblock", b"sb"),
+    ("pcsx2", ".import/memcard/mycard/_pcsx2_superblock", b"sb"),
     ("ppsspp", ".import/save/ULUS10041DATA00/PARAM.SFO", b"sfo"),
     ("ppsspp", ".import/state/ULUS10041_1.00_1.ppst", b"progress"),
     ("retroarch", ".import/save/Game.srm", b"sram"),
