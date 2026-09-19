@@ -875,6 +875,18 @@ def test_normalisers_bring_each_notation_to_one_form(family: str, raw: str, cano
     assert imports.NORMALISERS[family](raw) == canonical
 
 
+@pytest.mark.parametrize(
+    "raw", ["00010000524D4345", "0x00010000524d4345", "0001/0000/524D/4345", "RMCE01", "524D4345"]
+)
+def test_a_wii_title_id_normalises_to_its_game_code(raw: str) -> None:
+    """A full title id, a disc id and the hex game code all compare equal.
+
+    Args:
+        raw: The id as some source gives it.
+    """
+    assert imports.NORMALISERS["gc_wii_disc"](raw) == "524D4345"
+
+
 def _rom(title_id: Optional[str] = None, save_target: Optional[str] = None) -> imports.RomRef:
     """Build a rom reference carrying RomM's ids.
 

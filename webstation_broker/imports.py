@@ -994,7 +994,8 @@ def _gc_wii_disc(raw: str) -> Optional[str]:
     """Normalise a GameCube/Wii id to the hex of its four-character game code.
 
     Args:
-        raw: The id as found: a game id like `GZLE01`, or its hex.
+        raw: The id as found: a game id like `GZLE01`, its hex, or a sixteen-digit Wii
+            title id like `00010000524D4345`, whose low half is the game code's hex.
 
     Returns:
         The canonical eight-digit hex id, or None.
@@ -1002,6 +1003,11 @@ def _gc_wii_disc(raw: str) -> Optional[str]:
     hexed = _hex8(raw)
     if hexed:
         return hexed
+    wide = _hex16(raw)
+    if wide:
+        # A Wii title id is its category in the high half and the game code,
+        # in hex, in the low half: 00010000 524D4345 is RMCE.
+        return wide[8:]
     value = raw.strip()
     if not _GAME_ID.fullmatch(value):
         return None

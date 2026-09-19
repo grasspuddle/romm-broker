@@ -300,6 +300,42 @@ def _disc(path: Path, game_id: bytes, offset: int = 0) -> Path:
     return path
 
 
+@pytest.mark.parametrize(
+    ("data", "offset", "expected"),
+    [
+        (b"GZLE01xxxx", 0, "GZLE01"),
+        (b"\x00" * 0x200 + b"RMCE01", 0x200, "RMCE01"),
+        (b"\xff" * 6, 0, None),
+        (b"GZLE0", 0, None),
+        (b"GZ-E01", 0, None),
+        (b"GZLE01", 0x200, None),
+    ],
+)
+def test_game_id_in_reads_six_alphanumerics_or_nothing(
+    data: bytes, offset: int, expected: Optional[str]
+) -> None:
+    """The bytes variant accepts exactly what the file variant does.
+
+    Args:
+        data: The bytes to read.
+        offset: Where the id starts.
+        expected: The id, or None.
+    """
+    assert dolphin._game_id_in(data, offset) == expected
+
+
+def test_game_id_at_reads_through_the_bytes_variant(tmp_path: Path) -> None:
+    """A file read and a bytes read agree.
+
+    Args:
+        tmp_path: The per-test temporary directory.
+    """
+    disc = tmp_path / "game.iso"
+    disc.write_bytes(b"GZLE01" + bytes(64))
+
+    assert dolphin._game_id_at(disc, 0) == dolphin._game_id_in(disc.read_bytes(), 0) == "GZLE01"
+
+
 def test_a_boot_resume_takes_the_state_that_matches_the_disc(
     state_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -140,6 +140,27 @@ to check a state against.
 """
 
 
+def _game_id_in(data: bytes, offset: int) -> Optional[str]:
+    """Read a game id out of bytes already in memory, such as a state's head.
+
+    Args:
+        data: The bytes to read.
+        offset: Byte offset the id starts at.
+
+    Returns:
+        The id, or None when the bytes are too short, not ascii, or not six alphanumerics.
+    """
+    raw = data[offset : offset + _GAME_ID_LEN]
+    if len(raw) != _GAME_ID_LEN:
+        return None
+    try:
+        game_id = raw.decode("ascii")
+    except UnicodeDecodeError:
+        log.debug("game id at offset %d was not ascii", offset)
+        return None
+    return game_id if _GAME_ID_RE.fullmatch(game_id) else None
+
+
 def _game_id_at(path: Path, offset: int) -> Optional[str]:
     """Read a game id out of `path` at `offset`.
 
@@ -157,12 +178,7 @@ def _game_id_at(path: Path, offset: int) -> Optional[str]:
     except OSError as exc:
         log.warning("could not read a game id out of %s: %s", path, exc)
         return None
-    try:
-        game_id = raw.decode("ascii")
-    except UnicodeDecodeError:
-        log.debug("game id at %s offset %d was not ascii", path, offset)
-        return None
-    return game_id if _GAME_ID_RE.fullmatch(game_id) else None
+    return _game_id_in(raw, 0)
 
 
 def _rom_game_id(rom_path: Path) -> Optional[str]:
