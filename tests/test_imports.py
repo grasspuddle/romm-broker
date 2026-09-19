@@ -528,7 +528,7 @@ def test_normalise_member_ignores_the_date_a_placed_member_never_uses() -> None:
         " .s01",
         " _1.ppst",
         "GZLE01.s01\n",
-        "a‮b.s01",
+        "a\u202eb.s01",
     ],
 )
 def test_check_state_basename_refuses_a_name_no_emulator_writes(name: str) -> None:
