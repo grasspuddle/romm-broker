@@ -253,10 +253,11 @@ On `wii`, a save is a game's title folder from the NAND, under `save`:
 - The title id must be the game being launched, or it is
   `identity_mismatch`. When the broker has no id for the game being
   launched, the title is taken on trust.
-- A `data.bin` is `needs_conversion`: it is the export a Wii writes to an SD
-  card, so import it with Dolphin's Import Wii Save and send the title folder
-  that makes. A `nand.bin` is `source_incompatible`: send the title folder
-  from the dump instead. `sys/`, `ticket/`, `title/00000001/` and a title's
+- A loose `data.bin`, outside a title's `data/` folder, is
+  `needs_conversion`: it is the export a Wii writes to an SD card, so import
+  it with Dolphin's Import Wii Save and send the title folder that makes. A
+  `nand.bin` is `source_incompatible`: send the title folder from the dump
+  instead. `sys/`, `ticket/`, `title/00000001/` and a title's
   `content/` folder are `protected_destination`. Anything else, a `.gci`
   included, is `unrecognised_layout`. A `memcard` member is
   `kind_not_accepted`.
