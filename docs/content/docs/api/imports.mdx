@@ -51,8 +51,8 @@ checking imports answers 500 with
 `{"detail": {"error": "import_preflight_failed"}}`, still before anything is
 cleared.
 
-**Three emulators accept imports so far.** RetroArch, Flycast and
-DuckStation take the kinds listed under
+**Six emulators accept imports so far.** RetroArch, Flycast, DuckStation,
+PPSSPP, Dolphin and PCSX2 take the kinds listed under
 [What each emulator takes](#what-each-emulator-takes), and every other
 emulator refuses each import member with `kind_not_accepted`. The structural
 checks run first either way: a bad manifest answers `manifest_invalid` and a
@@ -132,8 +132,13 @@ through a symlink, or the member is refused.
 | `retroarch` | one `.srm`, on a platform whose core loads one | not taken; `expected` names `save` | `PUT /api/session/state-file` after activate |
 | `flycast` | raw 131072-byte `vmu_save_<A-D><1-2>.bin` images, and `dc_nvmem.bin` | a raw 131072-byte VMU image | one `.state`; needs `save.resume_slot` |
 | `duckstation` | a raw 131072-byte `.mcd`, `.mcr`, `.mc` or `.srm` card | the same as `save` | one `<serial>_resume.sav` or `<serial>_<n>.sav`; needs `save.resume_slot` |
+| `ppsspp` | PSP save folders, `SAVEDATA/<product code><suffix>/`, each holding `PARAM.SFO` | not taken | one `<game id>_<version>_<n>.ppst`, with its `.jpg` screenshot if sent; needs `save.resume_slot` |
+| `dolphin` on `ngc` | GameCube `.gci` saves, each in `<region>/Card A/` | the same as `save` | one `<game id>.sNN` that opens with the game's id; needs `save.resume_slot` |
+| `dolphin` on `wii` | Wii title saves, `title/<type>/<title id>/data/` | not taken | one `<game id>.sNN` that opens with the game's id; needs `save.resume_slot` |
+| `pcsx2` | one folder memory card: `<card>/_pcsx2_superblock` and its game folders | the same as `save` | `PUT /api/session/state-file` after activate |
 
-Every other emulator takes nothing yet.
+Dolphin takes nothing on any other platform, and every other emulator takes
+nothing yet.
 
 **RetroArch** renames the `.srm` after the game being launched and places it
 in `saves/<library_name>/`, where the core loads it. `library_name` is the
@@ -146,7 +151,8 @@ carries at the same path, is a `destination_conflict`. It refuses these:
 - On `psp`: `destination_unresolvable`, with `suggest_emulator: "ppsspp"`.
   The PPSSPP core keeps SAVEDATA folders, not a `.srm`.
 - On `ngc`, `wii` and `3ds`: `shape_unverified`. These cores keep saves in
-  their own folders, which imports don't place yet.
+  their own folders, which imports don't place yet. On `ngc` and `wii`,
+  import through `dolphin` instead; this refusal names no `suggest_emulator`.
 - On any other platform whose core loads no `.srm`, such as `nds`, `dc` or
   `arcade`: `destination_unresolvable`. The core keeps its save in a file of
   its own, or has none. Discovery lists no `save` shapes there, and
@@ -187,12 +193,134 @@ name Flycast reads:
   one, else the serial in the member's name, else the name's own base. A
   member named for a different serial than RomM's is `identity_mismatch`.
 
+**PPSSPP** places PSP save folders in its `SAVEDATA` folder, where PSP games
+look for them, and one state in its working slot:
+
+- A save folder is named for the game's product code (four capital letters
+  and five digits) and a suffix the game picks, such as `ULUS10041DATA00`.
+  It can sit under `PSP/SAVEDATA/`, under `SAVEDATA/` or directly under
+  `.import/save/`, and a copy of a whole memory stick, with one folder of its
+  own above `PSP/`, works too. A folder whose name holds no product code is
+  `unrecognised_layout`.
+- Every save folder needs its `PARAM.SFO`, the file PPSSPP lists a save by.
+  A folder without one is `incomplete_unit`, detail `missing PARAM.SFO`.
+- A save folder's product code is only logged when it differs from RomM's
+  `title_id`: a sequel can read the saves of the game before it.
+- A lone file, with no save folder around it, is `unrecognised_layout`,
+  since a PSP save is a folder, and a lone RetroArch `.srm` is
+  `source_incompatible`. Anything under `PSP/SYSTEM/` is
+  `protected_destination`. Any other folder under `PSP/`, such as
+  `PSP/GAME/`, is `unrecognised_layout`, and so is a `PPSSPP_STATE/` folder
+  sent as a save, with a detail saying to declare it as a state.
+- The state keeps the game id and version in its name,
+  `<game id>_<version>_<n>.ppst`; only the slot number is rewritten. A `.jpg`
+  screenshot of the same name rides along, is renamed with it and does not
+  count as a second state. Either can sit under `PSP/PPSSPP_STATE/`, under
+  `PPSSPP_STATE/` or directly under `.import/state/`.
+- The state's game id must be RomM's `title_id`, when RomM sends one, or it
+  is `identity_mismatch`. An id that is not a product code, as a homebrew
+  game's often is, is taken on trust.
+- A screenshot sent without its state is `incomplete_unit`, and so is an
+  empty state. A RetroArch state is `source_incompatible`. A `memcard`
+  member is `kind_not_accepted`: a PSP has no memory card.
+
+**Dolphin** takes what the console being launched keeps. On `ngc`, a
+GameCube save is a `.gci` file, under `save` or `memcard` alike:
+
+- Its path must end in `<region>/Card A/<name>.gci`, where the region is
+  `USA`, `EUR` or `JAP`. It can sit under `GC/`, under
+  `saves/dolphin-emu/User/GC/` or directly under `.import/<kind>/`. It lands
+  in the same folder under `GC/`, the Slot A card. Dolphin shows a game only
+  the folder for its own region, so a save sent to another region's folder
+  is placed but never seen.
+- A GCI's game code is only logged when it differs from the game being
+  launched: a game can read another game's saves.
+- A `.gci` anywhere else, loose or under `Card B/` say, is
+  `unrecognised_layout`. So is one whose size is not a 64-byte header
+  followed by whole 8 KiB blocks, and one named `.GCI` in capitals. A `.gcs`
+  or `.sav` export is `unrecognised_layout` too. A whole card image,
+  `.raw`, `.mcd` or `.gcp`, is `needs_conversion`: export each save from it
+  as a `.gci`.
+- An archive that already carries a card under `GC/` refuses an imported
+  GCI as `destination_conflict`: one GameCube card per archive.
+
+On `wii`, a save is a game's title folder from the NAND, under `save`:
+
+- Its path is `title/<type>/<title id>/data/...`, where the type is
+  `00010000`, `00010001` or `00010004`. It can sit under `Wii/`, under
+  `saves/dolphin-emu/User/Wii/` or directly under `.import/save/`. It lands
+  in `Wii/title/`, with the title id lower-cased as Dolphin writes it.
+- The title id must be the game being launched, or it is
+  `identity_mismatch`. When the broker has no id for the game being
+  launched, the title is taken on trust.
+- A `data.bin` is `needs_conversion`: it is the export a Wii writes to an SD
+  card, so import it with Dolphin's Import Wii Save and send the title folder
+  that makes. A `nand.bin` is `source_incompatible`: send the title folder
+  from the dump instead. `sys/`, `ticket/`, `title/00000001/` and a title's
+  `content/` folder are `protected_destination`. Anything else, a `.gci`
+  included, is `unrecognised_layout`. A `memcard` member is
+  `kind_not_accepted`.
+
+On either console, the state is one `.sNN` file, directly under
+`.import/state/` or under `StateSaves/`:
+
+- It must open with a game id, or it is `unrecognised_layout`, and that id
+  must be the game being launched, or it is `identity_mismatch`. The game
+  being launched is the id Dolphin's rom holds, read off an `.iso`, `.gcm`
+  or `.wbfs` image, else RomM's `title_id`. With neither, the id is taken on
+  trust. With the rom's id in hand, the state is held to all six characters,
+  maker code included, since the broker would otherwise refuse to resume it
+  at boot.
+- It is renamed after the id it opens with, in the broker's slot: Dolphin
+  finds a state by the running disc's id, not by the file's name.
+- `lastState.sav`, Dolphin's undo buffer, is `protected_destination`. An
+  empty state is `incomplete_unit`, and a RetroArch state is
+  `source_incompatible`.
+
+**PCSX2** takes one folder memory card and makes it the Slot 1 card,
+`memcards/<card>/`, where `<card>` is
+[`PCSX2_SLOT1_CARD`](/docs/configuration/emulators#pcsx2) (`romm-slot1` by
+default):
+
+- The card is one folder holding `_pcsx2_superblock` and the card's game
+  folders, under `save` or `memcard` alike. It can sit under `memcards/` or
+  directly under `.import/<kind>/`. The folder's own name is replaced by the
+  Slot 1 card's.
+- One card per archive. Two card folders are a `destination_conflict` whose
+  detail names both, and so is a card in an archive that already carries a
+  card under `memcards/`.
+- A card without `_pcsx2_superblock` is `shape_unverified`: PCSX2 does not
+  mount a folder without one, and the files may be one game's folder from a
+  card rather than a whole card. A card whose `_pcsx2_superblock` is empty is
+  `incomplete_unit`.
+- A single file is no folder card. A card image or a single-save export
+  (`.ps2`, `.mc2`, `.mcd`, `.mcr`, `.bin`, `.max`, `.psu`, `.cbs`, `.xps` or
+  `.sps`) is `needs_conversion`, and any other file is
+  `unrecognised_layout`. Either way, send the folder card instead.
+- A card holds every game's saves, so no member is held to the game being
+  launched.
+- A `state` member is `state_uses_push`. Send it with the
+  [state-file PUT](/docs/api/state#move-a-state-file-in-or-out) after
+  activate, which refuses a state named for another game's serial.
+
 Flycast and DuckStation have no mid-session save states, but each boots
 straight into a state the archive carries, the same way it resumes the one
-it writes on exit. So each answers `state_channel: "archive"`, takes at most
-one state counting any the archive already holds, and needs discovery's
-`state_slot` sent as `save.resume_slot`. Neither names a `card_subtree`:
-their cards are ordinary save files, restored with the rest of the archive.
+it writes on exit. PPSSPP and Dolphin do have them, and resume a state the
+archive carries the way they resume one pushed after activate. So all four
+answer `state_channel: "archive"`, take at most one state counting any the
+archive already holds, and need discovery's `state_slot` sent as
+`save.resume_slot`. An archive that already holds a state of its own refuses
+an imported one as `destination_conflict`, so leave the old state out to send
+a new one. PCSX2 answers `state_channel: "push"`, and so does RetroArch on a
+platform whose core has states.
+
+Flycast and DuckStation name no `card_subtree`: their cards are ordinary
+save files, restored with the rest of the archive. PPSSPP has no memory card
+and names none, and neither does Dolphin on `wii`. Dolphin on `ngc` names
+`GC`, and PCSX2 names `memcards`. When the session syncs that card on the
+memory-card routes, a member that would land on it answers
+`memcard_synced_separately`. Otherwise an imported card, or a GCI, in an
+archive that already carries a card there is a `destination_conflict`.
 
 ## Refusal reasons
 
@@ -218,6 +346,12 @@ check runs on every member the restore will write, before the working slot
 is cleared, so a corrupt member never costs the player the save they already
 had.
 
+A member can also be refused this way once the checks read into it: an
+emulator that reads a member to place it, as Dolphin reads the id a state or
+a GCI opens with, or to check the archive's imports as a whole, refuses one
+whose data turns out to be corrupt, with the detail
+`the member's data is corrupt`.
+
 ### `kind_not_accepted` [#kind-not-accepted]
 This emulator does not take this kind. `expected` lists the kinds it does.
 
@@ -241,16 +375,22 @@ can, when there is one.
 The data is right but in a container this emulator does not read directly.
 
 ### `unrecognised_layout` [#unrecognised-layout]
-The member's path does not match any shape this emulator accepts.
+The member's path does not match any shape this emulator accepts. When the
+member's `origin` is `emulatorjs` or `hardware`, the refusal becomes
+`source_incompatible` instead, with a note on the origin after the detail.
 
 ### `shape_unverified` [#shape-unverified]
 The shape is recognised, but loading it is unproven or blocked by a known
 broker limit, so the broker refuses rather than place a file that silently
 won't load.
 
+A PCSX2 folder card without `_pcsx2_superblock` is refused this way.
+
 ### `incomplete_unit` [#incomplete-unit]
-A save that spans several files is missing one, or a file is empty. When
-other members were also refused, the detail says this may be a knock-on
+A save that spans several files is missing one, or a file is empty: a PSP
+save folder without its `PARAM.SFO`, a PPSSPP screenshot sent without its
+`.ppst`, or a PCSX2 card whose `_pcsx2_superblock` is empty. When other
+members were also refused, a missing-file detail says this may be a knock-on
 effect of those refusals.
 
 ### `destination_unresolvable` [#destination-unresolvable]

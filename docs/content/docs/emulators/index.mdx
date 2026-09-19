@@ -47,7 +47,7 @@ kept. Each emulator's exact save paths are listed as the `save_subtrees`
 attribute of its class in the
 [Python reference](/docs/developer/reference/emulators).
 
-RetroArch, Flycast and DuckStation also take
+RetroArch, Flycast, DuckStation, PPSSPP, Dolphin and PCSX2 also take
 [declared imports](/docs/api/imports): save files made outside the broker,
 such as another emulator's, placed into the session at activate.
 [What each emulator takes](/docs/api/imports#what-each-emulator-takes) lists
@@ -125,6 +125,13 @@ set, the whole memory card is handled through the
 [memory card routes](/docs/api/archives#memory-cards) instead of being
 bundled inside the regular save archive.
 
+A [declared import](/docs/api/imports#what-each-emulator-takes) can bring in
+one folder memory card, which becomes the Slot 1 card, as long as the archive
+carries no card of its own. States still come in through the
+[state-file PUT](/docs/api/state#move-a-state-file-in-or-out), which refuses
+a state named for another game's serial once RomM has sent the game's
+`title_id`.
+
 ## DuckStation
 
 DuckStation has no mid-session save states: it doesn't give the broker
@@ -168,6 +175,13 @@ GameCube, memory card Slot A is set
 to a folder-based card device, so the card is a normal directory the save
 archive can carry along.
 
+A [declared import](/docs/api/imports#what-each-emulator-takes) can bring in
+GameCube `.gci` saves, which go onto the Slot A card, Wii title saves, which
+go into the NAND, or one state, which needs `resume_slot`. The state has to
+open with the launched game's id, and the
+[state-file PUT](/docs/api/state#move-a-state-file-in-or-out) holds a pushed
+state to the same rule.
+
 ## PPSSPP
 
 Like Dolphin, PPSSPP is driven with keyboard hotkeys, and it always saves to
@@ -182,6 +196,12 @@ and its shakier controller support. PSP games aren't demanding enough for
 RetroArch's extra overhead to matter. The standalone PPSSPP launcher is still
 here and supported, for anyone who prefers PPSSPP's own interface and
 settings.
+
+A [declared import](/docs/api/imports#what-each-emulator-takes) can bring in
+PSP save folders, each with its `PARAM.SFO`, or one state with its
+screenshot, which needs `resume_slot`. The RetroArch `ppsspp` core takes no
+imported PSP save: RetroArch refuses one and names `ppsspp` in the refusal's
+`suggest_emulator`.
 
 ## Cemu
 
