@@ -142,12 +142,14 @@ Restores `save.archive`, if one was sent, into the emulator's save folders,
 but never rolls back a file that's newer on disk than what's in the archive.
 A file in the archive that falls outside those folders refuses the whole
 restore, as do an encrypted file, one with a compression method the broker
-cannot read, or one with an invalid timestamp. The broker checks all of this
-before step 2 clears anything, so a refused activate leaves the slot as it
-was: an archive without imports answers 422 `save restore failed: <message>`,
-and one with imports lists the file as `unrecognised_layout` or
-`unsafe_path`. Only a synced memory card sitting in an older archive gets
-skipped.
+cannot read, one with an invalid timestamp, and one whose data is corrupt.
+The broker reads every file it is about to restore in full before step 2
+clears anything, so a refused activate leaves the slot as it was: an
+archive without imports answers 422 `save restore failed: <message>`, and
+one with imports lists the file as `unrecognised_layout`, `unsafe_path` or
+`unreadable_member`. A corrupt file refuses the restore even when a newer
+copy on disk means it would not have been written. Only a synced memory
+card sitting in an older archive gets skipped.
 </Step>
 <Step>
 Launches the emulator in its own process group, with its output captured to

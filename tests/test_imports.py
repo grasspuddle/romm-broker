@@ -5,6 +5,7 @@ test_api.py, and the per-emulator hooks in test_emulators.py.
 """
 
 import dataclasses
+import importlib
 import io
 import json
 import re
@@ -16,7 +17,7 @@ import pytest
 
 from webstation_broker import imports, saves
 
-from .conftest import FakeEmulator, mangle_zip_member
+from .conftest import FakeEmulator, corrupt_zip_member, mangle_zip_member
 
 
 def _zip(members: dict[str, bytes], manifest: Optional[Any] = None) -> bytes:
@@ -38,9 +39,10 @@ def _zip(members: dict[str, bytes], manifest: Optional[Any] = None) -> bytes:
     return buf.getvalue()
 
 
-def test_reasons_is_the_closed_set_of_seventeen() -> None:
+def test_reasons_is_the_closed_set_of_eighteen() -> None:
     """The refusal codes are closed, and an unknown one cannot be built."""
-    assert len(imports.REASONS) == 17
+    assert len(imports.REASONS) == 18
+    assert "unreadable_member" in imports.REASONS
     with pytest.raises(ValueError, match="unknown import refusal reason"):
         imports.ImportRefusal("made_up", None, None)
 
@@ -95,9 +97,25 @@ def test_fold_v1_problems_maps_each_kind() -> None:
         ("unsafe_path", "s/b"),
         ("unrecognised_layout", "saves"),
         ("unrecognised_layout", "x/c"),
-        ("unsafe_path", "s/d"),
+        ("unreadable_member", "s/d"),
     ]
     assert folded[1].detail == "archive member escapes save dir: ../a"
+    assert folded[5].expected == imports.READABLE_EXPECTED
+
+
+def test_fold_read_problems_maps_members_and_the_archive() -> None:
+    """A named problem is `unreadable_member`; an archive-level one is `too_large`."""
+    folded = imports.fold_read_problems(
+        [
+            ("saves/a", "archive member is corrupt: saves/a"),
+            (None, "archive exceeds size limit when extracted"),
+        ]
+    )
+
+    assert [(r.reason, r.member, r.expected, r.detail) for r in folded] == [
+        ("unreadable_member", "saves/a", imports.READABLE_EXPECTED, "archive member is corrupt: saves/a"),
+        ("too_large", None, None, "archive exceeds size limit when extracted"),
+    ]
 
 
 def test_import_spec_as_dict_is_the_discovery_shape() -> None:
@@ -135,6 +153,27 @@ def test_member_head_reads_at_most_the_cap() -> None:
         )
         assert member.head(10) == b"x" * 10
         assert len(member.head(10**9)) == imports.HEAD_MAX_BYTES
+
+
+def test_member_head_turns_a_failed_read_into_member_read_error(caplog: pytest.LogCaptureFixture) -> None:
+    """A read that fails raises `MemberReadError`, whatever `zipfile` raised underneath.
+
+    Args:
+        caplog: Pytest's log capture.
+    """
+    body = corrupt_zip_member(_zip({".import/save/a": b"x" * 16}), ".import/save/a")
+    with zipfile.ZipFile(io.BytesIO(body)) as zf:
+        info = zf.getinfo(".import/save/a")
+        member = imports.ImportMember(
+            ".import/save/a", "save", "unknown", PurePosixPath("a"), ("a",), info.file_size, info, zf
+        )
+        with (
+            caplog.at_level("WARNING", logger="webstation_broker.imports"),
+            pytest.raises(imports.MemberReadError, match="the member's data is corrupt"),
+        ):
+            member.head(64)
+
+    assert ".import/save/a could not be read" in caplog.text
 
 
 def test_rom_ref_copies_the_body_fields() -> None:
@@ -367,6 +406,43 @@ def test_normalise_member_refuses_non_ascii_without_the_utf8_flag() -> None:
     assert isinstance(unflagged, imports.ImportRefusal) and unflagged.reason == "unsafe_path"
 
 
+@pytest.mark.parametrize(
+    ("char", "detail"),
+    [
+        ("\x80", "control character in name"),
+        ("\x85", "control character in name"),
+        ("\x9f", "control character in name"),
+        ("\u061c", "bidirectional control character in name"),
+        ("\u200e", "bidirectional control character in name"),
+        ("\u200f", "bidirectional control character in name"),
+        ("\u202a", "bidirectional control character in name"),
+        ("\u202e", "bidirectional control character in name"),
+        ("\u2066", "bidirectional control character in name"),
+        ("\u2069", "bidirectional control character in name"),
+    ],
+)
+def test_normalise_member_refuses_c1_and_bidi_characters(char: str, detail: str) -> None:
+    """A C1 control or a bidi control is refused, so a refusal list always shows the name it holds.
+
+    Args:
+        char: The character to embed.
+        detail: The refusal's expected detail.
+    """
+    name = f".import/save/a{char}b.srm"
+
+    refusal = imports.normalise_member(_info(name), _entry(name), zf=None)
+
+    assert isinstance(refusal, imports.ImportRefusal)
+    assert (refusal.reason, refusal.detail) == ("unsafe_path", detail)
+
+
+def test_normalise_member_keeps_printable_latin1() -> None:
+    """The check stops at U+009F: a no-break space or an accented letter is a plain name."""
+    name = ".import/save/a\xa0\xe9.srm"
+
+    assert isinstance(imports.normalise_member(_info(name), _entry(name), zf=None), imports.ImportMember)
+
+
 def test_normalise_member_honours_a_tighter_component_limit() -> None:
     """An emulator with a short filesystem limit (xemu's 42) can lower it."""
     name = ".import/save/" + "x" * 43
@@ -399,7 +475,8 @@ def test_normalise_member_refuses_a_member_that_cannot_be_read(field: str, value
     refusal = imports.normalise_member(info, _entry(name), zf=None)
 
     assert isinstance(refusal, imports.ImportRefusal)
-    assert (refusal.reason, refusal.detail) == ("unsafe_path", detail)
+    assert (refusal.reason, refusal.detail) == ("unreadable_member", detail)
+    assert refusal.expected == imports.READABLE_EXPECTED
 
 
 def test_normalise_member_ignores_the_date_a_placed_member_never_uses() -> None:
@@ -646,6 +723,62 @@ def test_build_dest_refuses_an_unsafe_tail_component(tail: str) -> None:
     assert isinstance(refused, imports.ImportRefusal) and refused.reason == "unsafe_path"
 
 
+@pytest.mark.parametrize("module_name", ["flycast", "duckstation"])
+def test_owner_marker_sidecar_matches_the_marker_the_emulator_writes(
+    tmp_path: Path, module_name: str
+) -> None:
+    """The sidecar is byte-identical to the marker the emulator writes on exit.
+
+    The rom is reached through a symlink, so the test also pins that both
+    sides record the resolved path, not the path the caller passed.
+
+    Args:
+        tmp_path: Pytest's per-test directory.
+        module_name: The emulator module whose marker writer is compared.
+    """
+    module = importlib.import_module(f"webstation_broker.emulators.{module_name}")
+    rom = tmp_path / "roms" / "Game (USA).cue"
+    rom.parent.mkdir()
+    rom.write_bytes(b"disc")
+    link = tmp_path / "link.cue"
+    link.symlink_to(rom)
+    state = tmp_path / "state.bin"
+
+    module._write_owner_marker(state, link)
+    path, data = imports.owner_marker_sidecar(PurePosixPath("sub/state.bin"), link)
+
+    assert path == PurePosixPath("sub/state.bin.rom")
+    assert data == (tmp_path / "state.bin.rom").read_bytes()
+    assert data == f"{rom.resolve()}\n".encode()
+
+
+class _UnresolvablePath(type(Path())):
+    """A path whose `resolve` fails, as it does on a symlink loop."""
+
+    def resolve(self, strict: bool = False) -> Path:
+        """Fail the way a symlink loop does.
+
+        Args:
+            strict: Unused; matches `Path.resolve`.
+
+        Raises:
+            OSError: Always.
+        """
+        raise OSError("loop")
+
+
+def test_owner_marker_sidecar_falls_back_to_the_raw_path(caplog: pytest.LogCaptureFixture) -> None:
+    """A rom path that cannot be resolved is recorded as given, with a warning.
+
+    Args:
+        caplog: Pytest's log capture.
+    """
+    path, data = imports.owner_marker_sidecar(PurePosixPath("a.state"), _UnresolvablePath("/roms/a.cdi"))
+
+    assert (path, data) == (PurePosixPath("a.state.rom"), b"/roms/a.cdi\n")
+    assert "could not resolve /roms/a.cdi" in caplog.text
+
+
 # ── identity ───────────────────────────────────────────────────────────
 
 
@@ -661,6 +794,7 @@ def test_build_dest_refuses_an_unsafe_tail_component(tail: str) -> None:
         ("hex8", "0100ABC", None),
         ("xbox", "MS-100", "4D530064"),
         ("xbox", "4d530064", "4D530064"),
+        ("xbox", "MS-\u0661\u0660\u0660", None),
         ("gc_wii_disc", "GZLE01", "475A4C45"),
         ("gc_wii_disc", "0x475a4c45", "475A4C45"),
         ("hex16", "0100/0000/0000/1000", "0100000000001000"),
@@ -1217,6 +1351,34 @@ def test_a_psp_savedata_dir_suggests_ppsspp_but_never_itself() -> None:
     assert imports.refine_refusal(refusal, member, "psp", current="ppsspp").suggest_emulator is None
 
 
+@pytest.mark.usefixtures("_empty_retroarch_spec")
+def test_a_savedata_dir_with_non_ascii_digits_suggests_nothing() -> None:
+    """Only ASCII digits make a PSP serial, so Arabic-Indic digits never point at PPSSPP."""
+    member = _member("ULUS\u0661\u0660\u0660\u0666\u0664DATA00/DATA.BIN", origin="standalone")
+
+    assert imports.suggest_for(member, "psp", current="retroarch") is None
+
+
+@pytest.mark.parametrize("name", ["a.state3", "a.STATE12", "a.state.auto"])
+def test_libretro_state_re_matches_retroarch_slot_names(name: str) -> None:
+    """The numbered and auto slot names RetroArch writes are recognised, in any case.
+
+    Args:
+        name: A RetroArch state name.
+    """
+    assert imports.LIBRETRO_STATE_RE.fullmatch(name) is not None
+
+
+@pytest.mark.parametrize("name", ["a.state", "a.state\u0663", "a.state\u0661\u0662"])
+def test_libretro_state_re_takes_only_ascii_slot_digits(name: str) -> None:
+    """A bare `.state` is flycast's own name, and a non-ASCII digit is no slot RetroArch writes.
+
+    Args:
+        name: A name that is not a RetroArch slot state.
+    """
+    assert imports.LIBRETRO_STATE_RE.fullmatch(name) is None
+
+
 # ── preflight ──────────────────────────────────────────────────────────
 
 
@@ -1319,6 +1481,98 @@ def test_an_accepting_emulator_gets_a_plan(tmp_path: Path) -> None:
     assert emu.import_identity == imports.SessionIdentity(None, "none")
 
 
+class _WithSidecar(_Accepting):
+    """A fake that places each save under `saves/` and writes a marker at `sidecar` beside it."""
+
+    sidecar = "saves/marker"
+
+    def import_spec(self) -> imports.ImportSpec:
+        """Accept saves, and reserve `*.rom` for the broker the way Flycast and DuckStation do.
+
+        Returns:
+            The spec.
+        """
+        return imports.ImportSpec(kinds=(imports.KindSpec("save", ("<name>",)),), protected=("*.rom",))
+
+    def place_import(
+        self, member: imports.ImportMember, spec: imports.ImportSpec, ctx: imports.ImportCtx
+    ) -> Union[imports.Placement, imports.ImportRefusal]:
+        """Place the member under `saves/`, with one sidecar at `sidecar`.
+
+        Args:
+            member: The member.
+            spec: The spec.
+            ctx: The launch context.
+
+        Returns:
+            The placement.
+        """
+        dest = PurePosixPath("saves", *member.parts)
+        return imports.Placement(member, dest, ((PurePosixPath(self.sidecar), b"marker\n"),))
+
+
+@pytest.mark.parametrize(
+    ("sidecar", "refusals"),
+    [
+        ("saves/a.srm.rom", []),
+        (
+            "elsewhere/a.srm.rom",
+            [("unrecognised_layout", "elsewhere/a.srm.rom is not inside a save subtree")],
+        ),
+        ("states/a.srm.rom", [("unsafe_path", "states/a.srm.rom resolves outside the save root")]),
+    ],
+)
+def test_a_sidecar_is_held_to_the_save_tree_rules_its_destination_is(
+    tmp_path: Path, sidecar: str, refusals: list[tuple[str, str]]
+) -> None:
+    """A sidecar outside the save tree, or through a link out of it, refuses its member before any write.
+
+    The destination always lands safely in `saves/`, and `states/` is a link
+    out of the save root, so a refusal can only come from the sidecar. The
+    sidecar in `saves/` matches the protected `*.rom` and still lands: those
+    globs reserve the marker for the broker, and a sidecar is the broker's.
+
+    Args:
+        tmp_path: The per-test temporary directory.
+        sidecar: Where the hook puts the sidecar, relative to the save root.
+        refusals: The expected `(reason, detail)` pairs, all for the one member.
+    """
+    root = tmp_path / "root"
+    (root / "saves").mkdir(parents=True)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (root / "states").symlink_to(outside)
+    emu = _WithSidecar()
+    emu.save_root = root
+    emu.sidecar = sidecar
+
+    result = _preflight(emu, _declared({".import/save/a.srm": b"x"}))
+
+    assert [(r.reason, r.detail) for r in result.refusals] == refusals
+    assert all(r.member == ".import/save/a.srm" for r in result.refusals)
+    assert len(result.placements) == (0 if refusals else 1)
+    assert list(outside.iterdir()) == []
+    assert list((root / "saves").iterdir()) == []
+
+
+def test_a_member_named_like_a_sidecar_is_still_protected(tmp_path: Path) -> None:
+    """Only the broker's own sidecar skips the protected globs; a member on one is refused.
+
+    Args:
+        tmp_path: The per-test temporary directory.
+    """
+    emu = _WithSidecar()
+    emu.save_root = tmp_path
+    (tmp_path / "saves").mkdir()
+
+    result = _preflight(emu, _declared({".import/save/a.srm.rom": b"x"}))
+
+    assert [(r.reason, r.detail) for r in result.refusals] == [
+        ("protected_destination", "saves/a.srm.rom is emulator configuration")
+    ]
+    assert result.placements == ()
+
+
 def test_one_refusal_empties_the_whole_plan(tmp_path: Path) -> None:
     """All or nothing: a single refused member leaves no placements at all."""
     emu = _Accepting()
@@ -1385,7 +1639,80 @@ def test_an_unreadable_import_member_is_refused_by_preflight(tmp_path: Path) -> 
 
     assert result.placements == ()
     assert [(r.reason, r.member, r.detail) for r in result.refusals] == [
-        ("unsafe_path", ".import/save/a.srm", "the member is encrypted")
+        ("unreadable_member", ".import/save/a.srm", "the member is encrypted")
+    ]
+
+
+def test_a_hook_whose_head_read_fails_gets_unreadable_member(tmp_path: Path) -> None:
+    """A hook that sniffs a corrupt member needs no catch of its own: preflight refuses the member.
+
+    Args:
+        tmp_path: The per-test temporary directory.
+    """
+
+    class Sniffing(_Accepting):
+        """Reads each member's first bytes before placing it."""
+
+        def place_import(
+            self, member: imports.ImportMember, spec: imports.ImportSpec, ctx: imports.ImportCtx
+        ) -> Union[imports.Placement, imports.ImportRefusal]:
+            """Sniff the member, then place it.
+
+            Args:
+                member: The member.
+                spec: The spec.
+                ctx: The launch context.
+
+            Returns:
+                The placement.
+            """
+            member.head(64)
+            return super().place_import(member, spec, ctx)
+
+    emu = Sniffing()
+    emu.save_root = tmp_path
+    body = corrupt_zip_member(_declared({".import/save/a.srm": b"x" * 16}), ".import/save/a.srm")
+
+    result = _preflight(emu, body)
+
+    assert result.placements == ()
+    assert [(r.reason, r.member, r.expected, r.detail) for r in result.refusals] == [
+        ("unreadable_member", ".import/save/a.srm", imports.READABLE_EXPECTED, "the member's data is corrupt")
+    ]
+
+
+def _with_duplicate(body: bytes, name: str, data: bytes) -> bytes:
+    """Append a second entry under a name the archive already holds.
+
+    Args:
+        body: The archive.
+        name: The name to repeat.
+        data: The second entry's bytes.
+
+    Returns:
+        The archive, holding both entries.
+    """
+    buf = io.BytesIO(body)
+    with pytest.warns(UserWarning, match="Duplicate name"), zipfile.ZipFile(buf, "a") as zf:
+        zf.writestr(name, data)
+    return buf.getvalue()
+
+
+def test_a_name_the_archive_holds_twice_is_refused_once(tmp_path: Path) -> None:
+    """`zipfile` reads a repeated name as its last entry, so the first would escape every check.
+
+    Args:
+        tmp_path: The per-test temporary directory.
+    """
+    emu = _Accepting()
+    emu.save_root = tmp_path
+    body = _with_duplicate(_declared({".import/save/a.srm": b"x"}), ".import/save/a.srm", b"y")
+
+    result = _preflight(emu, body)
+
+    assert result.placements == ()
+    assert [(r.reason, r.member, r.detail) for r in result.refusals] == [
+        ("unsafe_path", ".import/save/a.srm", "the archive holds this name 2 times")
     ]
 
 

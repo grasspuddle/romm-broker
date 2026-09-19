@@ -18,6 +18,7 @@ import io
 import logging
 import re
 import zipfile
+from collections import Counter
 from collections.abc import Callable, Hashable, Iterable, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path, PurePosixPath
@@ -54,6 +55,7 @@ REASONS: frozenset[str] = frozenset(
     {
         "manifest_invalid",
         "unsafe_path",
+        "unreadable_member",
         "kind_not_accepted",
         "state_uses_push",
         "resume_slot_required",
@@ -156,6 +158,14 @@ class RomRef:
         )
 
 
+class MemberReadError(Exception):
+    """A member's data could not be read, raised by `ImportMember.head`.
+
+    Preflight turns it into an `unreadable_member` refusal, so a placement
+    hook that sniffs content never needs a catch of its own.
+    """
+
+
 @dataclass(frozen=True)
 class ImportMember:
     """One `.import/` member that passed hygiene, ready for placement.
@@ -192,11 +202,16 @@ class ImportMember:
 
         Raises:
             RuntimeError: When the member was built without an open archive.
+            MemberReadError: When the member's data cannot be read.
         """
         if self._zf is None:
             raise RuntimeError(f"{self.name} has no open archive to read from")
-        with self._zf.open(self.info) as fh:
-            return fh.read(max(0, min(n, HEAD_MAX_BYTES)))
+        try:
+            with self._zf.open(self.info) as fh:
+                return fh.read(max(0, min(n, HEAD_MAX_BYTES)))
+        except saves.ZIP_READ_ERRORS as exc:
+            log.warning("imports: %s could not be read: %s", self.name, exc)
+            raise MemberReadError("the member's data is corrupt") from exc
 
 
 @dataclass(frozen=True)
@@ -367,7 +382,7 @@ _V1_REASONS: dict[str, str] = {
     "symlink": "unsafe_path",
     "names_subtree": "unrecognised_layout",
     "outside": "unrecognised_layout",
-    "unreadable": "unsafe_path",
+    "unreadable": "unreadable_member",
 }
 """Refusal code for each `saves.V1Problem` in an archive that also holds imports."""
 
@@ -386,14 +401,35 @@ def fold_v1_problems(
 
     Returns:
         A `too_large` refusal for a whole-archive error, then one per v1 problem,
-        each carrying the legacy message as `detail`.
+        each carrying the legacy message as `detail`. An `unreadable_member`
+        refusal also carries `READABLE_EXPECTED` as `expected`.
     """
     out: list[ImportRefusal] = []
     if view_error:
         out.append(ImportRefusal("too_large", None, None, detail=view_error))
     for name, message, kind in v1_plan.problems if v1_plan else ():
-        out.append(ImportRefusal(_V1_REASONS[kind], name, None, detail=message))
+        reason = _V1_REASONS[kind]
+        expected = READABLE_EXPECTED if reason == "unreadable_member" else None
+        out.append(ImportRefusal(reason, name, expected, detail=message))
     return out
+
+
+def fold_read_problems(problems: Iterable[tuple[Optional[str], str]]) -> list[ImportRefusal]:
+    """Turn `saves.verify_members` problems into refusals, for an archive that holds imports.
+
+    Args:
+        problems: `(member, message)` pairs. A None member is an archive-level problem.
+
+    Returns:
+        An `unreadable_member` refusal for each named member and a `too_large`
+        refusal for each archive-level problem, each carrying the message as `detail`.
+    """
+    return [
+        ImportRefusal("unreadable_member", name, READABLE_EXPECTED, detail=message)
+        if name is not None
+        else ImportRefusal("too_large", None, None, detail=message)
+        for name, message in problems
+    ]
 
 
 _KINDS: tuple[str, ...] = ("save", "state", "memcard")
@@ -514,11 +550,19 @@ def parse_manifest_v2(
 _UTF8_FLAG = 0x800
 """Zip general-purpose flag bit saying the entry name is UTF-8."""
 _SAFE_EXPECTED = "a relative path of plain names: no hidden, system or oversized components"
-"""The `expected` text on every hygiene refusal."""
+"""The `expected` text on every hygiene `unsafe_path` refusal."""
+READABLE_EXPECTED = "an unencrypted, intact member, stored or compressed with deflate, bzip2 or lzma"
+"""The `expected` text on every `unreadable_member` refusal."""
+
+
+_BIDI_CONTROLS = frozenset("\u061c\u200e\u200f\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069")
+"""Characters that reorder how text displays, so a name holding one shows as a different name."""
 
 
 def _name_problem(name: str) -> Optional[str]:
     """Check a whole name for characters no save path may hold.
+
+    Refuses C0 and C1 control characters, DEL and the bidirectional controls.
 
     Args:
         name: A member name or a single component.
@@ -530,8 +574,10 @@ def _name_problem(name: str) -> Optional[str]:
         return "backslash in name"
     if ":" in name:
         return "colon in name"
-    if any(ord(c) < 0x20 or ord(c) == 0x7F for c in name):
+    if any(ord(c) < 0x20 or 0x7F <= ord(c) <= 0x9F for c in name):
         return "control character in name"
+    if any(c in _BIDI_CONTROLS for c in name):
+        return "bidirectional control character in name"
     return None
 
 
@@ -565,7 +611,7 @@ def normalise_member(
     zf: Optional[zipfile.ZipFile],
     max_component_bytes: int = 255,
 ) -> Union[ImportMember, ImportRefusal]:
-    """Apply every `unsafe_path` rule to one member, in one pass.
+    """Apply every hygiene rule to one member, in one pass.
 
     This is the only hygiene check: placement hooks can rely on a member's
     parts being plain names.
@@ -577,7 +623,7 @@ def normalise_member(
         max_component_bytes: The longest component the emulator's filesystem takes.
 
     Returns:
-        The member, or an `unsafe_path` refusal.
+        The member, or an `unsafe_path` or `unreadable_member` refusal.
     """
     name = info.filename
 
@@ -608,7 +654,7 @@ def normalise_member(
     # A placed member is stamped with the write time, so its date is never read.
     problem = saves.member_problem(info, check_date=False)
     if problem:
-        return unsafe(f"the member {problem}")
+        return ImportRefusal("unreadable_member", name, READABLE_EXPECTED, detail=f"the member {problem}")
     return ImportMember(
         name=name,
         kind=entry.kind,
@@ -664,7 +710,7 @@ def gate_kind(member: ImportMember, spec: ImportSpec, ctx: ImportCtx) -> Optiona
     return None
 
 
-LIBRETRO_STATE_RE = re.compile(r"^.+\.state(\d+|\.auto)$", re.I)
+LIBRETRO_STATE_RE = re.compile(r"^.+\.state(\d+|\.auto)$", re.I | re.ASCII)
 """A RetroArch numbered or auto state name (`.state3`, `.state.auto`), which no standalone loads.
 
 A bare `.state` is not matched: flycast takes that name as its own.
@@ -808,17 +854,44 @@ def build_dest(
     return PurePosixPath(subtree, *ids, *tail)
 
 
+OWNER_MARKER_SUFFIX = ".rom"
+"""What flycast and duckstation append to a resume state's name to name its owner marker."""
+
+
+def owner_marker_sidecar(dest: PurePosixPath, rom_file: Path) -> tuple[PurePosixPath, bytes]:
+    """Build the owner marker an imported resume state needs, as a placement sidecar.
+
+    Flycast and DuckStation resume a state only when the marker beside it
+    names the rom the session boots. The bytes match what both modules'
+    `_write_owner_marker` writes on exit, so an imported state resumes like
+    one the broker saved.
+
+    Args:
+        dest: The state's destination, relative to `save_root`.
+        rom_file: The file this activate boots. For an `.m3u` boot it is the playlist.
+
+    Returns:
+        The marker's destination and its bytes: the rom's resolved path and a newline, in UTF-8.
+    """
+    try:
+        identity = str(rom_file.resolve())
+    except OSError as exc:
+        log.warning("imports: could not resolve %s for its owner marker: %s", rom_file, exc)
+        identity = str(rom_file)
+    return dest.with_name(dest.name + OWNER_MARKER_SUFFIX), (identity + "\n").encode("utf-8")
+
+
 _PS_DASHED = re.compile(r"([A-Z]{4})[-_ ]?(\d{3})\.?(\d{2})", re.I | re.ASCII)
 """A PlayStation serial in any of its spellings: `SLUS-20001`, `SLUS_200.01`, `slus20001`."""
 _PS_NODASH = re.compile(r"([A-Za-z]{4})[-_ ]?(\d{5})", re.ASCII)
 """A PSP/PS3 serial with or without its separator."""
-_HEX8 = re.compile(r"(?:0x)?([0-9A-Fa-f]{8})")
+_HEX8 = re.compile(r"(?:0x)?([0-9A-Fa-f]{8})", re.ASCII)
 """An eight-digit hex title id, optionally `0x`-prefixed."""
-_XBOX_CODE = re.compile(r"([A-Za-z]{2})-(\d{3})")
+_XBOX_CODE = re.compile(r"([A-Za-z]{2})-(\d{3})", re.ASCII)
 """An Xbox publisher-code-and-number id such as `MS-100`."""
-_GAME_ID = re.compile(r"[A-Za-z0-9]{4}(?:[A-Za-z0-9]{2})?")
+_GAME_ID = re.compile(r"[A-Za-z0-9]{4}(?:[A-Za-z0-9]{2})?", re.ASCII)
 """A GameCube/Wii game id: four characters, plus two for the maker."""
-_HEX16 = re.compile(r"(?:0x)?([0-9A-Fa-f]{16})")
+_HEX16 = re.compile(r"(?:0x)?([0-9A-Fa-f]{16})", re.ASCII)
 """A sixteen-digit hex title id, as the Switch writes it."""
 
 
@@ -1206,6 +1279,55 @@ def _destination_conflicts(
     return conflicted
 
 
+def _save_tree_refusal(
+    dest: PurePosixPath,
+    name: str,
+    ctx: ImportCtx,
+    spec: ImportSpec,
+    save_root: Path,
+    subtrees: tuple[str, ...],
+    *,
+    sidecar: bool = False,
+) -> Optional[ImportRefusal]:
+    """Hold one path an import writes to the save tree's rules.
+
+    A sidecar skips only the protected globs. They reserve names like the
+    `.rom` owner marker for the broker, and a sidecar is the broker's own write.
+
+    Args:
+        dest: A placement's destination, or one of its sidecars, relative to `save_root`.
+        name: The member's zip name, for the refusal.
+        ctx: The launch context; its `excluded` subtrees travel on their own routes.
+        spec: The emulator's spec, for its protected globs.
+        save_root: The emulator's save data root.
+        subtrees: The emulator's restore subtrees.
+        sidecar: Whether `dest` is a sidecar the broker builds rather than a member.
+
+    Returns:
+        `memcard_synced_separately`, `unrecognised_layout`, `protected_destination`
+        or `unsafe_path`, or None when the path may be written.
+    """
+    rel = dest.as_posix()
+    if saves.under_subtrees(dest, ctx.excluded):
+        return ImportRefusal(
+            "memcard_synced_separately",
+            name,
+            "the memory card through PUT /api/session/memory-card",
+            detail="the card travels on its own routes this session",
+        )
+    if rel in subtrees or not saves.under_subtrees(dest, subtrees):
+        return ImportRefusal(
+            "unrecognised_layout", name, ", ".join(subtrees), detail=f"{rel} is not inside a save subtree"
+        )
+    if not sidecar and _is_protected(rel, spec):
+        return ImportRefusal("protected_destination", name, None, detail=f"{rel} is emulator configuration")
+    if saves.surviving_chain_escapes(save_root, dest, subtrees):
+        return ImportRefusal(
+            "unsafe_path", name, _SAFE_EXPECTED, detail=f"{rel} resolves outside the save root"
+        )
+    return None
+
+
 def check_plan(
     plan: Sequence[Placement],
     ctx: ImportCtx,
@@ -1262,40 +1384,16 @@ def check_plan(
 
     subtrees = tuple(emulator.restore_subtrees)
     for placement in plan:
-        dest = placement.dest
-        rel = dest.as_posix()
-        name = placement.member.name
-        if saves.under_subtrees(dest, ctx.excluded):
-            refusals.append(
-                ImportRefusal(
-                    "memcard_synced_separately",
-                    name,
-                    "the memory card through PUT /api/session/memory-card",
-                    detail="the card travels on its own routes this session",
-                )
+        # A sidecar is written just like its destination, so it is held to the
+        # same save-tree rules, and the first path that fails refuses the member.
+        paths = ((placement.dest, False), *((d, True) for d, _ in placement.sidecars))
+        for dest, sidecar in paths:
+            refusal = _save_tree_refusal(
+                dest, placement.member.name, ctx, spec, emulator.save_root, subtrees, sidecar=sidecar
             )
-            continue
-        if rel in subtrees or not saves.under_subtrees(dest, subtrees):
-            refusals.append(
-                ImportRefusal(
-                    "unrecognised_layout",
-                    name,
-                    ", ".join(subtrees),
-                    detail=f"{rel} is not inside a save subtree",
-                )
-            )
-            continue
-        if _is_protected(rel, spec):
-            refusals.append(
-                ImportRefusal("protected_destination", name, None, detail=f"{rel} is emulator configuration")
-            )
-            continue
-        if saves.surviving_chain_escapes(emulator.save_root, dest, subtrees):
-            refusals.append(
-                ImportRefusal(
-                    "unsafe_path", name, _SAFE_EXPECTED, detail=f"{rel} resolves outside the save root"
-                )
-            )
+            if refusal is not None:
+                refusals.append(refusal)
+                break
 
     total_bytes = ctx.v1_bytes + sum(p.member.size + sum(len(b) for _, b in p.sidecars) for p in plan)
     total_entries = len(ctx.archive_paths) + sum(1 + len(p.sidecars) for p in plan)
@@ -1332,7 +1430,7 @@ def check_plan(
     return refusals
 
 
-_PSP_SAVEDATA_DIR = re.compile(r"[A-Z]{4}\d{5}[A-Za-z0-9_]*")
+_PSP_SAVEDATA_DIR = re.compile(r"[A-Z]{4}\d{5}[A-Za-z0-9_]*", re.ASCII)
 """A PSP `SAVEDATA/` dir name: the serial plus a game-chosen suffix."""
 
 
@@ -1359,7 +1457,11 @@ def suggest_for(
         if ra is not None:
             ra.platform = platform
             spec = ra.import_spec()
-            if member.kind == "state" and spec.state_channel == "push":
+            # Only a numbered or `.auto` slot name points at RetroArch: a `.srm`
+            # declared as a state is not one RetroArch would take, and a bare
+            # `.state` is Flycast's name as much as RetroArch's.
+            is_ra_state = LIBRETRO_STATE_RE.fullmatch(member.parts[-1]) is not None
+            if member.kind == "state" and spec.state_channel == "push" and is_ra_state:
                 suggestion = "retroarch"
             save = spec.kind("save")
             if member.kind == "save" and save and any(s.endswith(".srm") for s in save.shapes):
@@ -1435,6 +1537,7 @@ def preflight(
     """
     spec = emulator.import_spec()
     import_names = [i.filename for i in view.imports]
+    counts = Counter(import_names)
     entries, refusals = parse_manifest_v2(view.manifest, import_names, view.manifest_error)
     refusals = [*v1_refusals, *refusals]
     kept = [i for i in view.v1 if not saves.under_subtrees(PurePosixPath(i.filename), excluded)]
@@ -1443,7 +1546,22 @@ def preflight(
     plan: list[Placement] = []
     with zipfile.ZipFile(io.BytesIO(content)) as zf:
         members: list[ImportMember] = []
+        refused_twice: set[str] = set()
         for info in view.imports:
+            if counts[info.filename] > 1:
+                # `zipfile` reads a repeated name as its last entry, so the
+                # others would escape every check below.
+                if info.filename not in refused_twice:
+                    refused_twice.add(info.filename)
+                    refusals.append(
+                        ImportRefusal(
+                            "unsafe_path",
+                            info.filename,
+                            _SAFE_EXPECTED,
+                            detail=f"the archive holds this name {counts[info.filename]} times",
+                        )
+                    )
+                continue
             entry = entries.get(info.filename)
             if entry is None:
                 continue
@@ -1467,7 +1585,10 @@ def preflight(
         )
         platform = emulator.platform
         for member in members:
-            answer = gate_kind(member, spec, ctx) or emulator.place_import(member, spec, ctx)
+            try:
+                answer = gate_kind(member, spec, ctx) or emulator.place_import(member, spec, ctx)
+            except MemberReadError as exc:
+                answer = ImportRefusal("unreadable_member", member.name, READABLE_EXPECTED, detail=str(exc))
             if isinstance(answer, ImportRefusal):
                 refusals.append(refine_refusal(answer, member, platform, current=emulator.name))
             elif isinstance(answer, Placement):

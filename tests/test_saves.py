@@ -17,7 +17,7 @@ import pytest
 
 from webstation_broker import saves
 
-from .conftest import mangle_zip_member
+from .conftest import corrupt_zip_member, mangle_zip_member
 
 # Zip entries carry a DOS timestamp, which has no room for anything before
 # 1980, so the fixture clock sits in 2020 rather than at the epoch.
@@ -60,6 +60,31 @@ def _zip(
     with zipfile.ZipFile(buf, "w") as zf:
         for name, content in members.items():
             zf.writestr(zipfile.ZipInfo(name, date_time=when), content)
+    return buf.getvalue()
+
+
+_CORRUPTIBLE = bytes(range(256)) * 64
+"""Member data that compresses to enough bytes for `corrupt_zip_member` to damage under every method."""
+_METHODS = [zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED, zipfile.ZIP_BZIP2, zipfile.ZIP_LZMA]
+"""Every compression method `zipfile` can read."""
+_METHOD_IDS = ["stored", "deflate", "bzip2", "lzma"]
+"""Test ids for `_METHODS`, in the same order."""
+
+
+def _zip_with(name: str, data: bytes, method: int) -> bytes:
+    """Build a one-member archive compressed with `method`.
+
+    Args:
+        name: The member's name.
+        data: The member's bytes.
+        method: A `zipfile.ZIP_*` compression constant.
+
+    Returns:
+        The zip file contents.
+    """
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr(zipfile.ZipInfo(name, date_time=(2020, 1, 1, 0, 0, 0)), data, compress_type=method)
     return buf.getvalue()
 
 
@@ -1020,6 +1045,114 @@ def test_write_save_archive_counts_an_unreadable_member_as_failed(
 
     assert result["failed"] == 1 and result["written"] == 0
     assert list((root / "GC").iterdir()) == []
+
+
+def test_write_save_archive_counts_a_corrupt_lzma_member_as_failed(tmp_path: Path) -> None:
+    """Corrupt lzma data is a failed write, not an `LZMAError` out of the restore."""
+    root = tmp_path / "root"
+    root.mkdir()
+    body = corrupt_zip_member(_zip_with("GC/a", _CORRUPTIBLE, zipfile.ZIP_LZMA), "GC/a")
+
+    result = saves.write_save_archive(body, root, saves.ArchivePlan(("GC/a",), 0))
+
+    assert result["failed"] == 1 and result["written"] == 0
+    assert list((root / "GC").iterdir()) == []
+
+
+def test_read_archive_reports_a_corrupt_lzma_manifest() -> None:
+    """A corrupt lzma manifest is an unusable manifest, not an exception out of the read."""
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr(".import/save/a.srm", b"a")
+        zf.writestr(
+            zipfile.ZipInfo(saves.MANIFEST_NAME, date_time=(2020, 1, 1, 0, 0, 0)),
+            json.dumps({"version": 2, "files": [], "pad": _CORRUPTIBLE.hex()}),
+            compress_type=zipfile.ZIP_LZMA,
+        )
+    body = corrupt_zip_member(buf.getvalue(), saves.MANIFEST_NAME)
+
+    view = saves.read_archive(body)
+
+    assert view.manifest is None
+    assert view.manifest_error is not None
+    assert view.manifest_error.startswith("manifest unreadable: ")
+
+
+# ── verify_members: the pre-clear read ─────────────────────────────────
+
+
+@pytest.mark.parametrize("method", _METHODS, ids=_METHOD_IDS)
+def test_verify_members_passes_an_intact_member(method: int) -> None:
+    """An intact member reads clean under every compression method.
+
+    Args:
+        method: The member's compression method.
+    """
+    body = _zip_with("saves/a.srm", _CORRUPTIBLE, method)
+
+    assert saves.verify_members(body, ["saves/a.srm"]) == ()
+
+
+@pytest.mark.parametrize("method", _METHODS, ids=_METHOD_IDS)
+def test_verify_members_reports_a_corrupt_member(method: int, caplog: pytest.LogCaptureFixture) -> None:
+    """Corrupt data fails its read under every method, however that method raises.
+
+    Stored and deflate raise `BadZipFile` on the CRC, bzip2 raises `OSError`,
+    and lzma raises `lzma.LZMAError`.
+
+    Args:
+        method: The member's compression method.
+        caplog: Pytest's log capture.
+    """
+    body = corrupt_zip_member(_zip_with("saves/a.srm", _CORRUPTIBLE, method), "saves/a.srm")
+
+    with caplog.at_level(logging.WARNING, logger="webstation_broker.saves"):
+        problems = saves.verify_members(body, ["saves/a.srm"])
+
+    assert problems == (("saves/a.srm", "archive member is corrupt: saves/a.srm"),)
+    assert "saves/a.srm failed its read check" in caplog.text
+
+
+def test_verify_members_reads_only_the_names_it_is_given() -> None:
+    """A corrupt member the plan leaves out is never read."""
+    body = corrupt_zip_member(_zip({"saves/a": _CORRUPTIBLE, "saves/b": b"b"}), "saves/a")
+
+    assert saves.verify_members(body, ["saves/b"]) == ()
+
+
+def test_verify_members_reads_a_repeated_name_once() -> None:
+    """A name listed twice is read, and reported, once."""
+    body = corrupt_zip_member(_zip({"saves/a": _CORRUPTIBLE}), "saves/a")
+
+    assert saves.verify_members(body, ["saves/a", "saves/a"]) == (
+        ("saves/a", "archive member is corrupt: saves/a"),
+    )
+
+
+def test_verify_members_reports_a_name_the_archive_lacks() -> None:
+    """A planned name missing from the archive is a problem, not a `KeyError`."""
+    assert saves.verify_members(_zip({"saves/a": b"a"}), ["saves/b"]) == (
+        ("saves/b", "archive member is corrupt: saves/b"),
+    )
+
+
+def test_verify_members_stops_at_the_size_limit(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Decompressed bytes count against `SAVE_FILE_MAX_BYTES`, and the check ends once they pass it.
+
+    Args:
+        monkeypatch: Pytest's attribute patcher.
+    """
+    monkeypatch.setattr(saves, "SAVE_FILE_MAX_BYTES", 10)
+    body = _zip({"saves/a": b"x" * 8, "saves/b": b"y" * 8, "saves/c": b"z"})
+
+    assert saves.verify_members(body, ["saves/a", "saves/b", "saves/c"]) == (
+        (None, "archive exceeds size limit when extracted"),
+    )
+
+
+def test_verify_members_reports_a_body_that_is_not_a_zip() -> None:
+    """A body that is not a zip is one archive-level problem."""
+    assert saves.verify_members(b"not a zip", ["saves/a"]) == ((None, "body is not a zip archive"),)
 
 
 def test_extract_save_archive_still_refuses_import_members(tmp_path: Path) -> None:

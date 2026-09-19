@@ -731,6 +731,28 @@ async def _start_session(body: ActivateIn, request: Request) -> dict[str, Any]:
                     ", ".join(f"{r.member}: {r.reason}" for r in preflight.refusals),
                 )
                 raise HTTPException(status_code=422, detail=imports.refusal_body(preflight.refusals))
+    if content is not None and v1_plan is not None:
+        # Corrupt data shows only once a member is decompressed, and the write
+        # that would find it runs after the clear.
+        placed_names = [p.member.name for p in preflight.placements] if preflight else []
+        problems = await anyio.to_thread.run_sync(
+            saves.verify_members, content, [*v1_plan.names, *placed_names]
+        )
+        if problems:
+            if preflight is None:
+                log.error(
+                    "activate: save archive %s refused before the clear: %s", save.archive, problems[0][1]
+                )
+                raise HTTPException(status_code=422, detail=f"save restore failed: {problems[0][1]}")
+            log.warning(
+                "activate: import archive %s refused: %d member(s) failed the read check, first: %s",
+                save.archive,
+                len(problems),
+                problems[0][1],
+            )
+            raise HTTPException(
+                status_code=422, detail=imports.refusal_body(imports.fold_read_problems(problems))
+            )
     if preflight is None:
         try:
             emulator.import_identity = await anyio.to_thread.run_sync(
@@ -1865,7 +1887,8 @@ async def get_import_spec(
 
     Returns:
         The API and manifest versions, the emulator's spec, its state slot
-        (None when it has no states) and every refusal code.
+        (None when it takes no states, neither mid-session nor in the
+        archive) and every refusal code.
 
     Raises:
         HTTPException: 403 on a bad secret; 422 for an unknown emulator.
@@ -1883,7 +1906,9 @@ async def get_import_spec(
         "emulator": inst.name,
         "platform": platform,
         **spec.as_dict(),
-        "state_slot": inst.state_slot if inst.supports_states else None,
+        # An archive state resumes through save.resume_slot, so RomM needs the
+        # slot even from an emulator with no mid-session states.
+        "state_slot": inst.state_slot if (inst.supports_states or spec.state_channel == "archive") else None,
         "reasons": sorted(imports.REASONS),
     }
 
