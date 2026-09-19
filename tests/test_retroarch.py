@@ -337,6 +337,48 @@ def test_a_scoped_platform_s_saves_sit_in_its_core_s_sorted_dir() -> None:
                 assert subtree.startswith(f"saves/{info['library_name']}/"), (slug, subtree)
 
 
+_SRM_PLATFORMS = frozenset(
+    {
+        "nes", "famicom", "snes", "sfam", "n64", "gb", "gbc", "gba", "virtualboy", "genesis", "sms",
+        "gamegear", "sg1000", "sega32", "tg16", "turbografx-cd", "supergrafx", "neo-geo-cd",
+        "wonderswan", "wonderswan-color", "jaguar", "colecovision", "psx",
+    }
+)  # fmt: skip
+"""The 23 platforms whose core exposes `RETRO_MEMORY_SAVE_RAM`, per the 2026-09-18 source check."""
+
+
+def test_a_srm_is_taken_on_exactly_the_platforms_whose_core_loads_one() -> None:
+    """The `.srm` predicate answers yes on the 23 checked platforms, and the table's flags agree.
+
+    The second check keeps `save_ram` false on psp, dolphin and azahar too,
+    though the predicate refuses those for reasons of their own.
+    """
+    taken = {slug for slug in retroarch.PLATFORMS if isinstance(retroarch._srm_dir(slug), str)}
+
+    assert taken == _SRM_PLATFORMS
+    assert {slug for slug, info in retroarch.PLATFORMS.items() if info["save_ram"]} == _SRM_PLATFORMS
+
+
+@pytest.mark.parametrize("entry", [{}, {"save_ram": "true"}, {"save_ram": 1}, {"save_ram": None}])
+def test_a_platform_without_a_boolean_save_ram_fails_the_load(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, entry: dict[str, Any]
+) -> None:
+    """An entry that leaves `save_ram` out, or spells it as anything but a bool, stops the table loading.
+
+    Args:
+        monkeypatch: Pytest's attribute patcher.
+        tmp_path: The per-test temporary directory.
+        entry: The `save_ram` part of the entry.
+    """
+    table = tmp_path / "platforms.json"
+    info = {"core": "snes9x", "library_name": "Snes9x", "extensions": [".sfc"], **entry}
+    table.write_text(json.dumps({"snes": info}))
+    monkeypatch.setattr(retroarch, "_PLATFORMS_FILE", table)
+
+    with pytest.raises(ValueError, match="platforms.json: snes needs a true or false save_ram"):
+        retroarch._load_platforms()
+
+
 class TestResumeGate:
     """The gate deciding whether a launch schedules a deferred state load.
 
@@ -2474,6 +2516,22 @@ def _own_folders(core: str) -> str:
     return f"the {core} core keeps its saves in its own folders, which imports do not place yet"
 
 
+def _no_srm(core: str, platform: str) -> str:
+    """The detail a save is refused with where the core loads no `.srm`.
+
+    Args:
+        core: The core's name.
+        platform: The RomM platform slug.
+
+    Returns:
+        The detail.
+    """
+    return (
+        f"the {core} core does not load a .srm on {platform}; "
+        "it keeps its save in a file of its own, or has none"
+    )
+
+
 def _member(tail: str, kind: str) -> imports.ImportMember:
     """Build a hygienic member without an archive behind it.
 
@@ -2498,6 +2556,9 @@ def _member(tail: str, kind: str) -> imports.ImportMember:
         ("snes", ["<name>.srm"], 1, "push"),
         ("psx", ["<name>.srm"], 1, "push"),
         ("jaguar", ["<name>.srm"], 1, "none"),
+        ("dc", [], None, "push"),
+        ("arcade", [], None, "push"),
+        ("segacd", [], None, "push"),
         ("psp", [], None, "push"),
         ("ngc", [], None, "push"),
         ("3ds", [], None, "push"),
@@ -2508,7 +2569,7 @@ def _member(tail: str, kind: str) -> imports.ImportMember:
 def test_the_import_spec_follows_the_platform(
     platform: Optional[str], shapes: list[str], max_members: Optional[int], channel: str
 ) -> None:
-    """One `.srm` on an unscoped platform, none elsewhere; states go through the push routes.
+    """One `.srm` where the core loads SRAM from one, none elsewhere; states go through the push routes.
 
     An empty shape list tells RomM the save is refused on that platform, and
     `place_import` says why. Jaguar's core has no states, and nothing launches
@@ -2541,7 +2602,7 @@ def test_the_import_spec_follows_the_platform(
         ("snes", "Game (USA).sfc", "whatever.SRM", "saves/Snes9x/Game (USA).srm"),
         ("gb", "Game.gb", "Game.srm", "saves/Gambatte/Game.srm"),
         ("psx", "Game (USA).m3u", "Game (USA) (Disc 1).srm", "saves/SwanStation/Game (USA).srm"),
-        ("arcade", "sf2.zip", "sf2.srm", "saves/FinalBurn Neo/sf2.srm"),
+        ("genesis", "Sonic.md", "Sonic.srm", "saves/Genesis Plus GX/Sonic.srm"),
     ],
 )
 def test_a_srm_lands_where_the_core_loads_sram_for_the_booted_content(
@@ -2616,6 +2677,12 @@ def test_a_save_that_is_not_one_srm_is_refused(
         ("ngc", "shape_unverified", None, _own_folders("dolphin"), None),
         ("wii", "shape_unverified", None, _own_folders("dolphin"), None),
         ("3ds", "shape_unverified", None, _own_folders("azahar"), None),
+        ("dc", "destination_unresolvable", None, _no_srm("flycast", "dc"), None),
+        ("arcade", "destination_unresolvable", None, _no_srm("fbneo", "arcade"), None),
+        ("nds", "destination_unresolvable", None, _no_srm("melonds", "nds"), None),
+        ("fds", "destination_unresolvable", None, _no_srm("mesen", "fds"), None),
+        ("segacd", "destination_unresolvable", None, _no_srm("genesis_plus_gx", "segacd"), None),
+        ("atari5200", "destination_unresolvable", None, _no_srm("a5200", "atari5200"), None),
         ("ps2", "destination_unresolvable", None, "RetroArch has no core for platform 'ps2'", None),
         (None, "destination_unresolvable", None, "RetroArch has no core for platform None", None),
     ],
@@ -2628,7 +2695,10 @@ def test_a_save_on_a_platform_without_a_srm_is_refused_with_the_reason(
     detail: str,
     suggest: Optional[str],
 ) -> None:
-    """psp, dolphin, azahar and an unmapped platform refuse a `.srm`, each saying why.
+    """A platform whose core loads no `.srm`, and an unmapped one, refuse it, each saying why.
+
+    fds and segacd share their core with nes and genesis, which take one: the
+    answer is per platform, not per core.
 
     Args:
         ra_dirs: The patched data root.
@@ -2792,6 +2862,8 @@ def test_a_srm_renamed_for_the_booted_content_is_logged(
         ("psp", "Game.srm", "save", None),
         ("ngc", "Game.srm", "save", None),
         ("3ds", "Game.srm", "save", None),
+        ("dc", "Game.srm", "save", None),
+        ("arcade", "Game.srm", "save", None),
         ("ps2", "Game.srm", "save", None),
         (None, "Game.srm", "save", None),
     ],
@@ -2856,12 +2928,18 @@ def test_an_imported_srm_is_written_where_the_core_loads_it(ra_dirs: Path) -> No
 
 @pytest.mark.parametrize(
     ("platform", "shapes", "channel", "slot"),
-    [("snes", ["<name>.srm"], "push", retroarch.STATE_SLOT), ("jaguar", ["<name>.srm"], "none", None)],
+    [
+        ("snes", ["<name>.srm"], "push", retroarch.STATE_SLOT),
+        ("jaguar", ["<name>.srm"], "none", None),
+        ("dc", [], "push", retroarch.STATE_SLOT),
+    ],
 )
 def test_discovery_reports_the_srm_and_the_state_slot(
     client: TestClient, platform: str, shapes: list[str], channel: str, slot: Optional[int]
 ) -> None:
     """Discovery answers the platform's spec, and names the slot only where the core has states.
+
+    On dc the Flycast core keeps VMU files rather than a `.srm`, so no save shape is offered.
 
     Args:
         client: The app, served without a secret.

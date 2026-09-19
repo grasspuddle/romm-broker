@@ -55,6 +55,7 @@ a real stdout pipe drained by a reader thread, unlike the shared `_spawn`
 which merges stderr into stdout (that would corrupt the reply stream).
 """
 
+import dataclasses
 import glob
 import io
 import json
@@ -391,9 +392,16 @@ def _load_platforms() -> dict[str, dict[str, Any]]:
     Returns:
         Platform slug to its entry, with `extensions` and any `save_subtrees`
         as tuples.
+
+    Raises:
+        ValueError: When an entry has no boolean `save_ram`. It decides whether
+            an import may place a `.srm`, so a missing one is never read as
+            either answer.
     """
     platforms = json.loads(_PLATFORMS_FILE.read_text())
-    for info in platforms.values():
+    for slug, info in platforms.items():
+        if not isinstance(info.get("save_ram"), bool):
+            raise ValueError(f"{_PLATFORMS_FILE.name}: {slug} needs a true or false save_ram")
         info["extensions"] = tuple(info["extensions"])
         if "save_subtrees" in info:
             info["save_subtrees"] = tuple(info["save_subtrees"])
@@ -409,6 +417,11 @@ as the preference order when a folder holds several candidates.
 `library_name` is the name the core reports in `retro_get_system_info`.
 RetroArch names the sorted save and state dirs after it, and it is not
 always the core's file name: dolphin reports `dolphin-emu`.
+
+`save_ram` is required, and says whether the core exposes
+`RETRO_MEMORY_SAVE_RAM` on this platform, so that RetroArch loads its battery
+save from `<stem>.srm`. Where it is false the core keeps its save in a file of
+its own, or has none, so an imported `.srm` would never reach the game.
 
 `savestate` is assumed true; only specialized cores opt out.
 
@@ -1269,23 +1282,56 @@ _SRM_EXPECTED = "one non-empty <name>.srm, the core's SRAM"
 """The save shape RetroArch takes, in words, for a refusal's `expected`."""
 
 
-def _srm_library_name(platform: Optional[str]) -> Optional[str]:
-    """The sorted save dir an imported `.srm` lands in on this platform, when it takes one.
+def _srm_dir(platform: Optional[str]) -> Union[str, imports.ImportRefusal]:
+    """Where an imported `.srm` lands on this platform, or why it lands nowhere.
 
-    The PPSSPP core keeps SAVEDATA folders rather than a `.srm`, and a scoped
-    platform's core (dolphin, azahar) keeps its saves in its own folders, so
-    neither takes one; nor does an unmapped platform. `Retroarch.place_import`
-    refuses each of them with its own reason.
+    The one answer both `Retroarch.import_spec` and `Retroarch.place_import`
+    read, so discovery never offers a `.srm` that placement then refuses.
+    Only a core with `save_ram` set in the platform table loads a `.srm`.
+    The PPSSPP core keeps SAVEDATA folders, and a scoped platform's core
+    (dolphin, azahar) keeps its saves in its own folders; each of those, and
+    an unmapped platform, gets a reason of its own.
 
     Args:
         platform: The slug from the activate payload, or None.
 
     Returns:
-        The core's `library_name`, or None when the platform takes no `.srm`.
+        The core's `library_name`, which names the sorted save dir, or the
+        refusal a save member gets here, with its `member` left unset.
     """
     info = _platform_info(platform)
-    if info is None or info["core"] == "ppsspp" or "save_subtrees" in info:
-        return None
+    if info is None:
+        return imports.ImportRefusal(
+            "destination_unresolvable", None, None, detail=f"RetroArch has no core for platform {platform!r}"
+        )
+    if info["core"] == "ppsspp":
+        return imports.ImportRefusal(
+            "destination_unresolvable",
+            None,
+            "a PSP SAVEDATA folder, launched on ppsspp",
+            detail="the PPSSPP core keeps saves as SAVEDATA folders, not a .srm",
+            suggest_emulator="ppsspp",
+        )
+    if "save_subtrees" in info:
+        return imports.ImportRefusal(
+            "shape_unverified",
+            None,
+            None,
+            detail=(
+                f"the {info['core']} core keeps its saves in its own folders, "
+                "which imports do not place yet"
+            ),
+        )
+    if not info["save_ram"]:
+        return imports.ImportRefusal(
+            "destination_unresolvable",
+            None,
+            None,
+            detail=(
+                f"the {info['core']} core does not load a .srm on {platform}; "
+                "it keeps its save in a file of its own, or has none"
+            ),
+        )
     return info["library_name"]
 
 
@@ -1368,9 +1414,10 @@ class Retroarch(Emulator):
 
     Declared imports take one `.srm` save per archive, renamed to the booted
     content's stem and placed in `saves/<library_name>/`, where the core
-    loads SRAM. The psp, dolphin and azahar cores keep their saves in other
-    shapes and take none yet. States are never imported; they are pushed
-    after activate.
+    loads SRAM. Only a platform whose core loads a `.srm` (`save_ram` in
+    `PLATFORMS`) takes one; the rest, psp, dolphin and azahar among them,
+    keep their saves in other files. States are never imported; they are
+    pushed after activate.
 
     Attributes:
         name: Registry key, `retroarch`.
@@ -2459,20 +2506,21 @@ class Retroarch(Emulator):
         return STATE_DIR / lib / name if lib else STATE_DIR / name
 
     def import_spec(self) -> imports.ImportSpec:
-        """Take one `.srm` where the core keeps SRAM in one; take states through the push routes.
+        """Take one `.srm` where the core loads SRAM from one; take states through the push routes.
 
-        psp, dolphin, azahar and an unmapped platform declare the save kind
-        with no shapes: discovery tells RomM the save is refused there, and
-        `place_import` says why. A state placed in the archive would race the
-        resume's fingerprint check, so a mapped platform whose core has states
-        takes them through PUT /api/session/state-file after activate.
+        A platform whose core loads no `.srm` (see `_srm_dir`), and an
+        unmapped platform, declare the save kind with no shapes: discovery
+        tells RomM the save is refused there, and `place_import` says why. A
+        state placed in the archive would race the resume's fingerprint
+        check, so a mapped platform whose core has states takes them through
+        PUT /api/session/state-file after activate.
 
         Returns:
             The spec for the loaded platform.
         """
         # counts_v1 stays False: the archive's other save files belong to other
         # content, and a .srm at this destination is already a conflict.
-        if _srm_library_name(self.platform):
+        if isinstance(_srm_dir(self.platform), str):
             save = imports.KindSpec("save", ("<name>.srm",), max_members=1)
         else:
             save = imports.KindSpec("save", ())
@@ -2496,32 +2544,9 @@ class Retroarch(Emulator):
         Returns:
             The placement, or a refusal saying why this platform takes no `.srm`.
         """
-        info = _platform_info(self.platform)
-        if info is None:
-            return imports.ImportRefusal(
-                "destination_unresolvable",
-                member.name,
-                None,
-                detail=f"RetroArch has no core for platform {self.platform!r}",
-            )
-        if info["core"] == "ppsspp":
-            return imports.ImportRefusal(
-                "destination_unresolvable",
-                member.name,
-                "a PSP SAVEDATA folder, launched on ppsspp",
-                detail="the PPSSPP core keeps saves as SAVEDATA folders, not a .srm",
-                suggest_emulator="ppsspp",
-            )
-        if "save_subtrees" in info:
-            return imports.ImportRefusal(
-                "shape_unverified",
-                member.name,
-                None,
-                detail=(
-                    f"the {info['core']} core keeps its saves in its own folders, "
-                    "which imports do not place yet"
-                ),
-            )
+        lib = _srm_dir(self.platform)
+        if isinstance(lib, imports.ImportRefusal):
+            return dataclasses.replace(lib, member=member.name)
         if ctx.rom_file is None:
             return imports.ImportRefusal(
                 "destination_unresolvable",
@@ -2529,7 +2554,7 @@ class Retroarch(Emulator):
                 _SRM_EXPECTED,
                 detail="no rom file to name the save after",
             )
-        return _place_srm(member, info["library_name"], ctx.rom_file)
+        return _place_srm(member, lib, ctx.rom_file)
 
     def _flush_sram(self) -> bool:
         """Ask RetroArch to write the game's SRAM out before the archive is dumped.
