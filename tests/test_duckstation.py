@@ -407,6 +407,61 @@ def test_migration_that_cannot_copy_raises_and_leaves_no_partial_card(
     assert "could not carry memory card" in caplog.text
 
 
+@pytest.mark.parametrize("with_card", [True, False])
+def test_migration_does_not_take_a_directory_at_the_pinned_path_for_a_card(
+    duckstation_dirs: dict[str, Path], caplog: pytest.LogCaptureFixture, with_card: bool
+) -> None:
+    """A directory at the pinned card's path is no card, and it is never removed.
+
+    With a per-game card to carry, the copy cannot replace the directory,
+    so the launch stops rather than boot with no card mounted. Without one
+    there is nothing to carry, and the directory is left as it was.
+
+    Args:
+        duckstation_dirs: The patched DuckStation dirs.
+        caplog: Pytest's log capture.
+        with_card: Whether a per-game card sits beside the directory.
+    """
+    cards = duckstation_dirs["memcard_dir"]
+    _touch(cards / "shared_card_1.mcd" / "inside", content=b"kept")
+    if with_card:
+        _touch(cards / "Game_1.mcd", content=b"card")
+        pattern = r"could not carry memory card Game_1\.mcd over to shared_card_1\.mcd"
+        with pytest.raises(RuntimeError, match=pattern):
+            duckstation._migrate_memory_card()
+    else:
+        duckstation._migrate_memory_card()
+
+    pinned = cards / "shared_card_1.mcd"
+    assert [p.name for p in pinned.iterdir()] == ["inside"]
+    assert (pinned / "inside").read_bytes() == b"kept"
+    assert not (cards / "shared_card_1.mcd.tmp").exists()
+    assert "treating the pinned card as absent" in caplog.text
+
+
+def test_migration_replaces_a_link_to_a_directory_at_the_pinned_path(
+    duckstation_dirs: dict[str, Path], caplog: pytest.LogCaptureFixture
+) -> None:
+    """A link to a directory is no card either; the carried card replaces the link, not what it points at.
+
+    Args:
+        duckstation_dirs: The patched DuckStation dirs.
+        caplog: Pytest's log capture.
+    """
+    cards = duckstation_dirs["memcard_dir"]
+    target = _touch(duckstation_dirs["data_dir"] / "elsewhere" / "inside", content=b"kept").parent
+    _touch(cards / "Game_1.mcd", content=b"card")
+    (cards / "shared_card_1.mcd").symlink_to(target)
+
+    duckstation._migrate_memory_card()
+
+    pinned = cards / "shared_card_1.mcd"
+    assert not pinned.is_symlink()
+    assert pinned.read_bytes() == b"card"
+    assert [p.name for p in target.iterdir()] == ["inside"]
+    assert "treating the pinned card as absent" in caplog.text
+
+
 # ── resume state snapshot / diff ────────────────────────────────────────
 
 
@@ -1458,25 +1513,35 @@ def test_two_cards_in_one_import_are_both_refused(duckstation_dirs: dict[str, Pa
     ]
 
 
-@pytest.mark.parametrize("archived", ["memcards/Game (USA)_1.mcd", "memcards/Game (USA)_2.mcd"])
+@pytest.mark.parametrize(
+    ("archived", "carried"),
+    [
+        ("memcards/Game (USA)_1.mcd", "memcards/Game (USA)_1.mcd"),
+        ("memcards/Game (USA)_2.mcd", "memcards/Game (USA)_2.mcd"),
+        ("./memcards/Game (USA)_1.mcd", "memcards/Game (USA)_1.mcd"),
+        ("memcards//Game (USA)_1.mcd", "memcards/Game (USA)_1.mcd"),
+    ],
+)
 def test_a_card_beside_an_archived_per_game_card_is_refused(
-    duckstation_dirs: dict[str, Path], archived: str
+    duckstation_dirs: dict[str, Path], archived: str, carried: str
 ) -> None:
-    """An imported card beside an archived card, in either slot, is refused: one card per archive.
+    """An imported card beside an archived card, in either slot and any spelling, is refused.
 
     Once the imported card is the pinned one, an archived slot 1 card is
-    never mounted again.
+    never mounted again. A hand-built `./memcards/` entry extracts to the
+    same file, so it is the same card.
 
     Args:
         duckstation_dirs: The patched DuckStation dirs.
-        archived: The card the archive already carries.
+        archived: The card's name in the archive.
+        carried: The card the refusal names, as the path it extracts to.
     """
     card = b"\0" * _CARD_BYTES
     body = import_zip({".import/memcard/card.mcd": card}, v1={archived: card})
 
     result = preflight_import(duckstation.Duckstation(), body, rom_file=None)
 
-    detail = f"the archive already carries {archived}"
+    detail = f"the archive already carries {carried}"
     assert [(r.reason, r.expected, r.detail) for r in result.refusals] == [
         ("destination_conflict", "one memory card per archive", detail)
     ]
@@ -1523,14 +1588,18 @@ def test_a_card_the_shared_check_refuses_is_not_refused_again(
     ]
 
 
-def test_a_card_beside_an_archived_pinned_card_is_refused_once(duckstation_dirs: dict[str, Path]) -> None:
+@pytest.mark.parametrize("archived", ["memcards/shared_card_1.mcd", "./memcards/shared_card_1.mcd"])
+def test_a_card_beside_an_archived_pinned_card_is_refused_once(
+    duckstation_dirs: dict[str, Path], archived: str
+) -> None:
     """A card the archive already holds at the pinned name is the shared collision, reported once.
 
     Args:
         duckstation_dirs: The patched DuckStation dirs.
+        archived: The pinned card's name in the archive.
     """
     card = b"\0" * _CARD_BYTES
-    body = import_zip({".import/memcard/card.mcd": card}, v1={"memcards/shared_card_1.mcd": card})
+    body = import_zip({".import/memcard/card.mcd": card}, v1={archived: card})
 
     result = preflight_import(duckstation.Duckstation(), body, rom_file=None)
 

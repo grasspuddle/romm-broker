@@ -269,9 +269,10 @@ def _migrate_memory_card() -> None:
 
     Archives written before card 1 was pinned hold DuckStation's per-game
     `<title>_1.mcd`, which the pinned settings no longer mount. While the
-    pinned card does not exist, the newest `*_1.mcd` is copied to it. It is
+    pinned card is not a file, the newest `*_1.mcd` is copied to it. It is
     copied, never moved, so the per-game card stays on disk and in the
-    archive.
+    archive. A directory at the pinned card's path is never removed, so a
+    card that needs carrying cannot land and the launch is refused.
 
     The copy is written just before the dump baseline is taken, so its
     mtime normally falls inside the baseline's slack and it ships with the
@@ -280,12 +281,21 @@ def _migrate_memory_card() -> None:
     holds.
 
     Raises:
-        RuntimeError: When the copy fails. Booting on would mount a blank
-            card, and the exit dump would ship it as the player's.
+        RuntimeError: When the copy fails, a directory in its way included.
+            Booting on would mount a blank card, and the exit dump would
+            ship it as the player's.
     """
     pinned = MEMCARD_DIR / PINNED_CARD
-    if pinned.exists():
-        return
+    try:
+        pinned_mode: Optional[int] = pinned.stat().st_mode
+    except OSError:
+        pinned_mode = None
+    if pinned_mode is not None:
+        if stat.S_ISREG(pinned_mode):
+            return
+        # Not a card DuckStation can mount, so it counts as absent. It is left
+        # in place: the copy below then cannot replace it and refuses the launch.
+        log.warning("duckstation: %s is not a memory card file, treating the pinned card as absent", pinned)
     found: list[tuple[float, Path]] = []
     for card in MEMCARD_DIR.glob("*_1.mcd"):
         try:
@@ -813,12 +823,14 @@ class Duckstation(Emulator):
         cards = MEMCARD_DIR.name
         pinned = f"{cards}/{PINNED_CARD}"
         imported = [p for p in plan if p.dest.as_posix() == pinned]
-        carried = sorted(rel for rel in ctx.archive_paths if rel.startswith(f"{cards}/"))
+        # Keyed the way the shared check keys them: PurePosixPath drops `.` and
+        # empty components, so `./memcards/X_1.mcd` is the file it extracts to.
+        archived = {PurePosixPath(rel).as_posix() for rel in ctx.archive_paths}
+        carried = sorted(rel for rel in archived if rel.startswith(f"{cards}/"))
         # The shared check's own clash rule: the same file, or one path a
         # strict prefix of the other.
         clashes = len(imported) > 1 or any(
-            rel == pinned or rel.startswith(f"{pinned}/") or pinned.startswith(f"{rel}/")
-            for rel in ctx.archive_paths
+            rel == pinned or rel.startswith(f"{pinned}/") or pinned.startswith(f"{rel}/") for rel in archived
         )
         if not carried or clashes:
             return []
