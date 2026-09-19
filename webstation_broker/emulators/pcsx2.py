@@ -19,7 +19,7 @@ from pathlib import Path
 from threading import Thread
 from typing import Any, Optional
 
-from .. import memcard
+from .. import imports, memcard
 from .base import Emulator, base_launch_env, xdg_config_dir
 
 log = logging.getLogger(__name__)
@@ -80,7 +80,7 @@ MEMCARD_DIR = DATA_DIR / "memcards"
 """Directory PCSX2 keeps its memory cards in, `memcards` under `DATA_DIR`."""
 _DEFAULT_SLOT1_CARD = "romm-slot1"
 """Card name used when the environment names none, or names one the broker will not carry."""
-_CARD_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 ._-]{0,63}$")
+_CARD_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9 ._-]{0,63}", re.ASCII)
 """Card names the broker accepts: one path component, and safe as an ini value."""
 
 
@@ -99,7 +99,7 @@ def _slot1_card_name(raw: str) -> str:
     Returns:
         `raw` when it is a single safe path component, otherwise `_DEFAULT_SLOT1_CARD`.
     """
-    if _CARD_NAME_RE.match(raw):
+    if _CARD_NAME_RE.fullmatch(raw):
         return raw
     log.warning(
         "PCSX2_SLOT1_CARD %r is not a usable card name, falling back to %s",
@@ -415,7 +415,7 @@ def _matches_slot(p: Path, slot: int) -> bool:
     return p.name.endswith(f".{slot:02d}.p2s") or p.name.endswith(f".{slot}.p2s")
 
 
-_STATE_NAME_RE = re.compile(r"^(?P<serial>[^/]+)\.\d{1,2}\.p2s$")
+_STATE_NAME_RE = re.compile(r"(?P<serial>[^/]+)\.\d{1,2}\.p2s", re.ASCII)
 """Matches `<serial> (<crc>).<slot>.p2s`, the name PCSX2 builds for a save state.
 
 The serial is what ties the file to a disc, the slot is just which of the ten
@@ -424,7 +424,7 @@ directories is not a state name here whatever else checks it.
 """
 
 
-_STATE_CRC_RE = re.compile(r"\s*\([0-9A-Fa-f]+\)$")
+_STATE_CRC_RE = re.compile(r"\s*\([0-9A-Fa-f]+\)$", re.ASCII)
 """The `(<crc>)` suffix PCSX2 appends to the serial in a state name."""
 
 
@@ -438,7 +438,7 @@ def _state_serial(filename: str) -> Optional[str]:
         The serial with PCSX2's CRC suffix stripped, or None when `filename` is
         not a state name or names no serial.
     """
-    match = _STATE_NAME_RE.match(filename)
+    match = _STATE_NAME_RE.fullmatch(filename)
     if match is None:
         return None
     return _STATE_CRC_RE.sub("", match.group("serial")).strip() or None
@@ -459,7 +459,7 @@ def _restamp_slot(filename: str, slot: int) -> Optional[str]:
     Returns:
         The same state named for `slot`, or None if `filename` is not a state name.
     """
-    match = _STATE_NAME_RE.match(filename)
+    match = _STATE_NAME_RE.fullmatch(filename)
     if match is None:
         return None
     return f"{match.group('serial')}.{slot:02d}.p2s"
@@ -1071,10 +1071,10 @@ class Pcsx2(Emulator):
             filename: The basename RomM is pushing.
 
         Returns:
-            The path to write to, or None when the name is not a state name, carries a path
-            component, or does not match the state already in the slot.
+            The path to write to, or None when the name is not a plain, printable basename, is not
+            a state name, or does not match the state already in the slot.
         """
-        if "/" in filename or filename in ("", ".", ".."):
+        if not imports.check_state_basename(filename):
             return None
         restamped = _restamp_slot(filename, self.state_slot)
         if restamped is None:

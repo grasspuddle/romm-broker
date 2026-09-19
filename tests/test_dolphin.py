@@ -219,9 +219,27 @@ def test_state_target_matches_the_state_already_in_the_slot(
     assert dolphin.Dolphin().state_target("RMCE01.s09") is None
 
 
-@pytest.mark.parametrize("filename", ["../escape.s01", "", ".", "..", "notastate.bin"])
+@pytest.mark.parametrize(
+    "filename",
+    [
+        "../escape.s01",
+        "",
+        ".",
+        "..",
+        "notastate.bin",
+        "GZLE01.s\u0660\u0661",
+        "GZLE01.s01\n",
+        " .s01",
+        ".GZLE01.s01",
+    ],
+)
 def test_state_target_refuses_a_name_dolphin_would_never_write(state_dir: Path, filename: str) -> None:
-    """A push whose name Dolphin would never write is refused."""
+    """A push whose name Dolphin would never write is refused.
+
+    Args:
+        state_dir: The patched state directory.
+        filename: The pushed name.
+    """
     assert dolphin.Dolphin().state_target(filename) is None
 
 

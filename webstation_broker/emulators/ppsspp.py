@@ -31,6 +31,7 @@ from pathlib import Path
 from threading import Thread
 from typing import Any, Optional
 
+from .. import imports
 from .base import Emulator, base_launch_env, xdg_config_dir
 
 log = logging.getLogger(__name__)
@@ -137,7 +138,7 @@ _ROM_SEARCH_GLOBS = ("*", "*/*")
 _STAGING_SUFFIX = ".tmp"
 """Suffix PPSSPP saves a state under before renaming it over the real name once the save succeeds."""
 
-_STATE_NAME_RE = re.compile(r"^(?P<prefix>[^/]+)_(?P<slot>\d+)\.ppst$")
+_STATE_NAME_RE = re.compile(r"(?P<prefix>[^/]+)_(?P<slot>\d+)\.ppst", re.ASCII)
 """Matches `<game id>_<version>_<slot>.ppst`, the name PPSSPP builds for a save state.
 
 PPSSPP writes a `.jpg` of its own beside it, under the same stem.
@@ -267,7 +268,7 @@ def _patch_ini_file(
             # First run: write just the forced settings, PPSSPP fills in the rest.
             path.parent.mkdir(parents=True, exist_ok=True)
             seeded = "\n".join(f"{key} = {val}" for (_sec, key), val in patches.items())
-            path.write_text("﻿" + f"[{default_section}]\n" + seeded + "\n", encoding="utf-8")
+            path.write_text("\ufeff" + f"[{default_section}]\n" + seeded + "\n", encoding="utf-8")
             return
         lines = path.read_text(encoding="utf-8-sig").splitlines()
         section = ""
@@ -314,7 +315,7 @@ def _patch_ini_file(
                     new_lines.extend(["", f"[{sec}]", f"{key} = {val}"])
                     present.add(sec)
         tmp = path.with_suffix(".tmp")
-        tmp.write_text("﻿" + "\n".join(new_lines) + "\n", encoding="utf-8")
+        tmp.write_text("\ufeff" + "\n".join(new_lines) + "\n", encoding="utf-8")
         tmp.replace(path)
     except (OSError, UnicodeDecodeError) as exc:
         log.exception("ppsspp: %s patch failed at %s, refusing to launch", path.name, path)
@@ -545,7 +546,7 @@ def _restamp_slot(filename: str, slot: int) -> Optional[str]:
     Returns:
         The same state named for `slot`, or None if `filename` is not a state name.
     """
-    match = _STATE_NAME_RE.match(filename)
+    match = _STATE_NAME_RE.fullmatch(filename)
     if match is None:
         return None
     return f"{match.group('prefix')}_{slot}.ppst"
@@ -920,10 +921,10 @@ class Ppsspp(Emulator):
             filename: The basename RomM is pushing.
 
         Returns:
-            The path to write to, or None when the name is not a state name, carries a path
-            component, or does not match the state already in the slot.
+            The path to write to, or None when the name is not a plain, printable basename, is not
+            a state name, or does not match the state already in the slot.
         """
-        if "/" in filename or filename in ("", ".", ".."):
+        if not imports.check_state_basename(filename):
             return None
         restamped = _restamp_slot(filename, STATE_SLOT)
         if restamped is None:

@@ -811,7 +811,18 @@ def test_a_pushed_state_keeps_the_spelling_it_arrived_in(dirs: dict[str, Path]) 
 
 @pytest.mark.parametrize(
     "filename",
-    ["", ".", "..", "monkey", "monkey.sav", "../monkey.s01", "sub/monkey.s01", "monkey.s1"],
+    [
+        "",
+        ".",
+        "..",
+        "monkey",
+        "monkey.sav",
+        "../monkey.s01",
+        "sub/monkey.s01",
+        "monkey.s1",
+        "monkey.s01\n",
+        "monkey.s\u0660\u0661",
+    ],
 )
 def test_a_name_that_is_not_a_save_is_refused(dirs: dict[str, Path], filename: str) -> None:
     """Only a ScummVM save name is written, which is what bounds the push.

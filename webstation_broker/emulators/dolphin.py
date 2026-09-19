@@ -18,6 +18,7 @@ from pathlib import Path
 from threading import Thread
 from typing import Any, Optional
 
+from .. import imports
 from .base import Emulator, base_launch_env, xdg_config_dir, xdg_data_dir
 
 log = logging.getLogger(__name__)
@@ -119,7 +120,7 @@ one beside it.
 _ROM_SEARCH_GLOBS = ("*", "*/*")
 _DISC_RE = re.compile(r"(?:^|[^a-z0-9])(?:disc|disk|cd)[\s._-]*(\d+)", re.IGNORECASE)
 
-_STATE_NAME_RE = re.compile(r"^(?P<game>[^/]+)\.s\d{2}$")
+_STATE_NAME_RE = re.compile(r"(?P<game>[^/]+)\.s\d{2}", re.ASCII)
 """Matches `<game id>.s01`, the name Dolphin builds for a save state."""
 
 _GC_PLATFORM = "ngc"
@@ -127,7 +128,7 @@ _GC_PLATFORM = "ngc"
 
 _GAME_ID_LEN = 6
 """Length of the game id a disc header opens with and Dolphin stamps into a state."""
-_GAME_ID_RE = re.compile(r"^[A-Za-z0-9]{6}$")
+_GAME_ID_RE = re.compile(r"[A-Za-z0-9]{6}", re.ASCII)
 """A game id the broker will compare on: six alphanumerics, e.g. `GXCE01`."""
 _ID_OFFSETS = {".iso": 0, ".gcm": 0, ".wbfs": 0x200}
 """Disc formats that keep the game id in the clear, and the offset it sits at.
@@ -161,7 +162,7 @@ def _game_id_at(path: Path, offset: int) -> Optional[str]:
     except UnicodeDecodeError:
         log.debug("game id at %s offset %d was not ascii", path, offset)
         return None
-    return game_id if _GAME_ID_RE.match(game_id) else None
+    return game_id if _GAME_ID_RE.fullmatch(game_id) else None
 
 
 def _rom_game_id(rom_path: Path) -> Optional[str]:
@@ -697,7 +698,7 @@ def _restamp_slot(filename: str, slot: int) -> Optional[str]:
     Returns:
         The same state named for `slot`, or None if `filename` is not a state name.
     """
-    match = _STATE_NAME_RE.match(filename)
+    match = _STATE_NAME_RE.fullmatch(filename)
     if match is None:
         return None
     return f"{match.group('game')}.s{slot:02d}"
@@ -1117,10 +1118,10 @@ class Dolphin(Emulator):
             filename: The basename RomM is pushing.
 
         Returns:
-            The path to write to, or None when the name is not a state name, carries a path
-            component, or does not match the state already in the slot.
+            The path to write to, or None when the name is not a plain, printable basename, is not
+            a state name, or does not match the state already in the slot.
         """
-        if "/" in filename or filename in ("", ".", ".."):
+        if not imports.check_state_basename(filename):
             return None
         restamped = _restamp_slot(filename, STATE_SLOT)
         if restamped is None:

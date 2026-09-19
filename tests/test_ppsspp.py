@@ -232,9 +232,29 @@ def test_state_target_matches_the_state_already_in_the_slot(
     assert ppsspp.Ppsspp().state_target("ULUS20041_1_9.ppst") is None
 
 
-@pytest.mark.parametrize("filename", ["../escape_1.ppst", "", ".", "..", "notastate.bin"])
+@pytest.mark.parametrize(
+    "filename",
+    [
+        "../escape_1.ppst",
+        "",
+        ".",
+        "..",
+        "notastate.bin",
+        "ULUS10041_\u0661.ppst",
+        "a\n_1.ppst",
+        ".hidden_1.ppst",
+        " _1.ppst",
+        "a\\b_1.ppst",
+        "ULUS10041_1.ppst\n",
+    ],
+)
 def test_state_target_refuses_a_name_ppsspp_would_never_write(state_dir: Path, filename: str) -> None:
-    """A push whose name PPSSPP would never write is refused."""
+    """A push whose name PPSSPP would never write is refused.
+
+    Args:
+        state_dir: The patched state directory.
+        filename: The pushed name.
+    """
     assert ppsspp.Ppsspp().state_target(filename) is None
 
 
@@ -285,7 +305,7 @@ def test_a_players_own_state_bindings_survive_the_launch_patch(
     """The broker's bracket keys join the player's mapping for those actions instead of replacing it."""
     _ini, controls = config_inis
     controls.write_text(
-        "﻿[ControlMapping]\nSave State = 10-190\nLoad State = 10-191\nRewind = 10-192\n",
+        "\ufeff[ControlMapping]\nSave State = 10-190\nLoad State = 10-191\nRewind = 10-192\n",
         encoding="utf-8",
     )
 
@@ -302,7 +322,7 @@ def test_patching_the_controls_twice_does_not_stack_the_broker_binding(
 ) -> None:
     """Every launch patches the same file, so the broker's binding must land at most once."""
     _ini, controls = config_inis
-    controls.write_text("﻿[ControlMapping]\nSave State = 10-190\n", encoding="utf-8")
+    controls.write_text("\ufeff[ControlMapping]\nSave State = 10-190\n", encoding="utf-8")
 
     ppsspp._patch_config()
     ppsspp._patch_config()
@@ -321,7 +341,7 @@ def test_a_missing_controls_file_is_seeded_with_the_broker_bindings(
     ppsspp._patch_config()
 
     raw = controls.read_text(encoding="utf-8")
-    assert raw.startswith("﻿[ControlMapping]")
+    assert raw.startswith("\ufeff[ControlMapping]")
     assert "Save State = 1-71" in raw
     assert "Load State = 1-72" in raw
 
@@ -331,7 +351,7 @@ def test_a_controls_file_without_the_state_actions_gains_them(
 ) -> None:
     """An action the file never mentions is added under its section."""
     _ini, controls = config_inis
-    controls.write_text("﻿[ControlMapping]\nRewind = 10-192\n", encoding="utf-8")
+    controls.write_text("\ufeff[ControlMapping]\nRewind = 10-192\n", encoding="utf-8")
 
     ppsspp._patch_config()
 
@@ -343,7 +363,7 @@ def test_a_controls_file_without_the_state_actions_gains_them(
 def test_the_broker_owned_settings_are_still_written_over(config_inis: tuple[Path, Path]) -> None:
     """ppsspp.ini settings the broker owns are replaced outright, not merged."""
     ini, _controls = config_inis
-    ini.write_text("﻿[General]\nFirstRun = True\nStateSlot = 4\n", encoding="utf-8")
+    ini.write_text("\ufeff[General]\nFirstRun = True\nStateSlot = 4\n", encoding="utf-8")
 
     ppsspp._patch_config()
 

@@ -153,10 +153,40 @@ def test_state_target_refuses_another_disc_over_the_state_in_the_slot(
     assert pcsx2.Pcsx2().state_target("SLES-51234 (00000000).01.p2s") is None
 
 
-@pytest.mark.parametrize("filename", ["../escape.01.p2s", "", ".", "..", "card.bin"])
+@pytest.mark.parametrize(
+    "filename",
+    [
+        "../escape.01.p2s",
+        "",
+        ".",
+        "..",
+        "card.bin",
+        "SLUS-20946.\u0660\u0661.p2s",
+        "SLUS-20946.01.p2s\n",
+        " .01.p2s",
+    ],
+)
 def test_state_target_refuses_a_name_pcsx2_would_never_write(sstate_dir: Path, filename: str) -> None:
-    """A push whose name PCSX2 would never write is refused."""
+    """A push whose name PCSX2 would never write is refused.
+
+    Args:
+        sstate_dir: The patched state directory.
+        filename: The pushed name.
+    """
     assert pcsx2.Pcsx2().state_target(filename) is None
+
+
+@pytest.mark.parametrize("raw", ["card\n", "card\nSlot2_Filename=x", "c\u0430rd"])
+def test_a_card_name_with_a_line_break_or_non_ascii_falls_back(raw: str) -> None:
+    """`$` matched before a trailing newline, which would have reached the ini as a new line.
+
+    The non-ASCII case already fell back, because the character class is spelled out as ASCII; it
+    pins that behaviour.
+
+    Args:
+        raw: The `PCSX2_SLOT1_CARD` value.
+    """
+    assert pcsx2._slot1_card_name(raw) == "romm-slot1"
 
 
 def test_clearing_the_slot_takes_every_state_not_just_the_broker_slot(
