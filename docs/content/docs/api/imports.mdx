@@ -62,8 +62,8 @@ archive is not restored at all and every import member answers
 The refusals are sorted by member, then by reason; an archive-level refusal
 has `member: null` and sorts first. In an archive that holds imports, a
 regular member that would have failed the restore is listed here too, as
-`unsafe_path` or `unrecognised_layout`, with the old error text as its
-`detail`. An archive without imports keeps its old
+`unsafe_path`, `unrecognised_layout` or `unreadable_member`, with the old
+error text as its `detail`. An archive without imports keeps its old
 `save restore failed: <message>` answer.
 
 Activate's response lists each placed import under `save_restore.imported`,
@@ -119,10 +119,17 @@ a kind that does not match its path.
 
 ### `unsafe_path` [#unsafe-path]
 A path component is empty, hidden, `..`, `__MACOSX` or too long, or the name
-has a backslash, colon or control character, or it is non-ASCII without
-the zip UTF-8 flag. Also used when a member is encrypted or uses a
-compression method the broker cannot read, and when the destination would
-resolve outside the save root through a symlink.
+has a backslash, colon, control character or bidirectional control
+character, or it is non-ASCII without the zip UTF-8 flag. Also used when the
+archive holds the same name twice, and when the destination would resolve
+outside the save root through a symlink.
+
+### `unreadable_member` [#unreadable-member]
+The broker cannot read the member: it is encrypted, it uses a compression
+method other than stored, deflate, bzip2 or lzma, or its data is corrupt
+(it fails its CRC check). The check runs on every member before the working
+slot is cleared, so a corrupt member never costs the player the save they
+already had.
 
 ### `kind_not_accepted` [#kind-not-accepted]
 This emulator does not take this kind. `expected` lists the kinds it does.

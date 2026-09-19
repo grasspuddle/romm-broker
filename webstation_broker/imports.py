@@ -54,6 +54,7 @@ REASONS: frozenset[str] = frozenset(
     {
         "manifest_invalid",
         "unsafe_path",
+        "unreadable_member",
         "kind_not_accepted",
         "state_uses_push",
         "resume_slot_required",
@@ -367,7 +368,7 @@ _V1_REASONS: dict[str, str] = {
     "symlink": "unsafe_path",
     "names_subtree": "unrecognised_layout",
     "outside": "unrecognised_layout",
-    "unreadable": "unsafe_path",
+    "unreadable": "unreadable_member",
 }
 """Refusal code for each `saves.V1Problem` in an archive that also holds imports."""
 
@@ -386,13 +387,16 @@ def fold_v1_problems(
 
     Returns:
         A `too_large` refusal for a whole-archive error, then one per v1 problem,
-        each carrying the legacy message as `detail`.
+        each carrying the legacy message as `detail`. An `unreadable_member`
+        refusal also carries `READABLE_EXPECTED` as `expected`.
     """
     out: list[ImportRefusal] = []
     if view_error:
         out.append(ImportRefusal("too_large", None, None, detail=view_error))
     for name, message, kind in v1_plan.problems if v1_plan else ():
-        out.append(ImportRefusal(_V1_REASONS[kind], name, None, detail=message))
+        reason = _V1_REASONS[kind]
+        expected = READABLE_EXPECTED if reason == "unreadable_member" else None
+        out.append(ImportRefusal(reason, name, expected, detail=message))
     return out
 
 
@@ -514,7 +518,9 @@ def parse_manifest_v2(
 _UTF8_FLAG = 0x800
 """Zip general-purpose flag bit saying the entry name is UTF-8."""
 _SAFE_EXPECTED = "a relative path of plain names: no hidden, system or oversized components"
-"""The `expected` text on every hygiene refusal."""
+"""The `expected` text on every hygiene `unsafe_path` refusal."""
+READABLE_EXPECTED = "an unencrypted, intact member, stored or compressed with deflate, bzip2 or lzma"
+"""The `expected` text on every `unreadable_member` refusal."""
 
 
 def _name_problem(name: str) -> Optional[str]:
@@ -565,7 +571,7 @@ def normalise_member(
     zf: Optional[zipfile.ZipFile],
     max_component_bytes: int = 255,
 ) -> Union[ImportMember, ImportRefusal]:
-    """Apply every `unsafe_path` rule to one member, in one pass.
+    """Apply every hygiene rule to one member, in one pass.
 
     This is the only hygiene check: placement hooks can rely on a member's
     parts being plain names.
@@ -577,7 +583,7 @@ def normalise_member(
         max_component_bytes: The longest component the emulator's filesystem takes.
 
     Returns:
-        The member, or an `unsafe_path` refusal.
+        The member, or an `unsafe_path` or `unreadable_member` refusal.
     """
     name = info.filename
 
@@ -608,7 +614,7 @@ def normalise_member(
     # A placed member is stamped with the write time, so its date is never read.
     problem = saves.member_problem(info, check_date=False)
     if problem:
-        return unsafe(f"the member {problem}")
+        return ImportRefusal("unreadable_member", name, READABLE_EXPECTED, detail=f"the member {problem}")
     return ImportMember(
         name=name,
         kind=entry.kind,

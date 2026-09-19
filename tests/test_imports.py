@@ -38,9 +38,10 @@ def _zip(members: dict[str, bytes], manifest: Optional[Any] = None) -> bytes:
     return buf.getvalue()
 
 
-def test_reasons_is_the_closed_set_of_seventeen() -> None:
+def test_reasons_is_the_closed_set_of_eighteen() -> None:
     """The refusal codes are closed, and an unknown one cannot be built."""
-    assert len(imports.REASONS) == 17
+    assert len(imports.REASONS) == 18
+    assert "unreadable_member" in imports.REASONS
     with pytest.raises(ValueError, match="unknown import refusal reason"):
         imports.ImportRefusal("made_up", None, None)
 
@@ -95,9 +96,10 @@ def test_fold_v1_problems_maps_each_kind() -> None:
         ("unsafe_path", "s/b"),
         ("unrecognised_layout", "saves"),
         ("unrecognised_layout", "x/c"),
-        ("unsafe_path", "s/d"),
+        ("unreadable_member", "s/d"),
     ]
     assert folded[1].detail == "archive member escapes save dir: ../a"
+    assert folded[5].expected == imports.READABLE_EXPECTED
 
 
 def test_import_spec_as_dict_is_the_discovery_shape() -> None:
@@ -399,7 +401,8 @@ def test_normalise_member_refuses_a_member_that_cannot_be_read(field: str, value
     refusal = imports.normalise_member(info, _entry(name), zf=None)
 
     assert isinstance(refusal, imports.ImportRefusal)
-    assert (refusal.reason, refusal.detail) == ("unsafe_path", detail)
+    assert (refusal.reason, refusal.detail) == ("unreadable_member", detail)
+    assert refusal.expected == imports.READABLE_EXPECTED
 
 
 def test_normalise_member_ignores_the_date_a_placed_member_never_uses() -> None:
@@ -1385,7 +1388,7 @@ def test_an_unreadable_import_member_is_refused_by_preflight(tmp_path: Path) -> 
 
     assert result.placements == ()
     assert [(r.reason, r.member, r.detail) for r in result.refusals] == [
-        ("unsafe_path", ".import/save/a.srm", "the member is encrypted")
+        ("unreadable_member", ".import/save/a.srm", "the member is encrypted")
     ]
 
 
