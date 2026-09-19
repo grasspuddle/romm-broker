@@ -314,6 +314,50 @@ def test_an_untagged_spawn_records_no_tag(pid_record: Path, tmp_path: Path) -> N
         base.Emulator.stop(emu)
 
 
+def test_a_tty_spawn_gives_the_child_a_terminal_for_stdin(pid_record: Path, tmp_path: Path) -> None:
+    """The child still sees a terminal on stdin after the broker has let go of its end.
+
+    The child checks only after a delay, by which point `_spawn` has closed both of its pty fds.
+    Were the child not holding the master itself, that close would hang the terminal up and
+    `isatty` would come back false.
+    """
+
+    class _Tty(base.Emulator):
+        """A stand-in emulator whose stdin should be a terminal."""
+
+        name = "tty"
+        """Registry key this stand-in would be registered under."""
+        log_path = tmp_path / "tty.log"
+        """Kept inside the test's own directory rather than /config."""
+
+    emu = _Tty()
+    cmd = [sys.executable, "-c", "import os, time; time.sleep(0.5); print('isatty', os.isatty(0))"]
+    try:
+        emu._spawn(cmd, dict(os.environ), stdin_tty=True)
+        assert emu._proc is not None
+        emu._proc.wait(timeout=10)
+        assert "isatty True" in emu.log_path.read_text()
+    finally:
+        base.Emulator.stop(emu)
+
+
+def test_a_spawn_cannot_ask_for_both_a_pipe_and_a_terminal(tmp_path: Path) -> None:
+    """Asking for both stdin kinds is refused before anything starts."""
+
+    class _Both(base.Emulator):
+        """A stand-in emulator asked for two stdins at once."""
+
+        name = "both"
+        """Registry key this stand-in would be registered under."""
+        log_path = tmp_path / "both.log"
+        """Kept inside the test's own directory rather than /config."""
+
+    emu = _Both()
+    with pytest.raises(ValueError):
+        emu._spawn(SLEEPER_CMD, dict(os.environ), stdin_pipe=True, stdin_tty=True)
+    assert emu._proc is None
+
+
 def test_reaping_closes_apps_a_shell_that_already_exited_left_open(
     pid_record: Path, desktop_tree: tuple[subprocess.Popen[bytes], int, str]
 ) -> None:
