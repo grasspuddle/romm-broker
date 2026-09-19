@@ -2764,6 +2764,8 @@ def test_a_srm_renamed_for_the_booted_content_is_logged(
 ) -> None:
     """The member's own stem is discarded, and the log says so when it differed.
 
+    Either way the save is accepted, so a missing log line is never a refusal.
+
     Args:
         ra_dirs: The patched data root.
         caplog: Pytest's log capture.
@@ -2773,8 +2775,10 @@ def test_a_srm_renamed_for_the_booted_content_is_logged(
     body = import_zip({f".import/save/{name}": b"sram"})
 
     with caplog.at_level(logging.INFO, logger=retroarch.log.name):
-        preflight_import(_on("snes"), body, rom_file=ra_dirs / "Game.sfc")
+        result = preflight_import(_on("snes"), body, rom_file=ra_dirs / "Game.sfc")
 
+    assert result.refusals == ()
+    assert [p.dest.as_posix() for p in result.placements] == ["saves/Snes9x/Game.srm"]
     assert (f"import .import/save/{name} placed as saves/Snes9x/Game.srm" in caplog.text) is logged
 
 

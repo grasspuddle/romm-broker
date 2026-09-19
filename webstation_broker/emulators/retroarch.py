@@ -1257,8 +1257,12 @@ def _find_reply(buf: bytes, prefixes: tuple[str, ...]) -> Optional[tuple[str, in
 
 _SRM_NAME_RE = re.compile(r"[^/]+\.srm", re.IGNORECASE | re.ASCII)
 """An imported save's name: any `<name>.srm`, in any case. The name itself is replaced."""
-_STATE_LEAF_RE = re.compile(r".+\.state(?:\d{1,2}|\.auto)?", re.IGNORECASE | re.ASCII)
-"""A RetroArch state's name in any slot; a state is pushed after activate, not imported as a save."""
+_STATE_LEAF_RE = re.compile(f".+{_STATE_SUFFIX_RE.pattern}", re.IGNORECASE | re.ASCII)
+"""A RetroArch state's name in any slot; a state is pushed after activate, not imported as a save.
+
+Built from `_STATE_SUFFIX_RE` so the two never disagree on the slot grammar.
+Unlike that one, it ignores case.
+"""
 _UNCONVERTED_SAVE_SUFFIXES: frozenset[str] = frozenset({".sav", ".rtc", ".nv", ".eep", ".mpk"})
 """Other save-file suffixes cores write, not placed until each core's name for them is verified."""
 _SRM_EXPECTED = "one non-empty <name>.srm, the core's SRAM"
