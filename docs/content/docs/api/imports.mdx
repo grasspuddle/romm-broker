@@ -157,7 +157,7 @@ carries at the same path, is a `destination_conflict`. It refuses these:
 - A `.sav`, `.rtc`, `.nv`, `.eep` or `.mpk` file: `needs_conversion`, until
   each core's name for that file has been checked.
 - A `memcard` member: `kind_not_accepted`, with `expected` naming `save`.
-  Send the core's `.srm` as a save instead.
+  On a platform that takes a `.srm`, send the core's `.srm` as a save instead.
 - A `state` member: `state_uses_push`. On `jaguar`, whose core has no states,
   and on a platform RetroArch has no core for, it is `kind_not_accepted`.
 

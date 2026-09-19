@@ -271,8 +271,10 @@ def _migrate_memory_card() -> None:
     `<title>_1.mcd`, which the pinned settings no longer mount. While the
     pinned card is not a file, the newest `*_1.mcd` is copied to it. It is
     copied, never moved, so the per-game card stays on disk and in the
-    archive. A directory at the pinned card's path is never removed, so a
-    card that needs carrying cannot land and the launch is refused.
+    archive. A path at the pinned card that is not a regular file counts as
+    absent. A real directory there is never removed, so a card that needs
+    carrying cannot land and the launch is refused. A symlink is replaced by
+    the copy, never written through, and the launch goes ahead.
 
     The copy is written just before the dump baseline is taken, so its
     mtime normally falls inside the baseline's slack and it ships with the
@@ -294,7 +296,7 @@ def _migrate_memory_card() -> None:
         if stat.S_ISREG(pinned_mode):
             return
         # Not a card DuckStation can mount, so it counts as absent. It is left
-        # in place: the copy below then cannot replace it and refuses the launch.
+        # in place: a copy below replaces a symlink but fails on a directory.
         log.warning("duckstation: %s is not a memory card file, treating the pinned card as absent", pinned)
     found: list[tuple[float, Path]] = []
     for card in MEMCARD_DIR.glob("*_1.mcd"):
