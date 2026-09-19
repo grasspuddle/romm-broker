@@ -15,7 +15,7 @@ import pytest
 from webstation_broker import imports
 from webstation_broker.emulators import ppsspp
 
-from .conftest import import_zip, preflight_import
+from .conftest import import_zip, preflight_import, restore_import
 
 
 @pytest.fixture
@@ -1010,6 +1010,19 @@ def test_a_state_for_another_title_is_refused(psp_root: Path) -> None:
     assert [r.reason for r in result.refusals] == ["identity_mismatch"]
 
 
+def test_a_retroarch_state_declared_as_a_state_is_refused(psp_root: Path) -> None:
+    """A libretro core's numbered state is no PPSSPP state, whatever its extension looks like.
+
+    Args:
+        psp_root: The patched memory stick root.
+    """
+    result = _preflight({".import/state/Game.state1": b"progress"})
+
+    assert [(r.reason, r.detail) for r in result.refusals] == [
+        ("source_incompatible", "a RetroArch (libretro) state")
+    ]
+
+
 def test_a_homebrew_state_is_taken_on_trust(psp_root: Path) -> None:
     """A homebrew id is no product code, so there is nothing to compare.
 
@@ -1076,3 +1089,29 @@ def test_a_pushed_state_for_another_title_is_refused(state_dir: Path) -> None:
     assert emu.state_target("ULES00151_1.00_3.ppst") is None
     assert emu.state_target("ULUS10041_1.00_3.ppst") == state_dir / f"ULUS10041_1.00_{ppsspp.STATE_SLOT}.ppst"
     assert emu.state_target("HOMEBREW_1.00_3.ppst") == state_dir / f"HOMEBREW_1.00_{ppsspp.STATE_SLOT}.ppst"
+
+
+def test_a_push_after_an_import_must_match_the_imported_state(psp_root: Path) -> None:
+    """The imported state holds the slot, so a push lands on it only under the same game id and version.
+
+    The push's slot does not matter: every name is restamped into the working
+    slot before it is compared, as for a state the broker saved itself.
+
+    Args:
+        psp_root: The patched memory stick root.
+    """
+    emu = ppsspp.Ppsspp()
+    body = import_zip({".import/state/ULUS10041_1.00_4.ppst": b"progress"})
+    result = _preflight({".import/state/ULUS10041_1.00_4.ppst": b"progress"}, rom=_ROMM_ID)
+
+    report = restore_import(emu, body, result)
+    emu.import_identity = result.identity
+
+    imported = ppsspp.STATE_DIR / f"ULUS10041_1.00_{ppsspp.STATE_SLOT}.ppst"
+    assert (report["imported"], report["failed"]) == (1, 0)
+    assert imported.read_bytes() == b"progress"
+    assert emu.state_target(imported.name) == imported
+    assert emu.state_target("ULUS10041_1.00_7.ppst") == imported
+    assert emu.state_target("ULUS10041_1.01_4.ppst") is None
+    assert emu.state_target("HOMEBREW_1.00_4.ppst") is None
+    assert emu.state_target("ULES00151_1.00_4.ppst") is None
