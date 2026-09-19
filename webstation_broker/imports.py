@@ -163,7 +163,20 @@ class MemberReadError(Exception):
 
     Preflight turns it into an `unreadable_member` refusal, so a placement
     hook that sniffs content never needs a catch of its own.
+
+    Attributes:
+        member: The member's zip name, or None when the raiser did not say.
     """
+
+    def __init__(self, message: str, member: Optional[str] = None) -> None:
+        """Record what went wrong, and where.
+
+        Args:
+            message: What went wrong.
+            member: The member's zip name.
+        """
+        super().__init__(message)
+        self.member = member
 
 
 @dataclass(frozen=True)
@@ -201,17 +214,19 @@ class ImportMember:
             Up to `n` bytes from the start of the member.
 
         Raises:
-            RuntimeError: When the member was built without an open archive.
+            RuntimeError: When the member was built without an open archive, or its archive is closed.
             MemberReadError: When the member's data cannot be read.
         """
         if self._zf is None:
             raise RuntimeError(f"{self.name} has no open archive to read from")
+        if self._zf.fp is None:
+            raise RuntimeError(f"{self.name}'s archive is already closed")
         try:
             with self._zf.open(self.info) as fh:
                 return fh.read(max(0, min(n, HEAD_MAX_BYTES)))
         except saves.ZIP_READ_ERRORS as exc:
             log.warning("imports: %s could not be read: %s", self.name, exc)
-            raise MemberReadError("the member's data is corrupt") from exc
+            raise MemberReadError("the member's data is corrupt", self.name) from exc
 
 
 @dataclass(frozen=True)
@@ -251,6 +266,8 @@ class KindSpec:
         requires_resume_slot: Whether the member only boots with `save.resume_slot` set.
         max_members: Most members of this kind one import may place, or None.
         counts_v1: Whether v1 members of the same kind count toward `max_members`.
+        companions: `fnmatch` globs for leaf names that ride with the kind's members, such as a
+            state's screenshot. They are placed like any member but do not count toward `max_members`.
     """
 
     kind: ImportKind
@@ -258,6 +275,7 @@ class KindSpec:
     requires_resume_slot: bool = False
     max_members: Optional[int] = None
     counts_v1: bool = False
+    companions: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -271,6 +289,7 @@ class ImportSpec:
         case_insensitive_dest: Whether destinations collide regardless of case.
         unit_depth: Leading destination components that name one save unit.
         unit_requires: Names every unit must hold, relative to the unit.
+        unit_subtree: The subtree whose destinations are grouped into units; None groups every one.
         max_component_bytes: Longest path component the emulator's filesystem takes.
         card_subtree: The memory-card subtree, for discovery.
     """
@@ -281,6 +300,7 @@ class ImportSpec:
     case_insensitive_dest: bool = False
     unit_depth: int = 0
     unit_requires: frozenset[str] = frozenset()
+    unit_subtree: Optional[str] = None
     max_component_bytes: int = 255
     card_subtree: Optional[str] = None
 
@@ -602,6 +622,23 @@ def _component_problem(part: str, max_component_bytes: int) -> Optional[str]:
     if len(part.encode("utf-8")) > max_component_bytes:
         return f"component longer than {max_component_bytes} bytes"
     return None
+
+
+def check_state_basename(name: str) -> bool:
+    """Tell whether a pushed state's filename is a plain basename the broker may write under.
+
+    The push route takes the name from a query parameter, so it gets the
+    component and character checks an archive member gets, plus one of its
+    own: a leading space, which no emulator writes and which hides the
+    start of the name in a listing.
+
+    Args:
+        name: The filename as pushed.
+
+    Returns:
+        True when the name is safe to join onto a state directory.
+    """
+    return not (_component_problem(name, 255) or _name_problem(name) or name[:1].isspace())
 
 
 def normalise_member(
@@ -1143,6 +1180,30 @@ def check_member_identity(
     return ImportRefusal("identity_mismatch", member.name, expected, detail=detail)
 
 
+def foreign_id(raw: Optional[str], session: Optional[SessionIdentity], family: IdFamily) -> Optional[str]:
+    """Name the other game a pushed state belongs to, when it provably is another's.
+
+    The push route has no refusal list, only yes or no. A state is refused
+    only when its id normalises and differs from the session's. No id, an
+    id that does not normalise, or a session with no id is taken on trust,
+    as the route always has.
+
+    Args:
+        raw: The id the state gives, in its name or its header, or None.
+        session: The session's identity, or None before any activate.
+        family: The id family both sides are normalised in.
+
+    Returns:
+        The state's canonical id when it differs from the session's, else None.
+    """
+    if raw is None or session is None or session.value is None:
+        return None
+    member_id = NORMALISERS[family](raw)
+    if member_id is None or member_id == session.value:
+        return None
+    return member_id
+
+
 def identity_for(emulator: "Emulator", ctx: ImportCtx) -> SessionIdentity:
     """Resolve the session identity through the emulator's declared source.
 
@@ -1228,10 +1289,13 @@ def _is_protected(rel: str, spec: ImportSpec) -> bool:
     return any(fnmatch.fnmatchcase(rel, g) for g in spec.protected)
 
 
-def _destination_conflicts(
+def destination_conflicts(
     plan: Sequence[Placement], archive_paths: frozenset[str], fold: bool
 ) -> dict[str, str]:
     """Find the import members whose destinations clash with another destination.
+
+    `check_plan` refuses every member named here. An emulator's own plan
+    check calls it too, to skip members already refused.
 
     Two destinations clash when they are the same file, or when one is a
     strict path prefix of the other, so one would need to be both a file and
@@ -1328,6 +1392,19 @@ def _save_tree_refusal(
     return None
 
 
+def _is_companion(member: ImportMember, kind_spec: KindSpec) -> bool:
+    """Tell whether a member is a companion of its kind, exempt from the kind's count.
+
+    Args:
+        member: The member.
+        kind_spec: Its kind's spec.
+
+    Returns:
+        True when the member's leaf matches one of the kind's companion globs.
+    """
+    return any(fnmatch.fnmatchcase(member.parts[-1], glob) for glob in kind_spec.companions)
+
+
 def check_plan(
     plan: Sequence[Placement],
     ctx: ImportCtx,
@@ -1351,7 +1428,7 @@ def check_plan(
     """
     refusals: list[ImportRefusal] = []
     fold = spec.case_insensitive_dest
-    conflicted = _destination_conflicts(plan, ctx.archive_paths, fold)
+    conflicted = destination_conflicts(plan, ctx.archive_paths, fold)
     for name, detail in sorted(conflicted.items()):
         refusals.append(
             ImportRefusal("destination_conflict", name, "one member per destination", detail=detail)
@@ -1360,7 +1437,9 @@ def check_plan(
     for kind_spec in spec.kinds:
         if kind_spec.max_members is None:
             continue
-        mine = [p for p in plan if p.member.kind == kind_spec.kind]
+        mine = [
+            p for p in plan if p.member.kind == kind_spec.kind and not _is_companion(p.member, kind_spec)
+        ]
         count = len(mine)
         # A member already refused for a collision is not refused a second time.
         over = [p for p in mine if p.member.name not in conflicted]
@@ -1410,6 +1489,8 @@ def check_plan(
     if spec.unit_depth and spec.unit_requires:
         units: dict[tuple[str, ...], list[Placement]] = {}
         for p in plan:
+            if spec.unit_subtree is not None and p.dest.parts[0] != spec.unit_subtree:
+                continue
             units.setdefault(p.dest.parts[: spec.unit_depth], []).append(p)
         for members in units.values():
             held = {PurePosixPath(*p.dest.parts[spec.unit_depth :]).as_posix() for p in members}
@@ -1426,12 +1507,17 @@ def check_plan(
                     )
                 )
 
-    refusals.extend(emulator.validate_import_plan(list(plan), ctx))
+    try:
+        refusals.extend(emulator.validate_import_plan(list(plan), ctx))
+    except MemberReadError as exc:
+        # A hook that sniffs member data can find a corrupt one here, after
+        # placement; it is the same refusal preflight gives during placement.
+        refusals.append(ImportRefusal("unreadable_member", exc.member, READABLE_EXPECTED, detail=str(exc)))
     return refusals
 
 
-_PSP_SAVEDATA_DIR = re.compile(r"[A-Z]{4}\d{5}[A-Za-z0-9_]*", re.ASCII)
-"""A PSP `SAVEDATA/` dir name: the serial plus a game-chosen suffix."""
+PSP_SAVEDATA_DIR = re.compile(r"[A-Z]{4}[0-9]{5}[A-Za-z0-9_\-]{0,23}", re.ASCII)
+"""A PSP `SAVEDATA` folder name: a product code, then up to 23 characters the game picks."""
 
 
 def suggest_for(
@@ -1450,7 +1536,7 @@ def suggest_for(
     from .emulators import get_emulator
 
     suggestion: Optional[str] = None
-    if platform == "psp" and any(_PSP_SAVEDATA_DIR.fullmatch(p) for p in member.parts[:-1]):
+    if platform == "psp" and any(PSP_SAVEDATA_DIR.fullmatch(p) for p in member.parts[:-1]):
         suggestion = "ppsspp"
     else:
         ra = get_emulator("retroarch")

@@ -505,6 +505,48 @@ def test_an_empty_state_push_leaves_nothing_behind(
     assert list(tmp_path.glob(".*.tmp")) == []
 
 
+def test_a_pushed_state_that_opens_as_another_games_is_refused(
+    client: TestClient, broker_dirs: dict[str, Path], fake_emulator: list[FakeEmulator], tmp_path: Path
+) -> None:
+    """The route hands the emulator the state's first bytes, and writes nothing when it says no.
+
+    Args:
+        client: The app's test client.
+        broker_dirs: The patched broker directories.
+        fake_emulator: The registry's fake emulator, as a one-element list.
+        tmp_path: The per-test temporary directory.
+    """
+    _activate(client, broker_dirs)
+    target = tmp_path / "GAME.01.p2s"
+    fake_emulator[0].state_file = target
+    heads: list[bytes] = []
+
+    def foreign(head: bytes) -> bool:
+        """Record the head and call it another game's.
+
+        Args:
+            head: The state's first bytes.
+
+        Returns:
+            False, always.
+        """
+        heads.append(head)
+        return False
+
+    fake_emulator[0].check_state_bytes = foreign
+    content = bytes(range(100))
+
+    response = client.put(
+        f"{API}/session/state-file", params={"filename": "GAME.01.p2s"}, content=content
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "state file belongs to another game"
+    assert heads == [content[: base.STATE_HEAD_BYTES]]
+    assert not target.exists()
+    assert list(tmp_path.glob(".*.tmp")) == []
+
+
 def test_the_memory_card_routes_refuse_an_emulator_without_one(
     client: TestClient, fake_emulator: list[FakeEmulator]
 ) -> None:

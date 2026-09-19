@@ -28,7 +28,7 @@ from starlette.websockets import WebSocketState
 
 from . import callback, imports, memcard, saves, screenshot, selkies, session, settings
 from .emulators import get_emulator
-from .emulators.base import Emulator, reap_orphan
+from .emulators.base import STATE_HEAD_BYTES, Emulator, reap_orphan
 
 log = logging.getLogger(__name__)
 router = APIRouter()
@@ -1734,8 +1734,9 @@ async def put_state_file(
         HTTPException: 403 on a bad secret; 409 when no session is active, the
             emulator is not running, or another session operation is in flight;
             400 when the emulator has no save states, the name is not one it
-            would write, or the body is empty; 413 when the body exceeds
-            STATE_FILE_MAX_BYTES; 500 when the file cannot be written.
+            would write, the body is empty, or the state opens as another game's;
+            413 when the body exceeds STATE_FILE_MAX_BYTES; 500 when the file
+            cannot be written.
     """
     _check_secret(x_broker_secret)
     # Held across the upload, not just the rename: the slot this publishes into
@@ -1755,6 +1756,7 @@ async def put_state_file(
         # writes, and the os.replace below then publishes the mixture as a state.
         tmp = target.with_name(f".{target.name}.{secrets.token_hex(8)}.tmp")
         written = 0
+        head = bytearray()
         try:
             target.parent.mkdir(parents=True, exist_ok=True)
             # Streamed to disk rather than buffered: a state runs to hundreds of
@@ -1766,10 +1768,15 @@ async def put_state_file(
                     if written > settings.STATE_FILE_MAX_BYTES:
                         log.debug("state-file push: %s exceeds size limit", target.name)
                         raise HTTPException(status_code=413, detail="state file exceeds size limit")
+                    if len(head) < STATE_HEAD_BYTES:
+                        head += chunk[: STATE_HEAD_BYTES - len(head)]
                     await anyio.to_thread.run_sync(out.write, chunk)
             if written == 0:
                 log.debug("state-file push: empty request body for %s", target.name)
                 raise HTTPException(status_code=400, detail="empty request body")
+            if not emulator.check_state_bytes(bytes(head)):
+                log.warning("state-file push refused: %s belongs to another game", target.name)
+                raise HTTPException(status_code=400, detail="state file belongs to another game")
             # Locked only for the rename: an in-flight resume or manual load
             # backdates and polls this same path to confirm its own read, and
             # a push landing mid-poll would be mistaken for that read's target

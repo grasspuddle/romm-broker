@@ -83,6 +83,9 @@ The container's own `DISPLAY` names the Xvfb server of the X11 image
 variant, which never starts in Wayland mode.
 """
 
+STATE_HEAD_BYTES = 64
+"""Bytes of a pushed state the push route hands `check_state_bytes`."""
+
 
 def _xdg_dir(app: str, var: str, fallback: str) -> Path:
     """Resolve one XDG directory the way a Linux app following the spec does.
@@ -1276,7 +1279,11 @@ class Emulator:
         return False
 
     import_identity: Optional[imports.SessionIdentity] = None
-    """The game id this session runs as, set by activate's preflight."""
+    """The game id this session runs as, set on every activate.
+
+    Preflight sets it when the archive has imports; `resolve_activate_identity`
+    sets it when it has none. The push route's identity checks read it.
+    """
 
     def import_spec(self) -> imports.ImportSpec:
         """What this emulator accepts as a declared import, on `self.platform`.
@@ -1355,6 +1362,21 @@ class Emulator:
             nothing.
         """
         return None
+
+    def check_state_bytes(self, head: bytes) -> bool:
+        """Tell whether a pushed state may be written for this session, going by its first bytes.
+
+        The push route calls this once the whole body is in, before the state
+        replaces the slot's. The base takes every state: only an emulator
+        whose states open with the id of the game they belong to can tell.
+
+        Args:
+            head: Up to `STATE_HEAD_BYTES` bytes from the start of the pushed state.
+
+        Returns:
+            False when the state provably belongs to another game.
+        """
+        return True
 
     def wait_for_state(self, deadline: float, poll: float = 0.5) -> bool:
         """Block until the working slot holds a state file, or `deadline` passes.

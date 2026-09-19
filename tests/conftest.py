@@ -138,8 +138,9 @@ def preflight_import(
     resume_slot: Optional[int] = None,
     rom: Optional[imports.RomRef] = None,
     memory_card_synced: bool = False,
+    excluded: tuple[str, ...] = (),
 ) -> imports.PreflightResult:
-    """Run preflight on an archive the way activate does, with no subtree excluded.
+    """Run preflight on an archive the way activate does, with the subtrees in `excluded` left alone.
 
     Args:
         emulator: The emulator, with its dirs already patched into tmp_path.
@@ -148,6 +149,7 @@ def preflight_import(
         resume_slot: The activate's `save.resume_slot`, or None.
         rom: The activate body's rom, or None.
         memory_card_synced: Whether the card travels on its own routes.
+        excluded: Subtrees the restore leaves alone, as activate passes them when the card syncs separately.
 
     Returns:
         What preflight decided.
@@ -159,7 +161,7 @@ def preflight_import(
         rom_file=rom_file,
         rom=rom,
         memory_card_synced=memory_card_synced,
-        excluded=(),
+        excluded=excluded,
         resume_slot=resume_slot,
     )
 

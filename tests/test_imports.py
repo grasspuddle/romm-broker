@@ -176,6 +176,33 @@ def test_member_head_turns_a_failed_read_into_member_read_error(caplog: pytest.L
     assert ".import/save/a could not be read" in caplog.text
 
 
+def test_member_head_on_a_closed_archive_says_it_is_closed() -> None:
+    """A member read after its archive closed is a caller bug, not a corrupt member."""
+    body = _zip({".import/save/a": b"x" * 16})
+    with zipfile.ZipFile(io.BytesIO(body)) as zf:
+        info = zf.getinfo(".import/save/a")
+        member = imports.ImportMember(
+            ".import/save/a", "save", "unknown", PurePosixPath("a"), ("a",), info.file_size, info, zf
+        )
+
+    with pytest.raises(RuntimeError, match="already closed"):
+        member.head(4)
+
+
+def test_member_read_error_names_the_member() -> None:
+    """A failed read carries the member's name, so a refusal raised far from the member can name it."""
+    body = corrupt_zip_member(_zip({".import/save/a": b"x" * 16}), ".import/save/a")
+    with zipfile.ZipFile(io.BytesIO(body)) as zf:
+        info = zf.getinfo(".import/save/a")
+        member = imports.ImportMember(
+            ".import/save/a", "save", "unknown", PurePosixPath("a"), ("a",), info.file_size, info, zf
+        )
+        with pytest.raises(imports.MemberReadError) as raised:
+            member.head(64)
+
+    assert raised.value.member == ".import/save/a"
+
+
 def test_rom_ref_copies_the_body_fields() -> None:
     """`RomRef.from_body` copies what imports needs, and nothing ties it to the api module."""
     from webstation_broker.api import RomIn
@@ -187,7 +214,7 @@ def test_rom_ref_copies_the_body_fields() -> None:
     assert ref == imports.RomRef(4, "G", "ps2", "SLUS-20001", None, None)
 
 
-# ── manifest v2 ────────────────────────────────────────────────────────
+# -- manifest v2 --
 
 
 def _v2(*files: dict[str, Any]) -> dict[str, Any]:
@@ -318,7 +345,7 @@ def test_the_logged_import_block_is_bounded(caplog: pytest.LogCaptureFixture) ->
     assert len(line) < 300
 
 
-# ── hygiene ────────────────────────────────────────────────────────────
+# -- hygiene --
 
 
 def _info(name: str, *, utf8: bool = True, size: int = 4) -> zipfile.ZipInfo:
@@ -397,7 +424,7 @@ def test_normalise_member_refuses_unsafe_paths(tail: str) -> None:
 
 def test_normalise_member_refuses_non_ascii_without_the_utf8_flag() -> None:
     """A non-ASCII name only counts when the zip says it is UTF-8."""
-    name = ".import/save/café.srm"
+    name = ".import/save/caf\u00e9.srm"
 
     flagged = imports.normalise_member(_info(name), _entry(name), zf=None)
     unflagged = imports.normalise_member(_info(name, utf8=False), _entry(name), zf=None)
@@ -488,7 +515,42 @@ def test_normalise_member_ignores_the_date_a_placed_member_never_uses() -> None:
     assert isinstance(imports.normalise_member(info, _entry(name), zf=None), imports.ImportMember)
 
 
-# ── the kind gate and the placement helpers ────────────────────────────
+@pytest.mark.parametrize(
+    "name",
+    [
+        "",
+        ".",
+        "..",
+        "a/b",
+        ".hidden_1.ppst",
+        "a\\b_1.ppst",
+        "a\n_1.ppst",
+        " .s01",
+        " _1.ppst",
+        "GZLE01.s01\n",
+        "a‮b.s01",
+    ],
+)
+def test_check_state_basename_refuses_a_name_no_emulator_writes(name: str) -> None:
+    """A pushed name with a path, a hidden or blank start, or a control character is refused.
+
+    Args:
+        name: The pushed filename.
+    """
+    assert imports.check_state_basename(name) is False
+
+
+@pytest.mark.parametrize("name", ["GZLE01.s01", "SLUS-20946 (7D3A8B4E).03.p2s", "ULUS10041_1.00_1.ppst"])
+def test_check_state_basename_takes_the_names_the_emulators_write(name: str) -> None:
+    """Dolphin's, PCSX2's and PPSSPP's own state names pass.
+
+    Args:
+        name: A state name as the emulator writes it.
+    """
+    assert imports.check_state_basename(name) is True
+
+
+# -- the kind gate and the placement helpers --
 
 
 def _member(tail: str, kind: str = "save", size: int = 4, origin: str = "unknown") -> imports.ImportMember:
@@ -779,7 +841,7 @@ def test_owner_marker_sidecar_falls_back_to_the_raw_path(caplog: pytest.LogCaptu
     assert "could not resolve /roms/a.cdi" in caplog.text
 
 
-# ── identity ───────────────────────────────────────────────────────────
+# -- identity --
 
 
 @pytest.mark.parametrize(
@@ -1033,9 +1095,9 @@ def test_a_rom_id_outside_the_family_is_logged(caplog: pytest.LogCaptureFixture)
 @pytest.mark.parametrize(
     ("family", "raw"),
     [
-        ("ps_serial_dashed", "SLUS-٢0001"),
-        ("ps_serial_dashed", "ſlus-20001"),
-        ("ps_serial_nodash", "ULUS٢0064"),
+        ("ps_serial_dashed", "SLUS-\u06620001"),
+        ("ps_serial_dashed", "\u017flus-20001"),
+        ("ps_serial_nodash", "ULUS\u06620064"),
     ],
 )
 def test_serials_are_read_as_ascii_only(family: str, raw: str) -> None:
@@ -1048,7 +1110,36 @@ def test_serials_are_read_as_ascii_only(family: str, raw: str) -> None:
     assert imports.NORMALISERS[family](raw) is None
 
 
-# ── check_plan ─────────────────────────────────────────────────────────
+@pytest.mark.parametrize(
+    ("raw", "session"),
+    [
+        (None, imports.SessionIdentity("ULUS10041", "romm")),
+        ("ULES00151", None),
+        ("ULES00151", imports.SessionIdentity(None, "none")),
+        ("not an id", imports.SessionIdentity("ULUS10041", "romm")),
+        ("ulus-10041", imports.SessionIdentity("ULUS10041", "romm")),
+    ],
+)
+def test_foreign_id_trusts_what_it_cannot_prove_foreign(
+    raw: Optional[str], session: Optional[imports.SessionIdentity]
+) -> None:
+    """No id, no session id, an id that does not normalise, or the session's own id: all pass.
+
+    Args:
+        raw: The id the state gives.
+        session: The session's identity.
+    """
+    assert imports.foreign_id(raw, session, "ps_serial_nodash") is None
+
+
+def test_foreign_id_names_another_games_id() -> None:
+    """An id that normalises to something other than the session's is returned, canonical."""
+    session = imports.SessionIdentity("ULUS10041", "romm")
+
+    assert imports.foreign_id("ules-00151", session, "ps_serial_nodash") == "ULES00151"
+
+
+# -- check_plan --
 
 
 class _PlanEmu:
@@ -1126,6 +1217,162 @@ def _check(
         (r.reason, r.member)
         for r in imports.check_plan(plan, _ctx(**ctx), spec, _PlanEmu(tmp_path / "root"))  # type: ignore[arg-type]
     ]
+
+
+class _RaisingPlanEmu(_PlanEmu):
+    """A stand-in whose own plan check reads a member that turns out corrupt."""
+
+    def validate_import_plan(
+        self, plan: list[imports.Placement], ctx: imports.ImportCtx
+    ) -> list[imports.ImportRefusal]:
+        """Fail the way a hook that sniffs member data would.
+
+        Args:
+            plan: The placements.
+            ctx: The launch context.
+
+        Raises:
+            MemberReadError: Always, naming the plan's first member.
+        """
+        raise imports.MemberReadError("the member's data is corrupt", plan[0].member.name)
+
+
+def test_a_corrupt_member_found_by_the_emulators_plan_check_is_refused(tmp_path: Path) -> None:
+    """A read failure inside `validate_import_plan` is an `unreadable_member`, not a 500.
+
+    Args:
+        tmp_path: The per-test temporary directory.
+    """
+    spec = imports.ImportSpec(kinds=(imports.KindSpec("save", ("x",)),))
+    plan = [_placed("a", "saves/a")]
+
+    emu = _RaisingPlanEmu(tmp_path / "root")
+    refusals = imports.check_plan(plan, _ctx(), spec, emu)  # type: ignore[arg-type]
+
+    assert [(r.reason, r.member, r.expected) for r in refusals] == [
+        ("unreadable_member", ".import/save/a", imports.READABLE_EXPECTED)
+    ]
+
+
+def _state_spec(companions: tuple[str, ...]) -> imports.ImportSpec:
+    """A spec taking one state, with the given companions.
+
+    Args:
+        companions: The state kind's companion globs.
+
+    Returns:
+        The spec.
+    """
+    return imports.ImportSpec(
+        kinds=(imports.KindSpec("state", ("x",), max_members=1, companions=companions),),
+        state_channel="archive",
+    )
+
+
+def test_a_companion_rides_with_its_state_without_counting(tmp_path: Path) -> None:
+    """A state's screenshot is not a second state.
+
+    Args:
+        tmp_path: The per-test temporary directory.
+    """
+    plan = [
+        _placed("G_1.ppst", "states/G_1.ppst", kind="state"),
+        _placed("G_1.jpg", "states/G_1.jpg", kind="state"),
+    ]
+
+    assert _check(tmp_path, plan, _state_spec(("*.jpg",))) == []
+
+
+def test_without_companions_a_screenshot_counts_as_a_state(tmp_path: Path) -> None:
+    """The companion rule is what lets the screenshot through, not a gap in the count.
+
+    Args:
+        tmp_path: The per-test temporary directory.
+    """
+    plan = [
+        _placed("G_1.ppst", "states/G_1.ppst", kind="state"),
+        _placed("G_1.jpg", "states/G_1.jpg", kind="state"),
+    ]
+
+    assert _check(tmp_path, plan, _state_spec(())) == [
+        ("destination_conflict", ".import/state/G_1.ppst"),
+        ("destination_conflict", ".import/state/G_1.jpg"),
+    ]
+
+
+def test_a_second_state_is_still_refused_beside_a_companion(tmp_path: Path) -> None:
+    """Companions are exempt from the count; a second state is not.
+
+    Args:
+        tmp_path: The per-test temporary directory.
+    """
+    plan = [
+        _placed("G_1.ppst", "states/G_1.ppst", kind="state"),
+        _placed("G_1.jpg", "states/G_1.jpg", kind="state"),
+        _placed("H_1.ppst", "states/H_1.ppst", kind="state"),
+    ]
+
+    assert _check(tmp_path, plan, _state_spec(("*.jpg",))) == [
+        ("destination_conflict", ".import/state/G_1.ppst"),
+        ("destination_conflict", ".import/state/H_1.ppst"),
+    ]
+
+
+def _unit_spec(unit_subtree: Optional[str]) -> imports.ImportSpec:
+    """A spec whose units are the first two destination components and need `PARAM.SFO`.
+
+    Args:
+        unit_subtree: The subtree units are drawn from, or None for every destination.
+
+    Returns:
+        The spec.
+    """
+    return imports.ImportSpec(
+        kinds=(imports.KindSpec("save", ("x",)), imports.KindSpec("state", ("y",))),
+        state_channel="archive",
+        unit_depth=2,
+        unit_requires=frozenset({"PARAM.SFO"}),
+        unit_subtree=unit_subtree,
+    )
+
+
+def test_units_are_drawn_only_from_the_unit_subtree(tmp_path: Path) -> None:
+    """A state outside the save folders is not an incomplete save folder.
+
+    Args:
+        tmp_path: The per-test temporary directory.
+    """
+    plan = [
+        _placed("G/PARAM.SFO", "saves/G/PARAM.SFO"),
+        _placed("G_1.ppst", "states/G_1.ppst", kind="state"),
+    ]
+
+    assert _check(tmp_path, plan, _unit_spec("saves")) == []
+
+
+def test_every_destination_is_a_unit_without_a_unit_subtree(tmp_path: Path) -> None:
+    """With no subtree named, the state is grouped as a unit and found wanting.
+
+    Args:
+        tmp_path: The per-test temporary directory.
+    """
+    plan = [
+        _placed("G/PARAM.SFO", "saves/G/PARAM.SFO"),
+        _placed("G_1.ppst", "states/G_1.ppst", kind="state"),
+    ]
+
+    assert _check(tmp_path, plan, _unit_spec(None)) == [("incomplete_unit", ".import/state/G_1.ppst")]
+
+
+def test_a_save_folder_missing_its_required_file_is_incomplete(tmp_path: Path) -> None:
+    """Inside the unit subtree the rule still holds.
+
+    Args:
+        tmp_path: The per-test temporary directory.
+    """
+    plan = [_placed("G/DATA.BIN", "saves/G/DATA.BIN")]
+
+    assert _check(tmp_path, plan, _unit_spec("saves")) == [("incomplete_unit", ".import/save/G/DATA.BIN")]
 
 
 def test_a_clean_plan_passes_and_reaches_the_hook(tmp_path: Path) -> None:
@@ -1294,7 +1541,7 @@ def test_protected_globs_fold_case_when_the_filesystem_does(tmp_path: Path) -> N
     assert [(r.reason, r.member) for r in refusals] == [("protected_destination", ".import/save/a")]
 
 
-# ── refinement ─────────────────────────────────────────────────────────
+# -- refinement --
 
 
 @pytest.fixture
@@ -1379,7 +1626,7 @@ def test_libretro_state_re_takes_only_ascii_slot_digits(name: str) -> None:
     assert imports.LIBRETRO_STATE_RE.fullmatch(name) is None
 
 
-# ── preflight ──────────────────────────────────────────────────────────
+# -- preflight --
 
 
 def _declared(members: dict[str, bytes], kinds: Optional[dict[str, str]] = None) -> bytes:
@@ -1698,21 +1945,25 @@ def _with_duplicate(body: bytes, name: str, data: bytes) -> bytes:
     return buf.getvalue()
 
 
-def test_a_name_the_archive_holds_twice_is_refused_once(tmp_path: Path) -> None:
+@pytest.mark.parametrize("copies", [2, 3])
+def test_a_name_the_archive_holds_more_than_once_is_refused_once(tmp_path: Path, copies: int) -> None:
     """`zipfile` reads a repeated name as its last entry, so the first would escape every check.
 
     Args:
         tmp_path: The per-test temporary directory.
+        copies: How many entries share the name.
     """
     emu = _Accepting()
     emu.save_root = tmp_path
-    body = _with_duplicate(_declared({".import/save/a.srm": b"x"}), ".import/save/a.srm", b"y")
+    body = _declared({".import/save/a.srm": b"x"})
+    for n in range(1, copies):
+        body = _with_duplicate(body, ".import/save/a.srm", bytes([n]))
 
     result = _preflight(emu, body)
 
     assert result.placements == ()
     assert [(r.reason, r.member, r.detail) for r in result.refusals] == [
-        ("unsafe_path", ".import/save/a.srm", "the archive holds this name 2 times")
+        ("unsafe_path", ".import/save/a.srm", f"the archive holds this name {copies} times")
     ]
 
 
