@@ -854,6 +854,33 @@ def build_dest(
     return PurePosixPath(subtree, *ids, *tail)
 
 
+OWNER_MARKER_SUFFIX = ".rom"
+"""What flycast and duckstation append to a resume state's name to name its owner marker."""
+
+
+def owner_marker_sidecar(dest: PurePosixPath, rom_file: Path) -> tuple[PurePosixPath, bytes]:
+    """Build the owner marker an imported resume state needs, as a placement sidecar.
+
+    Flycast and DuckStation resume a state only when the marker beside it
+    names the rom the session boots. The bytes match what both modules'
+    `_write_owner_marker` writes on exit, so an imported state resumes like
+    one the broker saved.
+
+    Args:
+        dest: The state's destination, relative to `save_root`.
+        rom_file: The file this activate boots. For an `.m3u` boot it is the playlist.
+
+    Returns:
+        The marker's destination and its bytes: the rom's resolved path and a newline, in UTF-8.
+    """
+    try:
+        identity = str(rom_file.resolve())
+    except OSError as exc:
+        log.warning("imports: could not resolve %s for its owner marker: %s", rom_file, exc)
+        identity = str(rom_file)
+    return dest.with_name(dest.name + OWNER_MARKER_SUFFIX), (identity + "\n").encode("utf-8")
+
+
 _PS_DASHED = re.compile(r"([A-Z]{4})[-_ ]?(\d{3})\.?(\d{2})", re.I | re.ASCII)
 """A PlayStation serial in any of its spellings: `SLUS-20001`, `SLUS_200.01`, `slus20001`."""
 _PS_NODASH = re.compile(r"([A-Za-z]{4})[-_ ]?(\d{5})", re.ASCII)

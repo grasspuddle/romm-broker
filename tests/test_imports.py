@@ -5,6 +5,7 @@ test_api.py, and the per-emulator hooks in test_emulators.py.
 """
 
 import dataclasses
+import importlib
 import io
 import json
 import re
@@ -720,6 +721,62 @@ def test_build_dest_refuses_an_unsafe_tail_component(tail: str) -> None:
     refused = imports.build_dest("SAVEDATA", ("ULUS10064",), (tail,), member=_member("x/y"), expected="e")
 
     assert isinstance(refused, imports.ImportRefusal) and refused.reason == "unsafe_path"
+
+
+@pytest.mark.parametrize("module_name", ["flycast", "duckstation"])
+def test_owner_marker_sidecar_matches_the_marker_the_emulator_writes(
+    tmp_path: Path, module_name: str
+) -> None:
+    """The sidecar is byte-identical to the marker the emulator writes on exit.
+
+    The rom is reached through a symlink, so the test also pins that both
+    sides record the resolved path, not the path the caller passed.
+
+    Args:
+        tmp_path: Pytest's per-test directory.
+        module_name: The emulator module whose marker writer is compared.
+    """
+    module = importlib.import_module(f"webstation_broker.emulators.{module_name}")
+    rom = tmp_path / "roms" / "Game (USA).cue"
+    rom.parent.mkdir()
+    rom.write_bytes(b"disc")
+    link = tmp_path / "link.cue"
+    link.symlink_to(rom)
+    state = tmp_path / "state.bin"
+
+    module._write_owner_marker(state, link)
+    path, data = imports.owner_marker_sidecar(PurePosixPath("sub/state.bin"), link)
+
+    assert path == PurePosixPath("sub/state.bin.rom")
+    assert data == (tmp_path / "state.bin.rom").read_bytes()
+    assert data == f"{rom.resolve()}\n".encode()
+
+
+class _UnresolvablePath(type(Path())):
+    """A path whose `resolve` fails, as it does on a symlink loop."""
+
+    def resolve(self, strict: bool = False) -> Path:
+        """Fail the way a symlink loop does.
+
+        Args:
+            strict: Unused; matches `Path.resolve`.
+
+        Raises:
+            OSError: Always.
+        """
+        raise OSError("loop")
+
+
+def test_owner_marker_sidecar_falls_back_to_the_raw_path(caplog: pytest.LogCaptureFixture) -> None:
+    """A rom path that cannot be resolved is recorded as given, with a warning.
+
+    Args:
+        caplog: Pytest's log capture.
+    """
+    path, data = imports.owner_marker_sidecar(PurePosixPath("a.state"), _UnresolvablePath("/roms/a.cdi"))
+
+    assert (path, data) == (PurePosixPath("a.state.rom"), b"/roms/a.cdi\n")
+    assert "could not resolve /roms/a.cdi" in caplog.text
 
 
 # ── identity ───────────────────────────────────────────────────────────
