@@ -8,12 +8,14 @@ import calendar
 import io
 import json
 import logging
+import lzma
 import os
 import secrets
 import stat
 import time
 import zipfile
 import zlib
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Literal, Optional
@@ -44,6 +46,17 @@ MANIFEST_MAX_BYTES = 1024 * 1024
 A v1 dump listing ten thousand files can pass this, which is why a v1-only
 archive never has its manifest parsed at all.
 """
+ZIP_READ_ERRORS: tuple[type[Exception], ...] = (
+    OSError,
+    ValueError,
+    RuntimeError,
+    NotImplementedError,
+    EOFError,
+    zlib.error,
+    lzma.LZMAError,
+    zipfile.BadZipFile,
+)
+"""What reading a zip member's data can raise, under every compression method `zipfile` supports."""
 _SAVE_MTIME_SLACK = 2.0
 """Seconds of slack on the newer-file guard.
 
@@ -393,9 +406,7 @@ def _read_manifest(zf: zipfile.ZipFile, info: zipfile.ZipInfo) -> tuple[Optional
         return None, f"manifest exceeds {MANIFEST_MAX_BYTES} bytes"
     try:
         raw = zf.read(info)
-    except (
-        OSError, ValueError, RuntimeError, NotImplementedError, EOFError, zlib.error, zipfile.BadZipFile
-    ) as exc:
+    except ZIP_READ_ERRORS as exc:
         return None, f"manifest unreadable: {exc}"
     try:
         return json.loads(raw), None
@@ -527,6 +538,51 @@ def member_problem(info: zipfile.ZipInfo, *, check_date: bool = True) -> Optiona
         except (ValueError, OverflowError):
             return f"has an invalid timestamp {info.date_time}"
     return None
+
+
+_VERIFY_CHUNK = 1024 * 1024
+"""Most bytes one `verify_members` read returns. It does not cap what bzip2 or lzma decompress to fill it."""
+
+
+def verify_members(content: bytes, names: Iterable[str]) -> tuple[tuple[Optional[str], str], ...]:
+    """Read every named member in full, before the working slot is cleared.
+
+    `plan_v1` and preflight judge a member by its headers. Corrupt data only
+    shows once the member is decompressed and its CRC checked, and the write
+    that would do that runs after the clear. Each member is read in full in
+    `_VERIFY_CHUNK` pieces, `zipfile` cuts its output at the declared size,
+    and every byte returned counts against `SAVE_FILE_MAX_BYTES`. For bzip2
+    and lzma, `zipfile` decompresses a whole compressed read at a time with no
+    output cap, so the budget bounds what is returned, not peak memory.
+
+    Args:
+        content: The zip archive body.
+        names: The members about to be written. A repeated name is read once.
+
+    Returns:
+        `(member, message)` for each member that fails, in `names` order, each
+        message phrased the way restores phrase theirs. A member of None is an
+        archive-level problem, and it ends the check.
+    """
+    problems: list[tuple[Optional[str], str]] = []
+    budget = SAVE_FILE_MAX_BYTES
+    try:
+        zf = zipfile.ZipFile(io.BytesIO(content))
+    except (zipfile.BadZipFile, ValueError, RuntimeError, NotImplementedError, EOFError):
+        return ((None, "body is not a zip archive"),)
+    with zf:
+        for name in dict.fromkeys(names):
+            try:
+                with zf.open(name) as fh:
+                    while chunk := fh.read(_VERIFY_CHUNK):
+                        budget -= len(chunk)
+                        if budget < 0:
+                            problems.append((None, "archive exceeds size limit when extracted"))
+                            return tuple(problems)
+            except (KeyError, *ZIP_READ_ERRORS) as exc:
+                log.warning("saves: archive member %s failed its read check: %s", name, exc)
+                problems.append((name, f"archive member is corrupt: {name}"))
+    return tuple(problems)
 
 
 def _longest_subtree(rel: str, subtrees: tuple[str, ...]) -> Optional[str]:
@@ -744,11 +800,10 @@ def _write_member(
         tmp.write_bytes(read())
         os.replace(tmp, target)
         os.utime(target, (mtime, mtime))
-    except (
-        OSError, ValueError, RuntimeError, NotImplementedError, EOFError, zlib.error, zipfile.BadZipFile
-    ) as exc:
+    except ZIP_READ_ERRORS as exc:
         # `plan_v1` refuses what a header gives away; corrupt data only
         # shows once it is read.
+        # This also catches filesystem errors from the write itself, so never narrow it to read errors.
         log.warning("saves: could not restore %s: %s", label, exc)
         # The staging file is dot-prefixed, so `_iter_save_files` never sees
         # it and no later dump would ever carry it off the disk.

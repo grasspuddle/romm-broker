@@ -127,9 +127,10 @@ outside the save root through a symlink.
 ### `unreadable_member` [#unreadable-member]
 The broker cannot read the member: it is encrypted, it uses a compression
 method other than stored, deflate, bzip2 or lzma, or its data is corrupt
-(it fails its CRC check). The check runs on every member before the working
-slot is cleared, so a corrupt member never costs the player the save they
-already had.
+(it fails its CRC check or will not decompress). A regular member outside
+`.import/` whose timestamp is invalid is refused with this code too. The
+check runs on every member before the working slot is cleared, so a corrupt
+member never costs the player the save they already had.
 
 ### `kind_not_accepted` [#kind-not-accepted]
 This emulator does not take this kind. `expected` lists the kinds it does.

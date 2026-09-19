@@ -102,6 +102,21 @@ def test_fold_v1_problems_maps_each_kind() -> None:
     assert folded[5].expected == imports.READABLE_EXPECTED
 
 
+def test_fold_read_problems_maps_members_and_the_archive() -> None:
+    """A named problem is `unreadable_member`; an archive-level one is `too_large`."""
+    folded = imports.fold_read_problems(
+        [
+            ("saves/a", "archive member is corrupt: saves/a"),
+            (None, "archive exceeds size limit when extracted"),
+        ]
+    )
+
+    assert [(r.reason, r.member, r.expected, r.detail) for r in folded] == [
+        ("unreadable_member", "saves/a", imports.READABLE_EXPECTED, "archive member is corrupt: saves/a"),
+        ("too_large", None, None, "archive exceeds size limit when extracted"),
+    ]
+
+
 def test_import_spec_as_dict_is_the_discovery_shape() -> None:
     """The spec serialises to the discovery route's `kinds`, `state_channel` and `card_subtree`."""
     spec = imports.ImportSpec(

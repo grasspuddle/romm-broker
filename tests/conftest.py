@@ -87,6 +87,28 @@ def mangle_zip_member(
     return bytes(buf)
 
 
+def corrupt_zip_member(body: bytes, name: str) -> bytes:
+    """Flip one byte in the middle of a member's data, leaving every header intact.
+
+    The headers still read, so the damage shows only once the member is
+    decompressed or its CRC is checked.
+
+    Args:
+        body: A zip built by `zipfile`.
+        name: The member to damage. Its compressed data must be at least one byte long.
+
+    Returns:
+        The damaged archive.
+    """
+    with zipfile.ZipFile(io.BytesIO(body)) as zf:
+        info = zf.getinfo(name)
+    buf = bytearray(body)
+    name_len, extra_len = struct.unpack_from("<HH", buf, info.header_offset + 26)
+    start = info.header_offset + 30 + name_len + extra_len
+    buf[start + info.compress_size // 2] ^= 0xFF
+    return bytes(buf)
+
+
 @pytest.fixture(autouse=True)
 def clean_session() -> Iterator[None]:
     """Reset the module-global session state on both sides of every test.

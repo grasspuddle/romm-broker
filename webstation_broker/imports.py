@@ -400,6 +400,24 @@ def fold_v1_problems(
     return out
 
 
+def fold_read_problems(problems: Iterable[tuple[Optional[str], str]]) -> list[ImportRefusal]:
+    """Turn `saves.verify_members` problems into refusals, for an archive that holds imports.
+
+    Args:
+        problems: `(member, message)` pairs. A None member is an archive-level problem.
+
+    Returns:
+        An `unreadable_member` refusal for each named member and a `too_large`
+        refusal for each archive-level problem, each carrying the message as `detail`.
+    """
+    return [
+        ImportRefusal("unreadable_member", name, READABLE_EXPECTED, detail=message)
+        if name is not None
+        else ImportRefusal("too_large", None, None, detail=message)
+        for name, message in problems
+    ]
+
+
 _KINDS: tuple[str, ...] = ("save", "state", "memcard")
 """The kinds a manifest may declare."""
 _ORIGINS: frozenset[str] = frozenset({"emulatorjs", "standalone", "hardware", "unknown"})
