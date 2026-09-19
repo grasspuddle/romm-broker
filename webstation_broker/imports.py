@@ -1181,9 +1181,25 @@ def check_member_identity(
     if policy == "advisory":
         log.info("imports: %s id mismatch, allowed: %s", member.name, detail)
         return None
-    if session.source == "romm":
-        detail += " - fix via PUT /api/roms/{id}/identity if RomM is wrong"
+    detail += override_hint(session)
     return ImportRefusal("identity_mismatch", member.name, expected, detail=detail)
+
+
+def override_hint(session: SessionIdentity) -> str:
+    """Point at the identity override when the session's id is RomM's word.
+
+    An id read off the rom beats RomM's, so the override only helps when
+    RomM supplied the id; for any other source the hint is empty.
+
+    Args:
+        session: The session's identity.
+
+    Returns:
+        The hint, with its leading separator, or an empty string.
+    """
+    if session.source == "romm":
+        return " - fix via PUT /api/roms/{id}/identity if RomM is wrong"
+    return ""
 
 
 def foreign_id(raw: Optional[str], session: Optional[SessionIdentity], family: IdFamily) -> Optional[str]:

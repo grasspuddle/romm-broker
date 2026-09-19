@@ -1586,7 +1586,17 @@ class Dolphin(Emulator):
         Returns:
             False when the header's game code is not the session's.
         """
-        return imports.foreign_id(_game_id_in(head, 0), self.import_identity, "gc_wii_disc") is None
+        foreign = imports.foreign_id(_game_id_in(head, 0), self.import_identity, "gc_wii_disc")
+        if foreign is None or self.import_identity is None:
+            return True
+        log.info(
+            "dolphin: pushed state's header names another game: member %s, session %s (from %s)%s",
+            foreign,
+            self.import_identity.value,
+            self.import_identity.source,
+            imports.override_hint(self.import_identity),
+        )
+        return False
 
     def identity_source(self) -> Optional[imports.IdentitySource]:
         """Read the session's game id off the disc, or take RomM's when the format hides it.

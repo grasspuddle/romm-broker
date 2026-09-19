@@ -1775,7 +1775,14 @@ async def put_state_file(
                 log.debug("state-file push: empty request body for %s", target.name)
                 raise HTTPException(status_code=400, detail="empty request body")
             if not emulator.check_state_bytes(bytes(head)):
-                log.warning("state-file push refused: %s belongs to another game", target.name)
+                identity = emulator.import_identity or imports.SessionIdentity(None, "none")
+                log.warning(
+                    "state-file push refused: %s belongs to another game; session %s (from %s)%s",
+                    target.name,
+                    identity.value,
+                    identity.source,
+                    imports.override_hint(identity),
+                )
                 raise HTTPException(status_code=400, detail="state file belongs to another game")
             # Locked only for the rename: an in-flight resume or manual load
             # backdates and polls this same path to confirm its own read, and

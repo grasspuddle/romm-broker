@@ -506,17 +506,26 @@ def test_an_empty_state_push_leaves_nothing_behind(
 
 
 def test_a_pushed_state_that_opens_as_another_games_is_refused(
-    client: TestClient, broker_dirs: dict[str, Path], fake_emulator: list[FakeEmulator], tmp_path: Path
+    client: TestClient,
+    broker_dirs: dict[str, Path],
+    fake_emulator: list[FakeEmulator],
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     """The route hands the emulator the state's first bytes, and writes nothing when it says no.
+
+    The log line names the session's id and where it came from, so an
+    operator can tell a wrong id from a wrong state.
 
     Args:
         client: The app's test client.
         broker_dirs: The patched broker directories.
         fake_emulator: The registry's fake emulator, as a one-element list.
         tmp_path: The per-test temporary directory.
+        caplog: The pytest log capture fixture.
     """
     _activate(client, broker_dirs)
+    fake_emulator[0].import_identity = imports.SessionIdentity("GZLE", "romm")
     target = tmp_path / "GAME.01.p2s"
     fake_emulator[0].state_file = target
     heads: list[bytes] = []
@@ -536,12 +545,17 @@ def test_a_pushed_state_that_opens_as_another_games_is_refused(
     fake_emulator[0].check_state_bytes = foreign
     content = bytes(range(100))
 
-    response = client.put(
-        f"{API}/session/state-file", params={"filename": "GAME.01.p2s"}, content=content
-    )
+    with caplog.at_level("WARNING"):
+        response = client.put(
+            f"{API}/session/state-file", params={"filename": "GAME.01.p2s"}, content=content
+        )
 
     assert response.status_code == 400
     assert response.json()["detail"] == "state file belongs to another game"
+    assert (
+        "state-file push refused: GAME.01.p2s belongs to another game; session GZLE (from romm)"
+        " - fix via PUT /api/roms/{id}/identity if RomM is wrong"
+    ) in caplog.text
     assert heads == [content[: base.STATE_HEAD_BYTES]]
     assert not target.exists()
     assert list(tmp_path.glob(".*.tmp")) == []

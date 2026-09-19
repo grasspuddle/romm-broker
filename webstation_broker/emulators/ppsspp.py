@@ -1071,8 +1071,17 @@ class Ppsspp(Emulator):
         restamped = _restamp_slot(filename, STATE_SLOT)
         if restamped is None:
             return None
-        if imports.foreign_id(restamped.split("_", 1)[0], self.import_identity, "ps_serial_nodash"):
-            log.warning("ppsspp: refusing pushed state %s, which names another game", filename)
+        foreign = imports.foreign_id(restamped.split("_", 1)[0], self.import_identity, "ps_serial_nodash")
+        if foreign is not None and self.import_identity is not None:
+            log.warning(
+                "ppsspp: refusing pushed state %s, which names another game:"
+                " member %s, session %s (from %s)%s",
+                filename,
+                foreign,
+                self.import_identity.value,
+                self.import_identity.source,
+                imports.override_hint(self.import_identity),
+            )
             return None
         existing = self.state_path()
         if existing is not None:

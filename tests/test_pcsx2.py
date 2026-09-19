@@ -1202,3 +1202,25 @@ def test_a_push_after_an_imported_card_keeps_the_occupied_slot_rule(sstate_dir: 
     assert emu.state_target("SLUS-20312 (12345678).07.p2s") is None
     assert emu.state_target("HOMEBREW (1234ABCD).07.p2s") is None
     assert emu.state_target("SLES-50000 (12345678).07.p2s") is None
+
+
+def test_a_push_refused_for_another_serial_logs_both_ids_and_the_override(
+    sstate_dir: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The log line tells an identity refusal from a bad name: both serials, RomM as the source, and the fix.
+
+    Args:
+        sstate_dir: The patched state directory.
+        caplog: The pytest log capture fixture.
+    """
+    emu = pcsx2.Pcsx2()
+    emu.import_identity = imports.SessionIdentity("SLUS-20312", "romm")
+
+    with caplog.at_level("WARNING"):
+        assert emu.state_target("SLES-50000 (12345678).03.p2s") is None
+
+    assert (
+        "pcsx2: refusing pushed state SLES-50000 (12345678).03.p2s, which names another game:"
+        " member SLES-50000, session SLUS-20312 (from romm)"
+        " - fix via PUT /api/roms/{id}/identity if RomM is wrong"
+    ) in caplog.text

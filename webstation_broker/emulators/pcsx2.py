@@ -1151,8 +1151,17 @@ class Pcsx2(Emulator):
         restamped = _restamp_slot(filename, self.state_slot)
         if restamped is None:
             return None
-        if imports.foreign_id(_state_serial(restamped), self.import_identity, "ps_serial_dashed"):
-            log.warning("pcsx2: refusing pushed state %s, which names another game", filename)
+        foreign = imports.foreign_id(_state_serial(restamped), self.import_identity, "ps_serial_dashed")
+        if foreign is not None and self.import_identity is not None:
+            log.warning(
+                "pcsx2: refusing pushed state %s, which names another game:"
+                " member %s, session %s (from %s)%s",
+                filename,
+                foreign,
+                self.import_identity.value,
+                self.import_identity.source,
+                imports.override_hint(self.import_identity),
+            )
             return None
         existing = self.state_path()
         if existing is not None:

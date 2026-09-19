@@ -8,7 +8,7 @@ a hotkey load off the access time of the state Dolphin reads back.
 import os
 import time
 from pathlib import Path, PurePosixPath
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 import pytest
 
@@ -1194,6 +1194,34 @@ def test_a_pushed_state_is_held_to_the_session_by_its_header(head: bytes, accept
     emu.import_identity = imports.SessionIdentity(imports.NORMALISERS["gc_wii_disc"]("GZLE01"), "romm")
 
     assert emu.check_state_bytes(head) is accepted
+
+
+@pytest.mark.parametrize(
+    ("source", "hint"),
+    [("romm", " - fix via PUT /api/roms/{id}/identity if RomM is wrong"), ("rom", "")],
+)
+def test_a_push_refused_by_its_header_logs_both_ids(
+    source: Literal["rom", "romm"], hint: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The log line names the header's game and the session's, with the override only when RomM gave the id.
+
+    Args:
+        source: Where the session's id came from.
+        hint: The override hint the line should end with.
+        caplog: The pytest log capture fixture.
+    """
+    emu = dolphin.Dolphin()
+    session_id = imports.NORMALISERS["gc_wii_disc"]("GZLE01")
+    member_id = imports.NORMALISERS["gc_wii_disc"]("GALE01")
+    emu.import_identity = imports.SessionIdentity(session_id, source)
+
+    with caplog.at_level("INFO"):
+        assert emu.check_state_bytes(b"GALE01" + bytes(58)) is False
+
+    assert (
+        f"dolphin: pushed state's header names another game: member {member_id},"
+        f" session {session_id} (from {source}){hint}"
+    ) in caplog.text
 
 
 @pytest.mark.parametrize(

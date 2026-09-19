@@ -1091,6 +1091,27 @@ def test_a_pushed_state_for_another_title_is_refused(state_dir: Path) -> None:
     assert emu.state_target("HOMEBREW_1.00_3.ppst") == state_dir / f"HOMEBREW_1.00_{ppsspp.STATE_SLOT}.ppst"
 
 
+def test_a_push_refused_for_another_title_logs_both_ids_and_the_override(
+    state_dir: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The log line tells an identity refusal from a bad name: both ids, RomM as the source, and the fix.
+
+    Args:
+        state_dir: The patched state directory.
+        caplog: The pytest log capture fixture.
+    """
+    emu = ppsspp.Ppsspp()
+    emu.import_identity = imports.SessionIdentity("ULUS10041", "romm")
+
+    with caplog.at_level("WARNING"):
+        assert emu.state_target("ULES00151_1.00_3.ppst") is None
+
+    assert (
+        "ppsspp: refusing pushed state ULES00151_1.00_3.ppst, which names another game: member ULES00151,"
+        " session ULUS10041 (from romm) - fix via PUT /api/roms/{id}/identity if RomM is wrong"
+    ) in caplog.text
+
+
 def test_a_push_after_an_import_must_match_the_imported_state(psp_root: Path) -> None:
     """The imported state holds the slot, so a push lands on it only under the same game id and version.
 
