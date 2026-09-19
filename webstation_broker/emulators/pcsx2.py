@@ -763,7 +763,7 @@ class Pcsx2(Emulator):
     Attributes:
         name: RomM platform key, `pcsx2`.
         display_name: Human-readable name shown in the UI.
-        save_root: The PCSX2 config root the save subtrees hang off.
+        save_root: PCSX2's data root (`DATA_DIR`), which the save subtrees hang off.
         save_subtrees: `memcards` and `sstates`, the directories the save archive carries.
         memory_card_subtree: Subtree the whole-card routes operate on.
         memory_card_marker: File whose presence makes PCSX2 treat a directory as a folder card.
@@ -780,7 +780,7 @@ class Pcsx2(Emulator):
     name = "pcsx2"
     display_name = "PCSX2"
     clears_stale_saves = True
-    save_root = Path("/config/.config/PCSX2")
+    save_root = DATA_DIR
     save_subtrees = ("memcards", "sstates")
     state_subtrees = ("sstates",)
     memory_card_subtree = "memcards"

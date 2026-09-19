@@ -18,7 +18,7 @@ from webstation_broker.emulators import pcsx2
 
 @pytest.fixture
 def sstate_dir(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
-    """Point the PCSX2 state directory at a fresh directory under tmp_path.
+    """Point the PCSX2 state and memcard directories under tmp_path.
 
     Args:
         monkeypatch: The pytest monkeypatch fixture.
@@ -30,8 +30,9 @@ def sstate_dir(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
     d = tmp_path / "sstates"
     d.mkdir()
     monkeypatch.setattr(pcsx2, "SSTATE_DIR", d)
-    # The save subtrees hang off the config root, which the class resolves once
-    # at import, so the clear would reach outside tmp_path without this.
+    monkeypatch.setattr(pcsx2, "MEMCARD_DIR", tmp_path / "memcards")
+    # The save subtrees hang off the data root, which the class reads once at
+    # import, so the clear would reach outside tmp_path without this.
     monkeypatch.setattr(pcsx2.Pcsx2, "save_root", tmp_path)
     return d
 
@@ -573,6 +574,12 @@ def test_the_broker_directories_all_sit_under_the_data_root() -> None:
     assert pcsx2.INI_PATH == pcsx2.DATA_DIR / "inis" / "PCSX2.ini"
     assert pcsx2.SSTATE_DIR == pcsx2.DATA_DIR / "sstates"
     assert pcsx2.MEMCARD_DIR == pcsx2.DATA_DIR / "memcards"
+
+
+def test_the_save_root_is_the_data_root_the_subtrees_hang_off() -> None:
+    """Restore and imports aim at the tree PCSX2 reads, wherever `XDG_CONFIG_HOME` puts it."""
+    assert pcsx2.Pcsx2.save_root == pcsx2.DATA_DIR
+    assert pcsx2.MEMCARD_DIR.parent == pcsx2.SSTATE_DIR.parent == pcsx2.Pcsx2.save_root
 
 
 def test_a_launch_sends_pcsx2_to_the_data_root_the_broker_uses(
