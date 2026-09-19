@@ -147,7 +147,7 @@ copy fails, the launch fails rather than boot the game on a blank card.
 
 A [declared import](/docs/api/imports#what-each-emulator-takes) can bring in
 a raw memory card, which becomes the shared card, or a resume state, which
-the game boots straight into when `resume_slot` is set.
+needs `resume_slot` and which the game boots straight into.
 
 ## Dolphin
 
@@ -341,8 +341,8 @@ hotkeys instead.
 
 A [declared import](/docs/api/imports#what-each-emulator-takes) can bring in
 VMU images, the console's system flash (`dc_nvmem.bin`), or a save state.
-An imported state is renamed after the game being launched, and the game
-boots straight into it when `resume_slot` is set, as it does with the state
+An imported state needs `resume_slot`. It is renamed after the game being
+launched, and the game boots straight into it, as it does with the state
 Flycast writes on exit. A RetroArch `.srm` isn't a VMU image, so Flycast
 refuses one.
 

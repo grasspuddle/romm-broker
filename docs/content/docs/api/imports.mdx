@@ -118,8 +118,12 @@ takes no arguments and reads the platform from `self.platform`; the default
 accepts nothing. The registry tests hold every spec to the same rules. A
 declared `state` kind means `state_channel: "archive"`, at most one state
 counting the archive's own, and `requires_resume_slot`. A `push` channel
-needs mid-session save states. Everything an import places, sidecars
-included, lands inside the save tree.
+needs mid-session save states. The tests also place one example member of
+each kind, on one platform per emulator, and check that it lands inside the
+save tree. For every import, that rule is enforced when the plan is checked
+at activate: each file an import writes, sidecars such as an owner marker
+included, must land in a save subtree and not resolve out of the save root
+through a symlink, or the member is refused.
 
 ## What each emulator takes
 
@@ -132,7 +136,9 @@ included, lands inside the save tree.
 Every other emulator takes nothing yet.
 
 **RetroArch** renames the `.srm` after the game being launched and places it
-in `saves/<core name>/`, where the core loads it (see
+in `saves/<library_name>/`, where the core loads it. `library_name` is the
+name the core reports about itself, such as `mGBA` or `Genesis Plus GX`, not
+the manifest's `core` (see
 [RetroArch cores](/docs/emulators/retroarch-cores#saves-states-and-imports)).
 It takes one `.srm` per archive: a second one, or a save the archive already
 carries at the same path, is a `destination_conflict`. It refuses these:

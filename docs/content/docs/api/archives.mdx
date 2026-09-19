@@ -95,8 +95,8 @@ at its root, naming the session and labelling each file:
 
 `kind` is one of `state`, `state_screenshot`, `memcard` or `save`. `core` is
 only set for a launcher that can run several different emulator cores, like
-RetroArch, so a RetroArch PSP archive can be told apart from a standalone
-PPSSPP one. `state_slot` is `null` when the emulator has no save states at
+RetroArch (`mgba` above), so a RetroArch PSP archive (`core: "ppsspp"`) can
+be told apart from a standalone PPSSPP one. `state_slot` is `null` when the emulator has no save states at
 all. When the session placed [declared imports](/docs/api/imports), an
 `imported` list names the placed files, which ship whether or not the game
 changed them.
