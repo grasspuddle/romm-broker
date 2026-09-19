@@ -16,7 +16,7 @@ import pytest
 
 from webstation_broker import imports, saves
 
-from .conftest import FakeEmulator, mangle_zip_member
+from .conftest import FakeEmulator, corrupt_zip_member, mangle_zip_member
 
 
 def _zip(members: dict[str, bytes], manifest: Optional[Any] = None) -> bytes:
@@ -152,6 +152,27 @@ def test_member_head_reads_at_most_the_cap() -> None:
         )
         assert member.head(10) == b"x" * 10
         assert len(member.head(10**9)) == imports.HEAD_MAX_BYTES
+
+
+def test_member_head_turns_a_failed_read_into_member_read_error(caplog: pytest.LogCaptureFixture) -> None:
+    """A read that fails raises `MemberReadError`, whatever `zipfile` raised underneath.
+
+    Args:
+        caplog: Pytest's log capture.
+    """
+    body = corrupt_zip_member(_zip({".import/save/a": b"x" * 16}), ".import/save/a")
+    with zipfile.ZipFile(io.BytesIO(body)) as zf:
+        info = zf.getinfo(".import/save/a")
+        member = imports.ImportMember(
+            ".import/save/a", "save", "unknown", PurePosixPath("a"), ("a",), info.file_size, info, zf
+        )
+        with (
+            caplog.at_level("WARNING", logger="webstation_broker.imports"),
+            pytest.raises(imports.MemberReadError, match="the member's data is corrupt"),
+        ):
+            member.head(64)
+
+    assert ".import/save/a could not be read" in caplog.text
 
 
 def test_rom_ref_copies_the_body_fields() -> None:
@@ -382,6 +403,43 @@ def test_normalise_member_refuses_non_ascii_without_the_utf8_flag() -> None:
 
     assert isinstance(flagged, imports.ImportMember)
     assert isinstance(unflagged, imports.ImportRefusal) and unflagged.reason == "unsafe_path"
+
+
+@pytest.mark.parametrize(
+    ("char", "detail"),
+    [
+        ("\x80", "control character in name"),
+        ("\x85", "control character in name"),
+        ("\x9f", "control character in name"),
+        ("\u061c", "bidirectional control character in name"),
+        ("\u200e", "bidirectional control character in name"),
+        ("\u200f", "bidirectional control character in name"),
+        ("\u202a", "bidirectional control character in name"),
+        ("\u202e", "bidirectional control character in name"),
+        ("\u2066", "bidirectional control character in name"),
+        ("\u2069", "bidirectional control character in name"),
+    ],
+)
+def test_normalise_member_refuses_c1_and_bidi_characters(char: str, detail: str) -> None:
+    """A C1 control or a bidi control is refused, so a refusal list always shows the name it holds.
+
+    Args:
+        char: The character to embed.
+        detail: The refusal's expected detail.
+    """
+    name = f".import/save/a{char}b.srm"
+
+    refusal = imports.normalise_member(_info(name), _entry(name), zf=None)
+
+    assert isinstance(refusal, imports.ImportRefusal)
+    assert (refusal.reason, refusal.detail) == ("unsafe_path", detail)
+
+
+def test_normalise_member_keeps_printable_latin1() -> None:
+    """The check stops at U+009F: a no-break space or an accented letter is a plain name."""
+    name = ".import/save/a\xa0\xe9.srm"
+
+    assert isinstance(imports.normalise_member(_info(name), _entry(name), zf=None), imports.ImportMember)
 
 
 def test_normalise_member_honours_a_tighter_component_limit() -> None:
@@ -679,6 +737,7 @@ def test_build_dest_refuses_an_unsafe_tail_component(tail: str) -> None:
         ("hex8", "0100ABC", None),
         ("xbox", "MS-100", "4D530064"),
         ("xbox", "4d530064", "4D530064"),
+        ("xbox", "MS-\u0661\u0660\u0660", None),
         ("gc_wii_disc", "GZLE01", "475A4C45"),
         ("gc_wii_disc", "0x475a4c45", "475A4C45"),
         ("hex16", "0100/0000/0000/1000", "0100000000001000"),
@@ -1235,6 +1294,34 @@ def test_a_psp_savedata_dir_suggests_ppsspp_but_never_itself() -> None:
     assert imports.refine_refusal(refusal, member, "psp", current="ppsspp").suggest_emulator is None
 
 
+@pytest.mark.usefixtures("_empty_retroarch_spec")
+def test_a_savedata_dir_with_non_ascii_digits_suggests_nothing() -> None:
+    """Only ASCII digits make a PSP serial, so Arabic-Indic digits never point at PPSSPP."""
+    member = _member("ULUS\u0661\u0660\u0660\u0666\u0664DATA00/DATA.BIN", origin="standalone")
+
+    assert imports.suggest_for(member, "psp", current="retroarch") is None
+
+
+@pytest.mark.parametrize("name", ["a.state3", "a.STATE12", "a.state.auto"])
+def test_libretro_state_re_matches_retroarch_slot_names(name: str) -> None:
+    """The numbered and auto slot names RetroArch writes are recognised, in any case.
+
+    Args:
+        name: A RetroArch state name.
+    """
+    assert imports.LIBRETRO_STATE_RE.fullmatch(name) is not None
+
+
+@pytest.mark.parametrize("name", ["a.state", "a.state\u0663", "a.state\u0661\u0662"])
+def test_libretro_state_re_takes_only_ascii_slot_digits(name: str) -> None:
+    """A bare `.state` is flycast's own name, and a non-ASCII digit is no slot RetroArch writes.
+
+    Args:
+        name: A name that is not a RetroArch slot state.
+    """
+    assert imports.LIBRETRO_STATE_RE.fullmatch(name) is None
+
+
 # ── preflight ──────────────────────────────────────────────────────────
 
 
@@ -1404,6 +1491,79 @@ def test_an_unreadable_import_member_is_refused_by_preflight(tmp_path: Path) -> 
     assert result.placements == ()
     assert [(r.reason, r.member, r.detail) for r in result.refusals] == [
         ("unreadable_member", ".import/save/a.srm", "the member is encrypted")
+    ]
+
+
+def test_a_hook_whose_head_read_fails_gets_unreadable_member(tmp_path: Path) -> None:
+    """A hook that sniffs a corrupt member needs no catch of its own: preflight refuses the member.
+
+    Args:
+        tmp_path: The per-test temporary directory.
+    """
+
+    class Sniffing(_Accepting):
+        """Reads each member's first bytes before placing it."""
+
+        def place_import(
+            self, member: imports.ImportMember, spec: imports.ImportSpec, ctx: imports.ImportCtx
+        ) -> Union[imports.Placement, imports.ImportRefusal]:
+            """Sniff the member, then place it.
+
+            Args:
+                member: The member.
+                spec: The spec.
+                ctx: The launch context.
+
+            Returns:
+                The placement.
+            """
+            member.head(64)
+            return super().place_import(member, spec, ctx)
+
+    emu = Sniffing()
+    emu.save_root = tmp_path
+    body = corrupt_zip_member(_declared({".import/save/a.srm": b"x" * 16}), ".import/save/a.srm")
+
+    result = _preflight(emu, body)
+
+    assert result.placements == ()
+    assert [(r.reason, r.member, r.expected, r.detail) for r in result.refusals] == [
+        ("unreadable_member", ".import/save/a.srm", imports.READABLE_EXPECTED, "the member's data is corrupt")
+    ]
+
+
+def _with_duplicate(body: bytes, name: str, data: bytes) -> bytes:
+    """Append a second entry under a name the archive already holds.
+
+    Args:
+        body: The archive.
+        name: The name to repeat.
+        data: The second entry's bytes.
+
+    Returns:
+        The archive, holding both entries.
+    """
+    buf = io.BytesIO(body)
+    with pytest.warns(UserWarning, match="Duplicate name"), zipfile.ZipFile(buf, "a") as zf:
+        zf.writestr(name, data)
+    return buf.getvalue()
+
+
+def test_a_name_the_archive_holds_twice_is_refused_once(tmp_path: Path) -> None:
+    """`zipfile` reads a repeated name as its last entry, so the first would escape every check.
+
+    Args:
+        tmp_path: The per-test temporary directory.
+    """
+    emu = _Accepting()
+    emu.save_root = tmp_path
+    body = _with_duplicate(_declared({".import/save/a.srm": b"x"}), ".import/save/a.srm", b"y")
+
+    result = _preflight(emu, body)
+
+    assert result.placements == ()
+    assert [(r.reason, r.member, r.detail) for r in result.refusals] == [
+        ("unsafe_path", ".import/save/a.srm", "the archive holds this name 2 times")
     ]
 
 

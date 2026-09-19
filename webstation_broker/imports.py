@@ -18,6 +18,7 @@ import io
 import logging
 import re
 import zipfile
+from collections import Counter
 from collections.abc import Callable, Hashable, Iterable, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path, PurePosixPath
@@ -157,6 +158,14 @@ class RomRef:
         )
 
 
+class MemberReadError(Exception):
+    """A member's data could not be read, raised by `ImportMember.head`.
+
+    Preflight turns it into an `unreadable_member` refusal, so a placement
+    hook that sniffs content never needs a catch of its own.
+    """
+
+
 @dataclass(frozen=True)
 class ImportMember:
     """One `.import/` member that passed hygiene, ready for placement.
@@ -193,11 +202,16 @@ class ImportMember:
 
         Raises:
             RuntimeError: When the member was built without an open archive.
+            MemberReadError: When the member's data cannot be read.
         """
         if self._zf is None:
             raise RuntimeError(f"{self.name} has no open archive to read from")
-        with self._zf.open(self.info) as fh:
-            return fh.read(max(0, min(n, HEAD_MAX_BYTES)))
+        try:
+            with self._zf.open(self.info) as fh:
+                return fh.read(max(0, min(n, HEAD_MAX_BYTES)))
+        except saves.ZIP_READ_ERRORS as exc:
+            log.warning("imports: %s could not be read: %s", self.name, exc)
+            raise MemberReadError("the member's data is corrupt") from exc
 
 
 @dataclass(frozen=True)
@@ -541,8 +555,14 @@ READABLE_EXPECTED = "an unencrypted, intact member, stored or compressed with de
 """The `expected` text on every `unreadable_member` refusal."""
 
 
+_BIDI_CONTROLS = frozenset("\u061c\u200e\u200f\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069")
+"""Characters that reorder how text displays, so a name holding one shows as a different name."""
+
+
 def _name_problem(name: str) -> Optional[str]:
     """Check a whole name for characters no save path may hold.
+
+    Refuses C0 and C1 control characters, DEL and the bidirectional controls.
 
     Args:
         name: A member name or a single component.
@@ -554,8 +574,10 @@ def _name_problem(name: str) -> Optional[str]:
         return "backslash in name"
     if ":" in name:
         return "colon in name"
-    if any(ord(c) < 0x20 or ord(c) == 0x7F for c in name):
+    if any(ord(c) < 0x20 or 0x7F <= ord(c) <= 0x9F for c in name):
         return "control character in name"
+    if any(c in _BIDI_CONTROLS for c in name):
+        return "bidirectional control character in name"
     return None
 
 
@@ -688,7 +710,7 @@ def gate_kind(member: ImportMember, spec: ImportSpec, ctx: ImportCtx) -> Optiona
     return None
 
 
-LIBRETRO_STATE_RE = re.compile(r"^.+\.state(\d+|\.auto)$", re.I)
+LIBRETRO_STATE_RE = re.compile(r"^.+\.state(\d+|\.auto)$", re.I | re.ASCII)
 """A RetroArch numbered or auto state name (`.state3`, `.state.auto`), which no standalone loads.
 
 A bare `.state` is not matched: flycast takes that name as its own.
@@ -838,7 +860,7 @@ _PS_NODASH = re.compile(r"([A-Za-z]{4})[-_ ]?(\d{5})", re.ASCII)
 """A PSP/PS3 serial with or without its separator."""
 _HEX8 = re.compile(r"(?:0x)?([0-9A-Fa-f]{8})")
 """An eight-digit hex title id, optionally `0x`-prefixed."""
-_XBOX_CODE = re.compile(r"([A-Za-z]{2})-(\d{3})")
+_XBOX_CODE = re.compile(r"([A-Za-z]{2})-(\d{3})", re.ASCII)
 """An Xbox publisher-code-and-number id such as `MS-100`."""
 _GAME_ID = re.compile(r"[A-Za-z0-9]{4}(?:[A-Za-z0-9]{2})?")
 """A GameCube/Wii game id: four characters, plus two for the maker."""
@@ -1356,7 +1378,7 @@ def check_plan(
     return refusals
 
 
-_PSP_SAVEDATA_DIR = re.compile(r"[A-Z]{4}\d{5}[A-Za-z0-9_]*")
+_PSP_SAVEDATA_DIR = re.compile(r"[A-Z]{4}\d{5}[A-Za-z0-9_]*", re.ASCII)
 """A PSP `SAVEDATA/` dir name: the serial plus a game-chosen suffix."""
 
 
@@ -1459,6 +1481,7 @@ def preflight(
     """
     spec = emulator.import_spec()
     import_names = [i.filename for i in view.imports]
+    counts = Counter(import_names)
     entries, refusals = parse_manifest_v2(view.manifest, import_names, view.manifest_error)
     refusals = [*v1_refusals, *refusals]
     kept = [i for i in view.v1 if not saves.under_subtrees(PurePosixPath(i.filename), excluded)]
@@ -1467,7 +1490,22 @@ def preflight(
     plan: list[Placement] = []
     with zipfile.ZipFile(io.BytesIO(content)) as zf:
         members: list[ImportMember] = []
+        refused_twice: set[str] = set()
         for info in view.imports:
+            if counts[info.filename] > 1:
+                # `zipfile` reads a repeated name as its last entry, so the
+                # others would escape every check below.
+                if info.filename not in refused_twice:
+                    refused_twice.add(info.filename)
+                    refusals.append(
+                        ImportRefusal(
+                            "unsafe_path",
+                            info.filename,
+                            _SAFE_EXPECTED,
+                            detail=f"the archive holds this name {counts[info.filename]} times",
+                        )
+                    )
+                continue
             entry = entries.get(info.filename)
             if entry is None:
                 continue
@@ -1491,7 +1529,10 @@ def preflight(
         )
         platform = emulator.platform
         for member in members:
-            answer = gate_kind(member, spec, ctx) or emulator.place_import(member, spec, ctx)
+            try:
+                answer = gate_kind(member, spec, ctx) or emulator.place_import(member, spec, ctx)
+            except MemberReadError as exc:
+                answer = ImportRefusal("unreadable_member", member.name, READABLE_EXPECTED, detail=str(exc))
             if isinstance(answer, ImportRefusal):
                 refusals.append(refine_refusal(answer, member, platform, current=emulator.name))
             elif isinstance(answer, Placement):
