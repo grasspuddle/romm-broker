@@ -312,8 +312,10 @@ answer `state_channel: "archive"`, take at most one state counting any the
 archive already holds, and need discovery's `state_slot` sent as
 `save.resume_slot`. An archive that already holds a state of its own refuses
 an imported one as `destination_conflict`, so leave the old state out to send
-a new one. PCSX2 answers `state_channel: "push"`, and so does RetroArch on a
-platform whose core has states.
+a new one. An undo buffer is not a state and does not count: PPSSPP's
+`*.undo.ppst` and `load_undo.ppst`, or Dolphin's `lastState.sav`. PCSX2
+answers `state_channel: "push"`, and so does RetroArch on a platform whose
+core has states.
 
 Flycast and DuckStation name no `card_subtree`: their cards are ordinary
 save files, restored with the rest of the archive. PPSSPP has no memory card

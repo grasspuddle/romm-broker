@@ -1111,7 +1111,15 @@ class Ppsspp(Emulator):
                 ),
             ),
             state_channel="archive",
-            protected=(f"{STATE_DIR.name}/*.tmp",),
+            # PPSSPP's undo buffers share the state dir (on by default outside
+            # mobile): a save moves the slot's old state to `<stem>.undo.ppst`,
+            # and a load writes `load_undo.ppst` first. Neither is a slot state,
+            # so an archived one must not count against an imported state.
+            protected=(
+                f"{STATE_DIR.name}/*.tmp",
+                f"{STATE_DIR.name}/*.undo.ppst",
+                f"{STATE_DIR.name}/load_undo.ppst",
+            ),
             unit_depth=2,
             unit_requires=frozenset({"PARAM.SFO"}),
             unit_subtree=_SAVEDATA,

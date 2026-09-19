@@ -1061,6 +1061,23 @@ def test_an_archived_screenshot_does_not_count_against_an_imported_state(psp_roo
     assert result.refusals == ()
 
 
+@pytest.mark.parametrize(
+    "undo", ["PPSSPP_STATE/ULUS10041_1.00_1.undo.ppst", "PPSSPP_STATE/load_undo.ppst"]
+)
+def test_an_archived_undo_state_does_not_count_against_an_imported_state(psp_root: Path, undo: str) -> None:
+    """PPSSPP's save and load undo buffers sit beside the slot's state but are not one, so the import fits.
+
+    Args:
+        psp_root: The patched memory stick root.
+        undo: The archived undo buffer's path.
+    """
+    body = import_zip({".import/state/ULUS10041_1.00_1.ppst": b"progress"}, v1={undo: b"undo"})
+
+    result = preflight_import(ppsspp.Ppsspp(), body, rom_file=None, resume_slot=1)
+
+    assert result.refusals == ()
+
+
 def test_an_archived_state_leaves_no_room_for_an_imported_one(psp_root: Path) -> None:
     """The broker resumes one state; an archive that already carries one takes no second.
 
