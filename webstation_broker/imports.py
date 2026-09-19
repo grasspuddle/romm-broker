@@ -885,13 +885,13 @@ _PS_DASHED = re.compile(r"([A-Z]{4})[-_ ]?(\d{3})\.?(\d{2})", re.I | re.ASCII)
 """A PlayStation serial in any of its spellings: `SLUS-20001`, `SLUS_200.01`, `slus20001`."""
 _PS_NODASH = re.compile(r"([A-Za-z]{4})[-_ ]?(\d{5})", re.ASCII)
 """A PSP/PS3 serial with or without its separator."""
-_HEX8 = re.compile(r"(?:0x)?([0-9A-Fa-f]{8})")
+_HEX8 = re.compile(r"(?:0x)?([0-9A-Fa-f]{8})", re.ASCII)
 """An eight-digit hex title id, optionally `0x`-prefixed."""
 _XBOX_CODE = re.compile(r"([A-Za-z]{2})-(\d{3})", re.ASCII)
 """An Xbox publisher-code-and-number id such as `MS-100`."""
-_GAME_ID = re.compile(r"[A-Za-z0-9]{4}(?:[A-Za-z0-9]{2})?")
+_GAME_ID = re.compile(r"[A-Za-z0-9]{4}(?:[A-Za-z0-9]{2})?", re.ASCII)
 """A GameCube/Wii game id: four characters, plus two for the maker."""
-_HEX16 = re.compile(r"(?:0x)?([0-9A-Fa-f]{16})")
+_HEX16 = re.compile(r"(?:0x)?([0-9A-Fa-f]{16})", re.ASCII)
 """A sixteen-digit hex title id, as the Switch writes it."""
 
 

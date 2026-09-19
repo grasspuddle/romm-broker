@@ -51,12 +51,15 @@ checking imports answers 500 with
 `{"detail": {"error": "import_preflight_failed"}}`, still before anything is
 cleared.
 
-**No emulator accepts imports yet.** The framework is in place, but no
-emulator accepts any kind, so an import member that passes the structural
-checks is refused with `kind_not_accepted`. The structural checks still run
-first: a bad manifest answers `manifest_invalid` and a bad path answers
-`unsafe_path`. When the session syncs the memory card on its own routes, the
-archive is not restored at all and every import member answers
+**Three emulators accept imports so far.** RetroArch, Flycast and
+DuckStation take the kinds listed under
+[What each emulator takes](#what-each-emulator-takes), and every other
+emulator refuses each import member with `kind_not_accepted`. The structural
+checks run first either way: a bad manifest answers `manifest_invalid` and a
+bad path answers `unsafe_path`. When the session syncs the memory card on its
+own routes, a member that would land on that card answers
+`memcard_synced_separately`. If the card is the emulator's whole save tree,
+the archive is not restored at all and every import member answers
 `memcard_synced_separately`. Emulators opt in one at a time.
 
 The refusals are sorted by member, then by reason; an archive-level refusal
@@ -104,11 +107,80 @@ A 404 from this route means the broker predates imports. Never send
 `.import/` members to that broker: it cannot place them, and they would
 never reach the emulator.
 
-Today every emulator answers `kinds: []` and `state_channel: "none"`.
+Each emulator answers with the kinds it takes on the platform it was asked
+about; [What each emulator takes](#what-each-emulator-takes) lists them. A
+kind with an empty `shapes` list is refused on that platform, and the
+refusal says why. An emulator that takes nothing answers `kinds: []` and
+`state_channel: "none"`.
 
 For an emulator author, the answer comes from `Emulator.import_spec()`. It
 takes no arguments and reads the platform from `self.platform`; the default
-accepts nothing.
+accepts nothing. The registry tests hold every spec to the same rules. A
+declared `state` kind means `state_channel: "archive"`, at most one state
+counting the archive's own, and `requires_resume_slot`. A `push` channel
+needs mid-session save states. Everything an import places, sidecars
+included, lands inside the save tree.
+
+## What each emulator takes
+
+| `emulator` | `save` | `memcard` | `state` |
+| --- | --- | --- | --- |
+| `retroarch` | one `.srm` | not taken; `expected` names `save` | `PUT /api/session/state-file` after activate |
+| `flycast` | raw 131072-byte `vmu_save_<A-D><1-2>.bin` images, and `dc_nvmem.bin` | a raw 131072-byte VMU image | one `.state`; needs `save.resume_slot` |
+| `duckstation` | a raw 131072-byte `.mcd`, `.mcr`, `.mc` or `.srm` card | the same as `save` | one `<serial>_resume.sav` or `<serial>_<n>.sav`; needs `save.resume_slot` |
+
+Every other emulator takes nothing yet.
+
+**RetroArch** renames the `.srm` after the game being launched and places it
+in `saves/<core name>/`, where the core loads it (see
+[RetroArch cores](/docs/emulators/retroarch-cores#saves-states-and-imports)).
+It takes one `.srm` per archive: a second one, or a save the archive already
+carries at the same path, is a `destination_conflict`. It refuses these:
+
+- On `psp`: `destination_unresolvable`, with `suggest_emulator: "ppsspp"`.
+  The PPSSPP core keeps SAVEDATA folders, not a `.srm`.
+- On `ngc`, `wii` and `3ds`: `shape_unverified`. These cores keep saves in
+  their own folders, which imports don't place yet.
+- On a platform RetroArch has no core for: `destination_unresolvable`.
+- A `.sav`, `.rtc`, `.nv`, `.eep` or `.mpk` file: `needs_conversion`, until
+  each core's name for that file has been checked.
+- A `memcard` member: `kind_not_accepted`, with `expected` naming `save`.
+  Send the core's `.srm` as a save instead.
+- A `state` member: `state_uses_push`. On `jaguar`, whose core has no states,
+  and on a platform RetroArch has no core for, it is `kind_not_accepted`.
+
+**Flycast** places every file loose in its data folder, `flycast/`, under the
+name Flycast reads:
+
+- A VMU save keeps its name, with the port letter upper-cased.
+  `dc_nvmem.bin`, the console's system flash, must not be empty.
+- A `memcard` member goes in the VMU socket its name picks, such as
+  `vmu_save_C2.bin`, or else in A1.
+- A RetroArch `.srm` is `source_incompatible`, because it isn't a VMU image.
+  A `.vms`, `.vmi`, `.dci` or `.dcm` export is `needs_conversion`.
+- The state is renamed after the game being launched, `<rom>.state`, and
+  gets the owner marker that lets the broker resume it.
+
+**DuckStation** keeps memory card 1 as one shared card (see
+[DuckStation](/docs/emulators#duckstation)):
+
+- A card of either kind becomes `memcards/shared_card_1.mcd`, so an archive
+  takes one card. A headered card (`.gme`, `.psm`, `.ps`, `.ddf`, `.mem`,
+  `.vgs` or `.psx`) is `needs_conversion`.
+- A card in an archive that already carries another card under `memcards/`
+  is a `destination_conflict`. Once the shared card exists, the other card
+  is never mounted again.
+- The state is renamed `<serial>_resume.sav` and gets the owner marker that
+  lets the broker resume it. The serial is RomM's `title_id` when it sends
+  one, else the serial in the member's name, else the name's own base. A
+  member named for a different serial than RomM's is `identity_mismatch`.
+
+Flycast and DuckStation have no mid-session save states, but each boots
+straight into a state the archive carries, the same way it resumes the one
+it writes on exit. So each answers `state_channel: "archive"`, takes at most
+one state counting any the archive already holds, and needs discovery's
+`state_slot` sent as `save.resume_slot`. Neither names a `card_subtree`:
+their cards are ordinary save files, restored with the rest of the archive.
 
 ## Refusal reasons
 
@@ -130,8 +202,9 @@ The broker cannot read the member: it is encrypted, it uses a compression
 method other than stored, deflate, bzip2 or lzma, or its data is corrupt
 (it fails its CRC check or will not decompress). A regular member outside
 `.import/` whose timestamp is invalid is refused with this code too. The
-check runs on every member before the working slot is cleared, so a corrupt
-member never costs the player the save they already had.
+check runs on every member the restore will write, before the working slot
+is cleared, so a corrupt member never costs the player the save they already
+had.
 
 ### `kind_not_accepted` [#kind-not-accepted]
 This emulator does not take this kind. `expected` lists the kinds it does.
