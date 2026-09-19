@@ -1003,6 +1003,101 @@ def test_clear_working_slot_drops_a_marker_along_with_its_state(
     assert not marker.exists()
 
 
+# ── state_path: the exit state RomM files in its library ────────────────
+
+
+def _exit_gracefully_after_writing(
+    monkeypatch: pytest.MonkeyPatch, state: Path
+) -> duckstation.Duckstation:
+    """Build an emulator whose stop() writes `state` and then reports a clean exit."""
+
+    class FakeProc:
+        returncode = 0
+
+    monkeypatch.setattr(duckstation.Duckstation, "stop", lambda self: _touch(state))
+    emu = duckstation.Duckstation()
+    emu._proc = FakeProc()
+    monkeypatch.setattr(emu, "alive", lambda: True)
+    return emu
+
+
+def test_state_path_serves_the_resume_state_a_saving_exit_confirmed(
+    duckstation_dirs: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Without it the state-file GET 404s and RomM never files the exit state."""
+    written = duckstation.SSTATE_DIR / "SLUS-00001_resume.sav"
+    emu = _exit_gracefully_after_writing(monkeypatch, written)
+
+    assert emu.save_and_exit(10)["state_saved"] is True
+    assert emu.state_path() == written
+
+
+def test_state_path_is_empty_before_any_exit(duckstation_dirs: dict[str, Path]) -> None:
+    """A state on disk before the exit came in with the archive and may be another disc's."""
+    _touch(duckstation.SSTATE_DIR / "SLUS-00001_resume.sav")
+
+    assert duckstation.Duckstation().state_path() is None
+
+
+def test_state_path_is_empty_after_an_exit_that_asked_for_no_state(
+    duckstation_dirs: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The exit report leaves that state unreported, so the GET must not hand it over either."""
+    written = duckstation.SSTATE_DIR / "SLUS-00001_resume.sav"
+    emu = _exit_gracefully_after_writing(monkeypatch, written)
+
+    emu.save_and_exit(None)
+
+    assert written.exists()
+    assert emu.state_path() is None
+
+
+def test_state_path_is_empty_after_a_force_killed_exit(
+    duckstation_dirs: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A state the kill may have torn must not reach RomM's library as a good one."""
+    emu = _kill_after_writing(monkeypatch, duckstation.SSTATE_DIR / "SLUS-00001_resume.sav")
+
+    emu.save_and_exit(10)
+
+    assert emu.state_path() is None
+
+
+def test_state_path_is_empty_once_the_confirmed_state_is_gone(
+    duckstation_dirs: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A missing file is an empty slot, so the GET answers 404 rather than 500."""
+    written = duckstation.SSTATE_DIR / "SLUS-00001_resume.sav"
+    emu = _exit_gracefully_after_writing(monkeypatch, written)
+    emu.save_and_exit(10)
+
+    written.unlink()
+
+    assert emu.state_path() is None
+
+
+def test_a_launch_forgets_the_last_exits_state(
+    duckstation_dirs: dict[str, Path], rom_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The next session has confirmed nothing yet, so a mid-session GET must not serve the old exit state."""
+    written = duckstation.SSTATE_DIR / "SLUS-00001_resume.sav"
+    emu = _exit_gracefully_after_writing(monkeypatch, written)
+    emu.save_and_exit(10)
+    monkeypatch.setattr(duckstation, "_patch_ini", lambda: None)
+    monkeypatch.setattr(
+        duckstation.Duckstation,
+        "_spawn",
+        lambda self, cmd, env, stdin_pipe=False: None,
+    )
+    rom = rom_root / "game.chd"
+    rom.write_bytes(b"")
+
+    emu.launch(rom, resume_slot=None)
+
+    assert written.exists()
+    assert emu.state_path() is None
+
+
 # ── class attributes (API surface parity with the other exit-only emulators) ──
 
 

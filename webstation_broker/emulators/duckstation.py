@@ -454,7 +454,8 @@ class Duckstation(Emulator):
     data (`memcards`) and states (`savestates`) both ride the save archive.
     DuckStation writes the resume state whether or not one was asked for, so
     an exit without a slot simply leaves it unreported, and the emulator
-    resumes from it locally as usual.
+    resumes from it locally as usual. The state a saving exit does report is
+    also what `state_path` serves, so RomM can file it in its state library.
 
     Attributes:
         name: RomM platform key, `duckstation`.
@@ -486,6 +487,7 @@ class Duckstation(Emulator):
         """Initialize the emulator with no disc booted yet."""
         super().__init__()
         self._rom_path: Optional[Path] = None
+        self._exit_state: Optional[Path] = None
 
     def save_file_kind(self, rel: str) -> str:
         """Classify an archive member for the manifest.
@@ -608,6 +610,7 @@ class Duckstation(Emulator):
                 applied, which would cost the session its exit save state.
         """
         self.stop()
+        self._exit_state = None
         _patch_ini()
 
         cmd = [os.environ.get("DUCKSTATION_BIN", "/opt/duckstation/AppRun"), "-batch", "-fullscreen"]
@@ -702,4 +705,21 @@ class Duckstation(Emulator):
                     else:
                         saved = True
                         state_file = {"path": str(p), "size": st.st_size, "mtime": st.st_mtime}
+                        self._exit_state = p
         return {"state_saved": saved, "state_slot": slot, "state_file": state_file}
+
+    def state_path(self) -> Optional[Path]:
+        """Return the resume state the last saving exit confirmed, or None.
+
+        Only a confirmed exit state is served, never whatever sits in the
+        savestates directory: a state already there came in with the archive
+        and can belong to another disc, and one a force-killed exit set aside
+        may be torn. A launch clears it, since the new session has confirmed
+        nothing yet.
+
+        Returns:
+            The state file's path, or None when no saving exit has confirmed one
+            since the last launch or the file has since gone.
+        """
+        p = self._exit_state
+        return p if p is not None and p.is_file() else None

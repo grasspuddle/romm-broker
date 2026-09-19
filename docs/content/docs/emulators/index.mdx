@@ -37,7 +37,11 @@ code meaning the request is rejected). DuckStation, Flycast and RPCS3 are
 worth calling out here: `supports_states` is off for all three, but each one
 writes a state when it exits cleanly and can boot straight into that state on
 the next launch, so `resume_slot` still matters for them even though live
-saving and loading doesn't work. For every other "no" in the table,
+saving and loading doesn't work. DuckStation and RPCS3 also hand that exit
+state out through the
+[state-file GET](/docs/api/state#move-a-state-file-in-or-out) once the exit
+has confirmed it, so RomM can keep it in its state library; Flycast doesn't
+yet. For every other "no" in the table,
 `resume_slot` really is ignored and the game's own save data is all that's
 kept. Each emulator's exact save paths are listed as the `save_subtrees`
 attribute of its class in the
@@ -121,7 +125,8 @@ DuckStation has no mid-session save states: it doesn't give the broker
 anything to hook into while a game is running, so the save-state routes
 return `400`. What it does have is a graceful shutdown: when it closes
 cleanly, it writes a resume state, and the broker reports that file as the
-exit save state. Getting that clean shutdown takes longer than for other
+exit save state and serves it through the state-file GET until the next
+activate. Getting that clean shutdown takes longer than for other
 emulators, which is why
 [`DUCKSTATION_STOP_WAIT`](/docs/configuration/emulators#duckstation), the
 time the broker waits after asking DuckStation to quit (a SIGTERM signal,
@@ -237,7 +242,9 @@ keeping it open. A resume works by pointing the next launch straight at the
 newest saved state instead of the game itself: RPCS3 tells a save state
 apart from a normal boot target by its file contents, not its extension, so
 booting into one works the same way booting a ROM does. States are kept one
-per title, so `resume_slot` always finds the right one. The game's own save
+per title, so `resume_slot` always finds the right one. The state an exit
+confirms is served through the state-file GET until the next activate, the
+same way DuckStation's is. The game's own save
 data, under `dev_hdd0/home/`, persists separately from all of this.
 
 `rom.path` can be a PKG file, which the launcher installs first
