@@ -943,6 +943,24 @@ def test_the_undo_buffer_is_refused_as_emulator_configuration(state_dir: Path, m
     ]
 
 
+@pytest.mark.parametrize(
+    "member",
+    [".import/state/Game.state1", ".import/state/Game.state.auto", ".import/state/StateSaves/Game.state3"],
+)
+def test_a_libretro_state_is_refused_as_another_emulators(state_dir: Path, member: str) -> None:
+    """A RetroArch numbered or auto state is another emulator's format, which Dolphin cannot load.
+
+    Args:
+        state_dir: The patched state directory.
+        member: The member's zip name.
+    """
+    result = _preflight({member: b"GZLE01progress"}, rom=_ROMM_ID)
+
+    assert [(r.reason, r.detail) for r in result.refusals] == [
+        ("source_incompatible", "a RetroArch (libretro) state")
+    ]
+
+
 def test_an_empty_state_is_incomplete(state_dir: Path) -> None:
     """A zero-byte state would boot the game from scratch without a word.
 
@@ -1106,6 +1124,11 @@ def test_wii_system_and_install_data_is_refused_as_emulator_configuration(state_
             "a GameCube save; a Wii session takes NAND title saves",
         ),
         ("mysaves/banner.bin", "unrecognised_layout", None),
+        ("shared1/00000000.app", "unrecognised_layout", None),
+        ("shared2/sys/SYSCONF", "unrecognised_layout", None),
+        ("meta/00010000/524d4345/title.met", "unrecognised_layout", None),
+        ("Wii/shared2/sys/SYSCONF", "unrecognised_layout", None),
+        ("title/00010000/524d4345/banner.bin", "unrecognised_layout", None),
     ],
 )
 def test_a_wii_member_that_is_not_a_title_save_is_refused(
