@@ -29,7 +29,7 @@ import time
 from collections.abc import Iterable
 from pathlib import Path
 from threading import Thread
-from typing import Any, Optional
+from typing import Any, Optional, Union
 
 from .. import imports
 from .base import Emulator, base_launch_env, xdg_config_dir
@@ -143,6 +143,18 @@ _STATE_NAME_RE = re.compile(r"(?P<prefix>[^/]+)_(?P<slot>\d+)\.ppst", re.ASCII)
 
 PPSSPP writes a `.jpg` of its own beside it, under the same stem.
 """
+
+_STATE_JPG_RE = re.compile(r"(?P<prefix>[^/]+)_(?P<slot>\d+)\.jpg", re.ASCII)
+"""Matches `<game id>_<version>_<slot>.jpg`, the screenshot PPSSPP writes beside a state."""
+
+_SAVEDATA = "SAVEDATA"
+"""The memory stick folder PSP games keep their save folders in."""
+
+_SAVE_EXPECTED = "a PSP save folder, SAVEDATA/<product code><suffix>/, holding PARAM.SFO"
+"""What a `save` member must look like, for refusals."""
+
+_STATE_EXPECTED = "one PPSSPP state, <game id>_<version>_<n>.ppst, and optionally its .jpg"
+"""What a `state` member must look like, for refusals."""
 
 _XDOTOOL = os.environ.get("XDOTOOL_BIN", "xdotool")
 _WINDOW_CLASS = "PPSSPPQt"
@@ -552,6 +564,132 @@ def _restamp_slot(filename: str, slot: int) -> Optional[str]:
     return f"{match.group('prefix')}_{slot}.ppst"
 
 
+def _place_save(
+    member: imports.ImportMember, session: imports.SessionIdentity
+) -> Union[imports.Placement, imports.ImportRefusal]:
+    """Place a file of a PSP save folder under `SAVEDATA`.
+
+    The folder is found below at most one wrapper: `PSP/SAVEDATA`,
+    `SAVEDATA` or nothing, after dropping one folder the player copied the
+    whole memory stick into. Its product code is only logged when it is not
+    the session's: a sequel reads its predecessor's saves.
+
+    Args:
+        member: The member.
+        session: The session's identity.
+
+    Returns:
+        The placement, or a refusal.
+    """
+    parts = member.parts
+    if len(parts) > 2 and parts[1] == "PSP":
+        parts = parts[1:]
+    if len(parts) == 1:
+        if parts[0].lower().endswith(".srm"):
+            return imports.ImportRefusal(
+                "source_incompatible", member.name, _SAVE_EXPECTED, detail="a RetroArch save file"
+            )
+        return imports.ImportRefusal(
+            "unrecognised_layout", member.name, _SAVE_EXPECTED, detail="a single file; a PSP save is a folder"
+        )
+    head = parts[1:] if parts[0] == "PSP" else parts
+    if head[0] == "SYSTEM":
+        return imports.ImportRefusal(
+            "protected_destination",
+            member.name,
+            _SAVE_EXPECTED,
+            detail="PSP/SYSTEM is emulator configuration",
+        )
+    if head[0] == STATE_DIR.name:
+        return imports.ImportRefusal(
+            "unrecognised_layout",
+            member.name,
+            _SAVE_EXPECTED,
+            detail="a PPSSPP state: declare it as kind state",
+        )
+    if parts[0] == "PSP" and head[0] != _SAVEDATA:
+        return imports.ImportRefusal(
+            "unrecognised_layout", member.name, _SAVE_EXPECTED, detail=f"PSP/{head[0]} holds no saves"
+        )
+    found = imports.match_anchored(
+        parts, wrappers=(("PSP", _SAVEDATA), (_SAVEDATA,), ()), levels=(imports.PSP_SAVEDATA_DIR,)
+    )
+    if found is None:
+        return imports.ImportRefusal("unrecognised_layout", member.name, _SAVE_EXPECTED)
+    imports.check_member_identity(
+        member,
+        imports.NORMALISERS["ps_serial_nodash"](found.ids[0][:9]),
+        session,
+        family="ps_serial_nodash",
+        policy="advisory",
+        expected=_SAVE_EXPECTED,
+    )
+    dest = imports.build_dest(_SAVEDATA, found.ids, found.tail, member=member, expected=_SAVE_EXPECTED)
+    if isinstance(dest, imports.ImportRefusal):
+        return dest
+    return imports.Placement(member, dest)
+
+
+def _place_state(
+    member: imports.ImportMember, session: imports.SessionIdentity
+) -> Union[imports.Placement, imports.ImportRefusal]:
+    """Place a state, or its screenshot, in the broker's working slot.
+
+    PPSSPP finds a state by the game id and version in its name, so those
+    are kept and only the slot is rewritten, as `_restamp_slot` does for a
+    stored state.
+
+    Args:
+        member: The member.
+        session: The session's identity.
+
+    Returns:
+        The placement, or a refusal.
+    """
+    screenshot = member.parts[-1].endswith(".jpg")
+    pattern = _STATE_JPG_RE if screenshot else _STATE_NAME_RE
+    suffix = ".jpg" if screenshot else ".ppst"
+
+    def rename(name: str) -> Optional[str]:
+        """Stamp the broker's slot into the name, keeping the game id and version.
+
+        Args:
+            name: The member's file name.
+
+        Returns:
+            The new name, or None when `name` is not a state's or a screenshot's.
+        """
+        found = pattern.fullmatch(name)
+        if found is None:
+            return None
+        return f"{found['prefix']}_{STATE_SLOT}{suffix}"
+
+    dest = imports.place_single_file(
+        member,
+        subtree=STATE_DIR.name,
+        pattern=pattern,
+        rename=rename,
+        expected=_STATE_EXPECTED,
+        allow_wrappers=(f"PSP/{STATE_DIR.name}", STATE_DIR.name),
+        nonempty=True,
+    )
+    if isinstance(dest, imports.ImportRefusal):
+        return dest
+    # Homebrew ids are not product codes; keyed=False takes those on trust.
+    refusal = imports.check_member_identity(
+        member,
+        imports.NORMALISERS["ps_serial_nodash"](dest.name.split("_", 1)[0]),
+        session,
+        family="ps_serial_nodash",
+        policy="strict",
+        expected=_STATE_EXPECTED,
+        keyed=False,
+    )
+    if refusal is not None:
+        return refusal
+    return imports.Placement(member, dest)
+
+
 class Ppsspp(Emulator):
     """Sony PSP sessions on PPSSPPQt.
 
@@ -574,6 +712,9 @@ class Ppsspp(Emulator):
     are restamped into the broker's slot and the working slot is cleared
     before a boot. PPSSPP writes a `.jpg` of its own beside every state, and
     clearing a state drops that too.
+
+    Declared imports take PSP save folders and one state with its
+    screenshot; see `import_spec`.
 
     Attributes:
         name: RomM platform key, `ppsspp`.
@@ -922,17 +1063,102 @@ class Ppsspp(Emulator):
 
         Returns:
             The path to write to, or None when the name is not a plain, printable basename, is not
-            a state name, or does not match the state already in the slot.
+            a state name, names another game than the session's, or does not match the state
+            already in the slot.
         """
         if not imports.check_state_basename(filename):
             return None
         restamped = _restamp_slot(filename, STATE_SLOT)
         if restamped is None:
             return None
+        if imports.foreign_id(restamped.split("_", 1)[0], self.import_identity, "ps_serial_nodash"):
+            log.warning("ppsspp: refusing pushed state %s, which names another game", filename)
+            return None
         existing = self.state_path()
         if existing is not None:
             return existing if restamped == existing.name else None
         return STATE_DIR / restamped
+
+    def import_spec(self) -> imports.ImportSpec:
+        """Declare what PPSSPP takes: PSP save folders, and one state with its screenshot.
+
+        Every folder under `SAVEDATA` is a unit that must hold `PARAM.SFO`,
+        the file PPSSPP lists a save by. The state rides the archive and
+        resumes through `save.resume_slot`.
+
+        Returns:
+            The spec.
+        """
+        return imports.ImportSpec(
+            kinds=(
+                imports.KindSpec("save", (f"{_SAVEDATA}/<GAMEID><suffix>/ with PARAM.SFO",)),
+                imports.KindSpec(
+                    "state",
+                    ("<game id>_<version>_<n>.ppst, plus its same-stem .jpg",),
+                    requires_resume_slot=True,
+                    max_members=1,
+                    counts_v1=True,
+                    companions=("*.jpg",),
+                ),
+            ),
+            state_channel="archive",
+            protected=(f"{STATE_DIR.name}/*.tmp",),
+            unit_depth=2,
+            unit_requires=frozenset({"PARAM.SFO"}),
+            unit_subtree=_SAVEDATA,
+        )
+
+    def place_import(
+        self, member: imports.ImportMember, spec: imports.ImportSpec, ctx: imports.ImportCtx
+    ) -> Union[imports.Placement, imports.ImportRefusal]:
+        """Place one declared member: a save folder's file under `SAVEDATA`, a state in the slot.
+
+        Args:
+            member: The member, already past the kind gate.
+            spec: This emulator's spec.
+            ctx: The launch context.
+
+        Returns:
+            The placement, or a refusal.
+        """
+        session = imports.identity_for(self, ctx)
+        if member.kind == "state":
+            return _place_state(member, session)
+        return _place_save(member, session)
+
+    def validate_import_plan(
+        self, plan: list[imports.Placement], ctx: imports.ImportCtx
+    ) -> list[imports.ImportRefusal]:
+        """Refuse a screenshot whose state is not in the plan.
+
+        Args:
+            plan: The placements that passed every per-member check.
+            ctx: The launch context.
+
+        Returns:
+            One `incomplete_unit` per orphaned screenshot.
+        """
+        states = {p.dest for p in plan if p.dest.suffix == ".ppst"}
+        return [
+            imports.ImportRefusal(
+                "incomplete_unit",
+                p.member.name,
+                _STATE_EXPECTED,
+                detail=f"no {p.dest.with_suffix('.ppst').name} for this screenshot",
+            )
+            for p in plan
+            if p.member.kind == "state"
+            and p.dest.suffix == ".jpg"
+            and p.dest.with_suffix(".ppst") not in states
+        ]
+
+    def identity_source(self) -> Optional[imports.IdentitySource]:
+        """Take the session's product code from RomM; a PSP image is not read for one.
+
+        Returns:
+            The source.
+        """
+        return imports.IdentitySource("ps_serial_nodash")
 
     def save_and_exit(self, slot: Optional[int]) -> dict[str, Any]:
         """Save a state if asked, then stop the emulator.

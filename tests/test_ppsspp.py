@@ -7,12 +7,15 @@ naming contract, and finding the game window among PPSSPP's windows.
 import os
 import time
 from collections.abc import Iterator
-from pathlib import Path
-from typing import Optional
+from pathlib import Path, PurePosixPath
+from typing import Any, Optional
 
 import pytest
 
+from webstation_broker import imports
 from webstation_broker.emulators import ppsspp
+
+from .conftest import import_zip, preflight_import
 
 
 @pytest.fixture
@@ -816,3 +819,260 @@ def test_a_resume_load_is_dropped_when_the_launch_is_superseded_while_booting(
         emu._deferred_load_state(1)
 
     assert "launch superseded" in caplog.text
+
+
+# -- declared imports --
+
+_ROMM_ID = imports.RomRef(1, "Game", "psp", title_id="ULUS-10041")
+"""An activate's rom, carrying the product code RomM holds for it."""
+
+
+@pytest.fixture
+def psp_root(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
+    """Point the memory stick root, and so both save subtrees, under tmp_path.
+
+    Args:
+        monkeypatch: The pytest monkeypatch fixture.
+        tmp_path: The per-test temporary directory.
+
+    Returns:
+        The memory stick root.
+    """
+    monkeypatch.setattr(ppsspp, "STATE_DIR", tmp_path / "PPSSPP_STATE")
+    monkeypatch.setattr(ppsspp.Ppsspp, "save_root", tmp_path)
+    return tmp_path
+
+
+def _preflight(members: dict[str, bytes], **kwargs: Any) -> imports.PreflightResult:
+    """Preflight an archive of import members on a fresh PPSSPP, resuming slot 1.
+
+    Args:
+        members: `.import/<kind>/...` names mapped to bytes.
+        **kwargs: Extra `preflight_import` arguments, such as `rom`.
+
+    Returns:
+        What preflight decided.
+    """
+    kwargs.setdefault("resume_slot", 1)
+    return preflight_import(ppsspp.Ppsspp(), import_zip(members), rom_file=None, **kwargs)
+
+
+@pytest.mark.parametrize(
+    "member",
+    [
+        ".import/save/ULUS10041DATA00/PARAM.SFO",
+        ".import/save/SAVEDATA/ULUS10041DATA00/PARAM.SFO",
+        ".import/save/PSP/SAVEDATA/ULUS10041DATA00/PARAM.SFO",
+        ".import/save/memstick/PSP/SAVEDATA/ULUS10041DATA00/PARAM.SFO",
+    ],
+)
+def test_a_save_folder_lands_under_savedata_however_deep_it_was_packed(psp_root: Path, member: str) -> None:
+    """A save folder is found under any of the wrappers a memory stick copy leaves.
+
+    Args:
+        psp_root: The patched memory stick root.
+        member: The member's zip name.
+    """
+    result = _preflight({member: b"sfo"})
+
+    assert result.refusals == ()
+    assert [p.dest for p in result.placements] == [PurePosixPath("SAVEDATA/ULUS10041DATA00/PARAM.SFO")]
+
+
+def test_a_save_folder_without_param_sfo_is_incomplete(psp_root: Path) -> None:
+    """PPSSPP lists a save by its `PARAM.SFO`; without one the folder is not a save.
+
+    Args:
+        psp_root: The patched memory stick root.
+    """
+    result = _preflight({".import/save/ULUS10041DATA00/DATA.BIN": b"data"})
+
+    assert [(r.reason, r.detail) for r in result.refusals] == [("incomplete_unit", "missing PARAM.SFO")]
+
+
+def test_two_titles_save_folders_are_each_a_unit(psp_root: Path) -> None:
+    """Each folder under `SAVEDATA` is checked on its own.
+
+    Args:
+        psp_root: The patched memory stick root.
+    """
+    result = _preflight(
+        {
+            ".import/save/ULUS10041DATA00/PARAM.SFO": b"sfo",
+            ".import/save/ULUS10041DATA00/DATA.BIN": b"data",
+            ".import/save/ULES00151SYS/DATA.BIN": b"data",
+        }
+    )
+
+    assert [(r.reason, r.member) for r in result.refusals] == [
+        ("incomplete_unit", ".import/save/ULES00151SYS/DATA.BIN")
+    ]
+
+
+def test_another_titles_save_folder_is_allowed(psp_root: Path) -> None:
+    """A sequel can read its predecessor's save, so a save folder's code is not held to RomM's.
+
+    Args:
+        psp_root: The patched memory stick root.
+    """
+    result = _preflight({".import/save/ULES00151DATA00/PARAM.SFO": b"sfo"}, rom=_ROMM_ID)
+
+    assert result.refusals == ()
+
+
+@pytest.mark.parametrize(
+    ("member", "reason", "detail"),
+    [
+        (".import/save/PARAM.SFO", "unrecognised_layout", "a single file; a PSP save is a folder"),
+        (".import/save/Game.srm", "source_incompatible", "a RetroArch save file"),
+        (
+            ".import/save/PSP/SYSTEM/CONFIG.BIN",
+            "protected_destination",
+            "PSP/SYSTEM is emulator configuration",
+        ),
+        (
+            ".import/save/PSP/PPSSPP_STATE/ULUS10041_1.00_1.ppst",
+            "unrecognised_layout",
+            "a PPSSPP state: declare it as kind state",
+        ),
+        (
+            ".import/save/PPSSPP_STATE/ULUS10041_1.00_1.ppst",
+            "unrecognised_layout",
+            "a PPSSPP state: declare it as kind state",
+        ),
+        (".import/save/PSP/GAME/EBOOT.PBP", "unrecognised_layout", "PSP/GAME holds no saves"),
+        (".import/save/mysaves/PARAM.SFO", "unrecognised_layout", None),
+    ],
+)
+def test_a_save_member_that_is_not_a_save_folder_is_refused(
+    psp_root: Path, member: str, reason: str, detail: Optional[str]
+) -> None:
+    """Each wrong shape is refused with the reason that tells the player what to do.
+
+    Args:
+        psp_root: The patched memory stick root.
+        member: The member's zip name.
+        reason: The refusal code.
+        detail: The refusal's detail.
+    """
+    result = _preflight({member: b"x"})
+
+    assert [(r.reason, r.detail) for r in result.refusals] == [(reason, detail)]
+
+
+def test_a_state_and_its_screenshot_land_in_the_working_slot(psp_root: Path) -> None:
+    """Both are restamped into the broker's slot; the screenshot does not count as a second state.
+
+    Args:
+        psp_root: The patched memory stick root.
+    """
+    result = _preflight(
+        {
+            ".import/state/ULUS10041_1.00_4.ppst": b"progress",
+            ".import/state/ULUS10041_1.00_4.jpg": b"jpeg",
+        },
+        rom=_ROMM_ID,
+    )
+
+    assert result.refusals == ()
+    assert sorted(p.dest for p in result.placements) == [
+        PurePosixPath(f"PPSSPP_STATE/ULUS10041_1.00_{ppsspp.STATE_SLOT}.jpg"),
+        PurePosixPath(f"PPSSPP_STATE/ULUS10041_1.00_{ppsspp.STATE_SLOT}.ppst"),
+    ]
+
+
+def test_a_screenshot_without_its_state_is_incomplete(psp_root: Path) -> None:
+    """A screenshot on its own resumes nothing.
+
+    Args:
+        psp_root: The patched memory stick root.
+    """
+    result = _preflight(
+        {
+            ".import/state/ULUS10041_1.00_4.ppst": b"progress",
+            ".import/state/NPJH50001_1.00_2.jpg": b"jpeg",
+        }
+    )
+
+    assert [(r.reason, r.member) for r in result.refusals] == [
+        ("incomplete_unit", ".import/state/NPJH50001_1.00_2.jpg")
+    ]
+
+
+def test_a_state_for_another_title_is_refused(psp_root: Path) -> None:
+    """A state only loads into the game that wrote it.
+
+    Args:
+        psp_root: The patched memory stick root.
+    """
+    result = _preflight({".import/state/ULES00151_1.00_1.ppst": b"progress"}, rom=_ROMM_ID)
+
+    assert [r.reason for r in result.refusals] == ["identity_mismatch"]
+
+
+def test_a_homebrew_state_is_taken_on_trust(psp_root: Path) -> None:
+    """A homebrew id is no product code, so there is nothing to compare.
+
+    Args:
+        psp_root: The patched memory stick root.
+    """
+    result = _preflight({".import/state/HOMEBREW_1.00_1.ppst": b"progress"}, rom=_ROMM_ID)
+
+    assert result.refusals == ()
+
+
+def test_an_empty_state_is_incomplete(psp_root: Path) -> None:
+    """A zero-byte state would boot the game from scratch without a word.
+
+    Args:
+        psp_root: The patched memory stick root.
+    """
+    result = _preflight({".import/state/ULUS10041_1.00_1.ppst": b""})
+
+    assert [r.reason for r in result.refusals] == ["incomplete_unit"]
+
+
+def test_an_archived_screenshot_does_not_count_against_an_imported_state(psp_root: Path) -> None:
+    """A v1 screenshot is a `state_screenshot`, not a state, so the import still fits.
+
+    Args:
+        psp_root: The patched memory stick root.
+    """
+    body = import_zip(
+        {".import/state/ULUS10041_1.00_1.ppst": b"progress"},
+        v1={"PPSSPP_STATE/ULUS10041_1.00_1.jpg": b"jpeg"},
+    )
+
+    result = preflight_import(ppsspp.Ppsspp(), body, rom_file=None, resume_slot=1)
+
+    assert result.refusals == ()
+
+
+def test_an_archived_state_leaves_no_room_for_an_imported_one(psp_root: Path) -> None:
+    """The broker resumes one state; an archive that already carries one takes no second.
+
+    Args:
+        psp_root: The patched memory stick root.
+    """
+    body = import_zip(
+        {".import/state/ULUS10041_1.00_1.ppst": b"progress"},
+        v1={"PPSSPP_STATE/ULUS10041_1.00_1.ppst": b"older"},
+    )
+
+    result = preflight_import(ppsspp.Ppsspp(), body, rom_file=None, resume_slot=1)
+
+    assert [r.reason for r in result.refusals] == ["destination_conflict"]
+
+
+def test_a_pushed_state_for_another_title_is_refused(state_dir: Path) -> None:
+    """The push route takes a state named for the session's product code, or for none it can read.
+
+    Args:
+        state_dir: The patched state directory.
+    """
+    emu = ppsspp.Ppsspp()
+    emu.import_identity = imports.SessionIdentity("ULUS10041", "romm")
+
+    assert emu.state_target("ULES00151_1.00_3.ppst") is None
+    assert emu.state_target("ULUS10041_1.00_3.ppst") == state_dir / f"ULUS10041_1.00_{ppsspp.STATE_SLOT}.ppst"
+    assert emu.state_target("HOMEBREW_1.00_3.ppst") == state_dir / f"HOMEBREW_1.00_{ppsspp.STATE_SLOT}.ppst"
