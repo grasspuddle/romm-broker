@@ -1279,6 +1279,55 @@ def _destination_conflicts(
     return conflicted
 
 
+def _save_tree_refusal(
+    dest: PurePosixPath,
+    name: str,
+    ctx: ImportCtx,
+    spec: ImportSpec,
+    save_root: Path,
+    subtrees: tuple[str, ...],
+    *,
+    sidecar: bool = False,
+) -> Optional[ImportRefusal]:
+    """Hold one path an import writes to the save tree's rules.
+
+    A sidecar skips only the protected globs. They reserve names like the
+    `.rom` owner marker for the broker, and a sidecar is the broker's own write.
+
+    Args:
+        dest: A placement's destination, or one of its sidecars, relative to `save_root`.
+        name: The member's zip name, for the refusal.
+        ctx: The launch context; its `excluded` subtrees travel on their own routes.
+        spec: The emulator's spec, for its protected globs.
+        save_root: The emulator's save data root.
+        subtrees: The emulator's restore subtrees.
+        sidecar: Whether `dest` is a sidecar the broker builds rather than a member.
+
+    Returns:
+        `memcard_synced_separately`, `unrecognised_layout`, `protected_destination`
+        or `unsafe_path`, or None when the path may be written.
+    """
+    rel = dest.as_posix()
+    if saves.under_subtrees(dest, ctx.excluded):
+        return ImportRefusal(
+            "memcard_synced_separately",
+            name,
+            "the memory card through PUT /api/session/memory-card",
+            detail="the card travels on its own routes this session",
+        )
+    if rel in subtrees or not saves.under_subtrees(dest, subtrees):
+        return ImportRefusal(
+            "unrecognised_layout", name, ", ".join(subtrees), detail=f"{rel} is not inside a save subtree"
+        )
+    if not sidecar and _is_protected(rel, spec):
+        return ImportRefusal("protected_destination", name, None, detail=f"{rel} is emulator configuration")
+    if saves.surviving_chain_escapes(save_root, dest, subtrees):
+        return ImportRefusal(
+            "unsafe_path", name, _SAFE_EXPECTED, detail=f"{rel} resolves outside the save root"
+        )
+    return None
+
+
 def check_plan(
     plan: Sequence[Placement],
     ctx: ImportCtx,
@@ -1335,40 +1384,16 @@ def check_plan(
 
     subtrees = tuple(emulator.restore_subtrees)
     for placement in plan:
-        dest = placement.dest
-        rel = dest.as_posix()
-        name = placement.member.name
-        if saves.under_subtrees(dest, ctx.excluded):
-            refusals.append(
-                ImportRefusal(
-                    "memcard_synced_separately",
-                    name,
-                    "the memory card through PUT /api/session/memory-card",
-                    detail="the card travels on its own routes this session",
-                )
+        # A sidecar is written just like its destination, so it is held to the
+        # same save-tree rules, and the first path that fails refuses the member.
+        paths = ((placement.dest, False), *((d, True) for d, _ in placement.sidecars))
+        for dest, sidecar in paths:
+            refusal = _save_tree_refusal(
+                dest, placement.member.name, ctx, spec, emulator.save_root, subtrees, sidecar=sidecar
             )
-            continue
-        if rel in subtrees or not saves.under_subtrees(dest, subtrees):
-            refusals.append(
-                ImportRefusal(
-                    "unrecognised_layout",
-                    name,
-                    ", ".join(subtrees),
-                    detail=f"{rel} is not inside a save subtree",
-                )
-            )
-            continue
-        if _is_protected(rel, spec):
-            refusals.append(
-                ImportRefusal("protected_destination", name, None, detail=f"{rel} is emulator configuration")
-            )
-            continue
-        if saves.surviving_chain_escapes(emulator.save_root, dest, subtrees):
-            refusals.append(
-                ImportRefusal(
-                    "unsafe_path", name, _SAFE_EXPECTED, detail=f"{rel} resolves outside the save root"
-                )
-            )
+            if refusal is not None:
+                refusals.append(refusal)
+                break
 
     total_bytes = ctx.v1_bytes + sum(p.member.size + sum(len(b) for _, b in p.sidecars) for p in plan)
     total_entries = len(ctx.archive_paths) + sum(1 + len(p.sidecars) for p in plan)
@@ -1432,7 +1457,11 @@ def suggest_for(
         if ra is not None:
             ra.platform = platform
             spec = ra.import_spec()
-            if member.kind == "state" and spec.state_channel == "push":
+            # Only a numbered or `.auto` slot name points at RetroArch: a `.srm`
+            # declared as a state is not one RetroArch would take, and a bare
+            # `.state` is Flycast's name as much as RetroArch's.
+            is_ra_state = LIBRETRO_STATE_RE.fullmatch(member.parts[-1]) is not None
+            if member.kind == "state" and spec.state_channel == "push" and is_ra_state:
                 suggestion = "retroarch"
             save = spec.kind("save")
             if member.kind == "save" and save and any(s.endswith(".srm") for s in save.shapes):

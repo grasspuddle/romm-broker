@@ -2806,6 +2806,33 @@ def test_retroarch_is_suggested_only_where_it_would_take_the_member(
     assert imports.suggest_for(_member(tail, kind), platform) == suggestion
 
 
+@pytest.mark.parametrize(
+    ("platform", "tail", "suggestion"),
+    [
+        ("snes", "Game.state1", "retroarch"),
+        ("psx", "Game.state1", "retroarch"),
+        ("psx", "Game.state.auto", "retroarch"),
+        ("psx", "Game.srm", None),
+        ("dc", "Game.srm", None),
+        ("snes", "Game.state", None),
+    ],
+)
+def test_a_state_suggests_retroarch_only_under_a_retroarch_slot_name(
+    platform: str, tail: str, suggestion: Optional[str]
+) -> None:
+    """A push channel is not enough: `state_target` would refuse a `.srm` declared as a state.
+
+    A bare `.state` is left out too, as `LIBRETRO_STATE_RE` leaves it out:
+    flycast takes that name as its own.
+
+    Args:
+        platform: The RomM platform slug.
+        tail: The member's path below `.import/state/`.
+        suggestion: The emulator suggested, or None.
+    """
+    assert imports.suggest_for(_member(tail, "state"), platform) == suggestion
+
+
 def test_an_imported_srm_is_written_where_the_core_loads_it(ra_dirs: Path) -> None:
     """The restore writes the save into the core's sorted dir, byte for byte.
 

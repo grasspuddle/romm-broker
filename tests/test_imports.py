@@ -1481,6 +1481,98 @@ def test_an_accepting_emulator_gets_a_plan(tmp_path: Path) -> None:
     assert emu.import_identity == imports.SessionIdentity(None, "none")
 
 
+class _WithSidecar(_Accepting):
+    """A fake that places each save under `saves/` and writes a marker at `sidecar` beside it."""
+
+    sidecar = "saves/marker"
+
+    def import_spec(self) -> imports.ImportSpec:
+        """Accept saves, and reserve `*.rom` for the broker the way Flycast and DuckStation do.
+
+        Returns:
+            The spec.
+        """
+        return imports.ImportSpec(kinds=(imports.KindSpec("save", ("<name>",)),), protected=("*.rom",))
+
+    def place_import(
+        self, member: imports.ImportMember, spec: imports.ImportSpec, ctx: imports.ImportCtx
+    ) -> Union[imports.Placement, imports.ImportRefusal]:
+        """Place the member under `saves/`, with one sidecar at `sidecar`.
+
+        Args:
+            member: The member.
+            spec: The spec.
+            ctx: The launch context.
+
+        Returns:
+            The placement.
+        """
+        dest = PurePosixPath("saves", *member.parts)
+        return imports.Placement(member, dest, ((PurePosixPath(self.sidecar), b"marker\n"),))
+
+
+@pytest.mark.parametrize(
+    ("sidecar", "refusals"),
+    [
+        ("saves/a.srm.rom", []),
+        (
+            "elsewhere/a.srm.rom",
+            [("unrecognised_layout", "elsewhere/a.srm.rom is not inside a save subtree")],
+        ),
+        ("states/a.srm.rom", [("unsafe_path", "states/a.srm.rom resolves outside the save root")]),
+    ],
+)
+def test_a_sidecar_is_held_to_the_save_tree_rules_its_destination_is(
+    tmp_path: Path, sidecar: str, refusals: list[tuple[str, str]]
+) -> None:
+    """A sidecar outside the save tree, or through a link out of it, refuses its member before any write.
+
+    The destination always lands safely in `saves/`, and `states/` is a link
+    out of the save root, so a refusal can only come from the sidecar. The
+    sidecar in `saves/` matches the protected `*.rom` and still lands: those
+    globs reserve the marker for the broker, and a sidecar is the broker's.
+
+    Args:
+        tmp_path: The per-test temporary directory.
+        sidecar: Where the hook puts the sidecar, relative to the save root.
+        refusals: The expected `(reason, detail)` pairs, all for the one member.
+    """
+    root = tmp_path / "root"
+    (root / "saves").mkdir(parents=True)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (root / "states").symlink_to(outside)
+    emu = _WithSidecar()
+    emu.save_root = root
+    emu.sidecar = sidecar
+
+    result = _preflight(emu, _declared({".import/save/a.srm": b"x"}))
+
+    assert [(r.reason, r.detail) for r in result.refusals] == refusals
+    assert all(r.member == ".import/save/a.srm" for r in result.refusals)
+    assert len(result.placements) == (0 if refusals else 1)
+    assert list(outside.iterdir()) == []
+    assert list((root / "saves").iterdir()) == []
+
+
+def test_a_member_named_like_a_sidecar_is_still_protected(tmp_path: Path) -> None:
+    """Only the broker's own sidecar skips the protected globs; a member on one is refused.
+
+    Args:
+        tmp_path: The per-test temporary directory.
+    """
+    emu = _WithSidecar()
+    emu.save_root = tmp_path
+    (tmp_path / "saves").mkdir()
+
+    result = _preflight(emu, _declared({".import/save/a.srm.rom": b"x"}))
+
+    assert [(r.reason, r.detail) for r in result.refusals] == [
+        ("protected_destination", "saves/a.srm.rom is emulator configuration")
+    ]
+    assert result.placements == ()
+
+
 def test_one_refusal_empties_the_whole_plan(tmp_path: Path) -> None:
     """All or nothing: a single refused member leaves no placements at all."""
     emu = _Accepting()
