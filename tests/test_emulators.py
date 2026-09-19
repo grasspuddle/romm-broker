@@ -647,7 +647,7 @@ def test_the_launch_env_points_at_the_labwc_session(monkeypatch: pytest.MonkeyPa
     assert env["DISPLAY"] == ":0"
 
 
-_IMPORTING: frozenset[str] = frozenset({"duckstation", "flycast", "ppsspp", "retroarch"})
+_IMPORTING: frozenset[str] = frozenset({"dolphin", "duckstation", "flycast", "ppsspp", "retroarch"})
 """The emulators that accept declared imports; every other one inherits the refusing base hooks."""
 
 
@@ -732,17 +732,19 @@ def test_restore_subtrees_covers_every_save_subtree(name: str) -> None:
 
 
 def _spec_cases() -> list[tuple[str, Optional[str]]]:
-    """List every registry emulator once, and RetroArch once more per platform.
+    """List every registry emulator once, then RetroArch once per platform and Dolphin once per console.
 
     RetroArch's spec depends on the loaded platform, so each mapped slug is
-    checked on its own, and so is one no table maps.
+    checked on its own, and so is one no table maps. Dolphin's spec depends
+    on it too: GameCube and Wii each declare their own kinds.
 
     Returns:
-        `(name, platform)` pairs; the platform is None except in RetroArch's extra cases.
+        `(name, platform)` pairs; the platform is None except in RetroArch's and Dolphin's extra cases.
     """
     cases: list[tuple[str, Optional[str]]] = [(name, None) for name in sorted(emulators.REGISTRY)]
     cases += [("retroarch", slug) for slug in sorted(retroarch.PLATFORMS)]
     cases.append(("retroarch", "not-a-platform"))
+    cases += [("dolphin", "ngc"), ("dolphin", "wii")]
     return cases
 
 
@@ -910,6 +912,7 @@ def test_a_flat_card_is_an_ordinary_save(name: str) -> None:
 
 
 _EXAMPLE_PLATFORM: dict[str, str] = {
+    "dolphin": "ngc",
     "duckstation": "psx",
     "flycast": "dc",
     "ppsspp": "psp",
@@ -918,6 +921,9 @@ _EXAMPLE_PLATFORM: dict[str, str] = {
 """The platform each importing emulator's examples below are placed on."""
 
 _EXAMPLES: list[tuple[str, str, bytes]] = [
+    ("dolphin", ".import/save/USA/Card A/01-GZLE-zelda.gci", b"GZLE01" + bytes(0x40 - 6 + 0x2000)),
+    ("dolphin", ".import/memcard/USA/Card A/01-GZLE-zelda.gci", b"GZLE01" + bytes(0x40 - 6 + 0x2000)),
+    ("dolphin", ".import/state/GZLE01.s01", b"GZLE01" + b"progress"),
     ("duckstation", ".import/save/card.mcd", bytes(131072)),
     ("duckstation", ".import/memcard/card.mcr", bytes(131072)),
     ("duckstation", ".import/state/SLUS-00594_resume.sav", b"progress"),

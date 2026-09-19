@@ -14,9 +14,9 @@ import re
 import subprocess
 import time
 from collections.abc import Iterable
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from threading import Thread
-from typing import Any, Optional
+from typing import Any, Optional, Union
 
 from .. import imports
 from .base import Emulator, base_launch_env, xdg_config_dir, xdg_data_dir
@@ -137,6 +137,68 @@ A raw GameCube or Wii image opens with the disc header, and a WBFS file keeps
 a copy of that header at 0x200. The compressed formats (.rvz, .wia, .gcz,
 .ciso) hold it behind their own container, so a ROM in one of those has no id
 to check a state against.
+"""
+
+_WII_PLATFORM = "wii"
+"""RomM platform slug for Wii, whose saves live in the emulated NAND."""
+
+_STATE_EXPECTED = "one Dolphin state, <game id>.sNN, opening with the id of the game it belongs to"
+"""What a `state` member must look like, for refusals."""
+
+_GCI_EXPECTED = "a GameCube save, <USA|EUR|JAP>/Card A/<name>.gci"
+"""What a GameCube `save` or `memcard` member must look like, for refusals."""
+
+_NAND_EXPECTED = "a Wii save, title/<00010000|00010001|00010004>/<title id>/data/..."
+"""What a Wii `save` member must look like, for refusals."""
+
+_GC_WRAPPERS: tuple[tuple[str, ...], ...] = (("saves", "dolphin-emu", "User", "GC"), ("GC",), ())
+"""Leading folders a GCI may arrive under, longest first: a user-folder copy's `GC`, `GC`, or none."""
+
+_WII_WRAPPERS: tuple[tuple[str, ...], ...] = (("saves", "dolphin-emu", "User", "Wii"), ("Wii",))
+"""Leading folders a NAND path may arrive under; a path under neither is taken as it is."""
+
+_REGION_RE = re.compile(r"USA|EUR|JAP", re.ASCII)
+"""A folder card's region folder: Dolphin buckets GCIs by the disc's region."""
+
+_CARD_A_RE = re.compile(r"Card A", re.ASCII)
+"""The slot folder under a region; the broker pins slot A to the GCI folder card."""
+
+_GCI_NAME_RE = re.compile(r"[^/]+\.gci", re.ASCII)
+"""A GCI's file name; Dolphin reads every `.gci` in a folder card."""
+
+_GCI_HEADER = 0x40
+"""Bytes of the directory entry a GCI opens with, before its blocks."""
+
+_GCI_BLOCK = 0x2000
+"""Bytes in one memory card block; a GCI carries a whole number of them."""
+
+_GCI_CODE_LEN = 4
+"""Length of the game code a GCI's directory entry opens with."""
+
+_CARD_IMAGE_SUFFIXES = (".raw", ".mcd", ".gcp")
+"""Whole memory card images, whose saves have to be exported as GCIs before a folder card reads them."""
+
+_NAND_TITLE_RE = re.compile(r"title", re.ASCII)
+"""The NAND folder every installed title's data sits under."""
+
+_NAND_HIGH_RE = re.compile(r"0001000[014]", re.ASCII)
+"""A title id's high half for a title with player saves: a disc, a channel, or a disc with a channel."""
+
+_NAND_LOW_RE = re.compile(r"[0-9A-Fa-f]{8}", re.ASCII)
+"""A title id's low half: the four-character game code, in hex."""
+
+_PROTECTED = (
+    f"{STATE_DIR.name}/{_UNDO_BUFFER_NAME}",
+    f"{STATE_DIR.name}/{_ATIME_PROBE_PREFIX}*",
+    "Wii/sys/*",
+    "Wii/ticket/*",
+    "Wii/title/00000001/*",
+    "Wii/title/????????/????????/content/*",
+)
+"""Destinations no import may write: Dolphin's own state-directory files, and NAND system and install data.
+
+`check_plan` matches them with `fnmatch`, whose `*` also crosses `/`, so
+each glob covers the whole tree below it.
 """
 
 
@@ -720,6 +782,270 @@ def _restamp_slot(filename: str, slot: int) -> Optional[str]:
     return f"{match.group('game')}.s{slot:02d}"
 
 
+def _unwrap(parts: tuple[str, ...], wrappers: tuple[tuple[str, ...], ...]) -> tuple[str, ...]:
+    """Strip the first wrapper a member path arrived under.
+
+    A wrapper is only stripped when something is left below it, so a file
+    named like a wrapper folder is not emptied away.
+
+    Args:
+        parts: The member's components.
+        wrappers: Candidate leading folders, longest first.
+
+    Returns:
+        The components below the wrapper, or `parts` when none matched.
+    """
+    for wrapper in wrappers:
+        if len(parts) > len(wrapper) and parts[: len(wrapper)] == wrapper:
+            return parts[len(wrapper):]
+    return parts
+
+
+def _is_nand_system(rest: tuple[str, ...]) -> bool:
+    """Tell whether a NAND path is system or install data rather than a title's save.
+
+    Such a path is placed as named, so the plan check refuses it against
+    `_PROTECTED` as emulator configuration, which tells the player more
+    than a layout refusal would.
+
+    Args:
+        rest: The path's components below `Wii`.
+
+    Returns:
+        True under `sys` or `ticket`, a system title (`title/00000001`), or a title's `content`.
+    """
+    if rest[0] in ("sys", "ticket") and len(rest) > 1:
+        return True
+    if rest[:2] == ("title", "00000001") and len(rest) > 2:
+        return True
+    return (
+        rest[0] == "title"
+        and len(rest) > 4
+        and rest[3] == "content"
+        and all(_NAND_LOW_RE.fullmatch(p) for p in rest[1:3])
+    )
+
+
+def _nand_leaf_refusal(member: imports.ImportMember) -> imports.ImportRefusal:
+    """Refuse a Wii member that is not under a title's `data` folder, naming what it looks like.
+
+    Args:
+        member: The member.
+
+    Returns:
+        A conversion refusal for an SD-card export, a source refusal for a
+        whole NAND dump, and a layout refusal for anything else.
+    """
+    leaf = member.parts[-1].lower()
+    if leaf == "data.bin":
+        return imports.ImportRefusal(
+            "needs_conversion",
+            member.name,
+            _NAND_EXPECTED,
+            detail=(
+                "a Wii SD-card export; import it with Dolphin's Import Wii Save, then send the title folder"
+            ),
+        )
+    if leaf == "nand.bin":
+        return imports.ImportRefusal(
+            "source_incompatible",
+            member.name,
+            _NAND_EXPECTED,
+            detail="a whole NAND dump; send the title folder from it instead",
+        )
+    if leaf.endswith(".gci"):
+        return imports.ImportRefusal(
+            "unrecognised_layout",
+            member.name,
+            _NAND_EXPECTED,
+            detail="a GameCube save; a Wii session takes NAND title saves",
+        )
+    return imports.ImportRefusal("unrecognised_layout", member.name, _NAND_EXPECTED)
+
+
+def _place_state(
+    member: imports.ImportMember, session: imports.SessionIdentity, rom_file: Optional[Path]
+) -> Union[imports.Placement, imports.ImportRefusal]:
+    """Place a state in the broker's working slot, named for the game its header opens with.
+
+    Dolphin looks a state up by the running disc's game id, so the header,
+    not the member's name, decides the new name. The state is held to the
+    session's game code. When the rom stores its id in the clear, the state
+    is also held to the rom's full six-character id: `_resume_state` makes
+    that check at boot, where a refusal is silent.
+
+    Args:
+        member: The member.
+        session: The session's identity.
+        rom_file: The disc about to boot, or None.
+
+    Returns:
+        The placement, or a refusal.
+    """
+    if member.parts in ((_UNDO_BUFFER_NAME,), (STATE_DIR.name, _UNDO_BUFFER_NAME)):
+        # Placed as named so the plan check refuses it as protected_destination,
+        # which tells the player more than "not recognised" would. Protecting it
+        # also keeps an archived lastState.sav out of the state count.
+        return imports.Placement(member, PurePosixPath(STATE_DIR.name, _UNDO_BUFFER_NAME))
+
+    def rename(name: str) -> Optional[str]:
+        """Stamp the broker's slot into a state's name.
+
+        Args:
+            name: The member's file name.
+
+        Returns:
+            The name for the broker's slot, or None when `name` is not a state's.
+        """
+        return _restamp_slot(name, STATE_SLOT)
+
+    dest = imports.place_single_file(
+        member,
+        subtree=STATE_DIR.name,
+        pattern=_STATE_NAME_RE,
+        rename=rename,
+        expected=_STATE_EXPECTED,
+        allow_wrappers=(STATE_DIR.name,),
+        nonempty=True,
+    )
+    if isinstance(dest, imports.ImportRefusal):
+        return dest
+    game_id = _game_id_in(member.head(_GAME_ID_LEN), 0)
+    if game_id is None:
+        return imports.ImportRefusal(
+            "unrecognised_layout",
+            member.name,
+            _STATE_EXPECTED,
+            detail="the state does not open with a game id",
+        )
+    refusal = imports.check_member_identity(
+        member,
+        imports.NORMALISERS["gc_wii_disc"](game_id),
+        session,
+        family="gc_wii_disc",
+        policy="strict",
+        expected=_STATE_EXPECTED,
+    )
+    if refusal is not None:
+        return refusal
+    # The session keeps only the four-character game code. The maker code the
+    # full id adds is part of what `_resume_state` compares at boot.
+    rom_id = _rom_game_id(rom_file) if rom_file is not None else None
+    if rom_id is not None and rom_id != game_id:
+        return imports.ImportRefusal(
+            "identity_mismatch", member.name, _STATE_EXPECTED, detail=f"member {game_id}, rom {rom_id}"
+        )
+    return imports.Placement(member, dest.with_name(f"{game_id}.s{STATE_SLOT:02d}"))
+
+
+def _place_nand(
+    member: imports.ImportMember, session: imports.SessionIdentity
+) -> Union[imports.Placement, imports.ImportRefusal]:
+    """Place a file of a Wii title's save under `Wii/title/<high>/<low>/data`.
+
+    The path is found below at most one wrapper: a user-folder copy's
+    `saves/dolphin-emu/User/Wii`, `Wii`, or nothing. A title reads its
+    save from the folder named for its own id, so the title is held strictly
+    to the session's game. System and install data is placed as named, for
+    the plan check to refuse as protected.
+
+    Args:
+        member: The member.
+        session: The session's identity.
+
+    Returns:
+        The placement, or a refusal.
+    """
+    rest = _unwrap(member.parts, _WII_WRAPPERS)
+    if _is_nand_system(rest):
+        dest = imports.build_dest("Wii", (), rest, member=member, expected=_NAND_EXPECTED)
+        if isinstance(dest, imports.ImportRefusal):
+            return dest
+        return imports.Placement(member, dest)
+    found = imports.match_anchored(
+        rest, wrappers=((),), levels=(_NAND_TITLE_RE, _NAND_HIGH_RE, _NAND_LOW_RE), min_tail=2
+    )
+    if found is None or found.tail[0] != "data":
+        return _nand_leaf_refusal(member)
+    refusal = imports.check_member_identity(
+        member,
+        imports.NORMALISERS["gc_wii_disc"](found.ids[2]),
+        session,
+        family="gc_wii_disc",
+        policy="strict",
+        expected=_NAND_EXPECTED,
+    )
+    if refusal is not None:
+        return refusal
+    # Dolphin writes the NAND's id folders in lower case.
+    dest = imports.build_dest(
+        "Wii",
+        ("title", found.ids[1], found.ids[2].lower()),
+        found.tail,
+        member=member,
+        expected=_NAND_EXPECTED,
+    )
+    if isinstance(dest, imports.ImportRefusal):
+        return dest
+    return imports.Placement(member, dest)
+
+
+def _place_gci(
+    member: imports.ImportMember, session: imports.SessionIdentity
+) -> Union[imports.Placement, imports.ImportRefusal]:
+    """Place a GameCube save as a GCI in its region's folder card, under `GC`.
+
+    The GCI is found below at most one wrapper: a user-folder copy's
+    `saves/dolphin-emu/User/GC`, `GC`, or nothing. Its game code is only
+    logged when it is not the session's: a game can read another game's
+    save, as a sequel reads its predecessor's.
+
+    Args:
+        member: The member.
+        session: The session's identity.
+
+    Returns:
+        The placement, or a refusal.
+    """
+    if member.parts[-1].lower().endswith(_CARD_IMAGE_SUFFIXES):
+        return imports.ImportRefusal(
+            "needs_conversion",
+            member.name,
+            _GCI_EXPECTED,
+            detail="a memory card image; export each save from it as a .gci",
+        )
+    found = imports.match_anchored(member.parts, wrappers=_GC_WRAPPERS, levels=(_REGION_RE, _CARD_A_RE))
+    if found is None or len(found.tail) != 1 or not _GCI_NAME_RE.fullmatch(found.tail[0]):
+        return imports.ImportRefusal(
+            "unrecognised_layout", member.name, _GCI_EXPECTED, detail="a GCI goes in <USA|EUR|JAP>/Card A/"
+        )
+    blocks, spare = divmod(member.size - _GCI_HEADER, _GCI_BLOCK)
+    if blocks < 1 or spare:
+        return imports.ImportRefusal(
+            "unrecognised_layout",
+            member.name,
+            _GCI_EXPECTED,
+            detail="not a 64-byte header followed by whole 8 KiB blocks",
+        )
+    code: Optional[str]
+    try:
+        code = member.head(_GCI_CODE_LEN).decode("ascii")
+    except UnicodeDecodeError:
+        code = None
+    imports.check_member_identity(
+        member,
+        imports.NORMALISERS["gc_wii_disc"](code) if code is not None else None,
+        session,
+        family="gc_wii_disc",
+        policy="advisory",
+        expected=_GCI_EXPECTED,
+    )
+    dest = imports.build_dest("GC", found.ids, found.tail, member=member, expected=_GCI_EXPECTED)
+    if isinstance(dest, imports.ImportRefusal):
+        return dest
+    return imports.Placement(member, dest)
+
+
 class Dolphin(Emulator):
     """GameCube and Wii sessions on dolphin-emu.
 
@@ -746,6 +1072,9 @@ class Dolphin(Emulator):
     into the broker's slot, the working slot is cleared before a boot, and
     Dolphin's undo-load buffer is dropped on exit so the archive does not
     carry a second full-size copy of a state RomM already stores.
+
+    Declared imports take GameCube GCIs, Wii NAND title saves and one
+    state; see `import_spec`.
 
     Attributes:
         name: RomM platform key, `dolphin`.
@@ -1130,6 +1459,9 @@ class Dolphin(Emulator):
         otherwise the game id is taken on trust, bounded to a `<game>.s<slot>`
         basename in the state dir.
 
+        The push route also holds the state's header to the session's game,
+        through `check_state_bytes`.
+
         Args:
             filename: The basename RomM is pushing.
 
@@ -1146,6 +1478,123 @@ class Dolphin(Emulator):
         if existing is not None:
             return existing if restamped == existing.name else None
         return STATE_DIR / restamped
+
+    def import_spec(self) -> imports.ImportSpec:
+        """Declare what Dolphin takes: GCIs on GameCube, NAND title saves on Wii, and one state.
+
+        The platform picks the spec, as it does `memory_card_subtree`; any
+        other platform takes nothing. A GCI is taken as a `save` or a
+        `memcard`: players think of one as a save. The state rides the
+        archive and resumes through `save.resume_slot`.
+
+        Returns:
+            The spec.
+        """
+        state = imports.KindSpec(
+            "state",
+            ("<game id>.sNN, opening with that game id",),
+            requires_resume_slot=True,
+            max_members=1,
+            counts_v1=True,
+        )
+        if self.platform == _GC_PLATFORM:
+            gci = ("<USA|EUR|JAP>/Card A/<name>.gci",)
+            return imports.ImportSpec(
+                kinds=(imports.KindSpec("save", gci), imports.KindSpec("memcard", gci), state),
+                state_channel="archive",
+                protected=_PROTECTED,
+                card_subtree=self.memory_card_subtree,
+            )
+        if self.platform == _WII_PLATFORM:
+            return imports.ImportSpec(
+                kinds=(
+                    imports.KindSpec("save", ("title/<00010000|00010001|00010004>/<title id>/data/...",)),
+                    state,
+                ),
+                state_channel="archive",
+                protected=_PROTECTED,
+            )
+        return imports.ImportSpec()
+
+    def place_import(
+        self, member: imports.ImportMember, spec: imports.ImportSpec, ctx: imports.ImportCtx
+    ) -> Union[imports.Placement, imports.ImportRefusal]:
+        """Place one declared member: a state in the slot, a Wii save in the NAND, a GCI in its card.
+
+        Args:
+            member: The member, already past the kind gate.
+            spec: This emulator's spec.
+            ctx: The launch context.
+
+        Returns:
+            The placement, or a refusal.
+        """
+        session = imports.identity_for(self, ctx)
+        if member.kind == "state":
+            return _place_state(member, session, ctx.rom_file)
+        if self.platform == _WII_PLATFORM:
+            return _place_nand(member, session)
+        return _place_gci(member, session)
+
+    def validate_import_plan(
+        self, plan: list[imports.Placement], ctx: imports.ImportCtx
+    ) -> list[imports.ImportRefusal]:
+        """Refuse an imported GCI when the archive already carries a GameCube card.
+
+        A folder card holds every title's saves, and an archive carries one
+        card: its own `GC` members, or imported GCIs, never both. RomM is to
+        strip the archived card, and warn the player, before it sends a
+        replacement.
+
+        A GCI that clashes with another member is left to the shared
+        one-member-per-destination check, which has already refused it, so
+        it is not refused twice.
+
+        Args:
+            plan: The placements that passed every per-member check.
+            ctx: The launch context; its `archive_paths` are the archive's ordinary members.
+
+        Returns:
+            One `destination_conflict` per imported GCI, or none.
+        """
+        card = self.memory_card_subtree
+        if card is None or not plan:
+            return []
+        if not any(PurePosixPath(rel).parts[:1] == (card,) for rel in ctx.archive_paths):
+            return []
+        skip = imports.destination_conflicts(plan, ctx.archive_paths, False)
+        return [
+            imports.ImportRefusal(
+                "destination_conflict",
+                p.member.name,
+                "one GameCube card per archive",
+                detail="the archive already carries a GC card",
+            )
+            for p in plan
+            if p.dest.parts[0] == card and p.member.name not in skip
+        ]
+
+    def check_state_bytes(self, head: bytes) -> bool:
+        """Refuse a pushed state whose header names another game than the session's.
+
+        A Dolphin state opens with the game id of the disc it was taken from.
+        A header with no id, or a session with none, is taken on trust.
+
+        Args:
+            head: Up to `STATE_HEAD_BYTES` bytes from the start of the pushed state.
+
+        Returns:
+            False when the header's game code is not the session's.
+        """
+        return imports.foreign_id(_game_id_in(head, 0), self.import_identity, "gc_wii_disc") is None
+
+    def identity_source(self) -> Optional[imports.IdentitySource]:
+        """Read the session's game id off the disc, or take RomM's when the format hides it.
+
+        Returns:
+            A GameCube/Wii disc-id source that reads the rom through `_rom_game_id`.
+        """
+        return imports.IdentitySource("gc_wii_disc", rom_reader=_rom_game_id)
 
     def _drop_undo_buffer(self) -> None:
         """Delete the undo-load-state buffer before the save archive is built.

@@ -7,13 +7,15 @@ a hotkey load off the access time of the state Dolphin reads back.
 
 import os
 import time
-from pathlib import Path
-from typing import Optional
+from pathlib import Path, PurePosixPath
+from typing import Any, Optional
 
 import pytest
 
-from webstation_broker import saves
+from webstation_broker import imports, saves
 from webstation_broker.emulators import dolphin
+
+from .conftest import import_zip, preflight_import, restore_import
 
 
 @pytest.fixture
@@ -828,3 +830,387 @@ def test_seed_gcpad_leaves_a_device_the_player_chose_alone(
     dolphin._seed_gcpad()
 
     assert path.read_text() == chosen
+
+
+# -- declared imports --
+
+_ROMM_ID = imports.RomRef(1, "Game", "ngc", title_id="GZLE01")
+"""A GameCube activate's rom, carrying the game id RomM holds for it."""
+
+_WII_ID = imports.RomRef(1, "Game", "wii", title_id="RMCE01")
+"""A Wii activate's rom, carrying the game id RomM holds for it."""
+
+_GCI = b"GZLE01" + bytes(0x40 - 6 + 0x2000)
+"""A one-block GCI for `GZLE01`: its 64-byte directory entry, then one 8 KiB block."""
+
+
+def _preflight(
+    members: dict[str, bytes],
+    *,
+    platform: str = "ngc",
+    rom_file: Optional[Path] = None,
+    v1: Optional[dict[str, bytes]] = None,
+    **kwargs: Any,
+) -> imports.PreflightResult:
+    """Preflight an archive of import members on a fresh Dolphin, resuming slot 1.
+
+    Args:
+        members: `.import/<kind>/...` names mapped to bytes.
+        platform: The RomM platform slug the session loads.
+        rom_file: The disc about to boot, or None.
+        v1: Ordinary archive members to carry beside them, or None.
+        **kwargs: Extra `preflight_import` arguments, such as `rom`.
+
+    Returns:
+        What preflight decided.
+    """
+    emu = dolphin.Dolphin()
+    emu.platform = platform
+    kwargs.setdefault("resume_slot", 1)
+    return preflight_import(emu, import_zip(members, v1), rom_file=rom_file, **kwargs)
+
+
+@pytest.mark.parametrize("member", [".import/state/mystate.s04", ".import/state/StateSaves/GZLE01.s04"])
+def test_a_state_lands_in_the_working_slot_named_for_its_header(state_dir: Path, member: str) -> None:
+    """Dolphin finds a state by the running disc's id, so the header names it, not the member's name.
+
+    Args:
+        state_dir: The patched state directory.
+        member: The member's zip name.
+    """
+    result = _preflight({member: b"GZLE01progress"}, rom=_ROMM_ID)
+
+    assert result.refusals == ()
+    assert [p.dest for p in result.placements] == [
+        PurePosixPath(f"StateSaves/GZLE01.s{dolphin.STATE_SLOT:02d}")
+    ]
+
+
+def test_a_state_that_does_not_open_with_a_game_id_is_refused(state_dir: Path) -> None:
+    """A file that does not open with a game id is not a Dolphin state.
+
+    Args:
+        state_dir: The patched state directory.
+    """
+    result = _preflight({".import/state/GZLE01.s01": bytes(64)}, rom=_ROMM_ID)
+
+    assert [(r.reason, r.detail) for r in result.refusals] == [
+        ("unrecognised_layout", "the state does not open with a game id")
+    ]
+
+
+def test_a_state_for_another_game_is_refused(state_dir: Path) -> None:
+    """A state only loads into the game that wrote it, whatever its name says.
+
+    Args:
+        state_dir: The patched state directory.
+    """
+    result = _preflight({".import/state/GZLE01.s01": b"GALE01progress"}, rom=_ROMM_ID)
+
+    assert [r.reason for r in result.refusals] == ["identity_mismatch"]
+
+
+def test_a_state_is_held_to_the_roms_full_id(state_dir: Path, tmp_path: Path) -> None:
+    """A state whose maker code differs from the rom's would be refused at boot, so it is refused here.
+
+    The session identity keeps only the game code, `GZLE`, which both share.
+
+    Args:
+        state_dir: The patched state directory.
+        tmp_path: The per-test temporary directory.
+    """
+    rom = _disc(tmp_path / "roms" / "game.iso", b"GZLE8P")
+
+    result = _preflight({".import/state/GZLE01.s01": b"GZLE01progress"}, rom_file=rom)
+
+    assert [(r.reason, r.detail) for r in result.refusals] == [
+        ("identity_mismatch", "member GZLE01, rom GZLE8P")
+    ]
+
+
+@pytest.mark.parametrize("member", [".import/state/lastState.sav", ".import/state/StateSaves/lastState.sav"])
+def test_the_undo_buffer_is_refused_as_emulator_configuration(state_dir: Path, member: str) -> None:
+    """Dolphin rewrites `lastState.sav` on every load, so it is never a state to resume.
+
+    Args:
+        state_dir: The patched state directory.
+        member: The member's zip name.
+    """
+    result = _preflight({member: b"GZLE01progress"})
+
+    assert [(r.reason, r.detail) for r in result.refusals] == [
+        ("protected_destination", "StateSaves/lastState.sav is emulator configuration")
+    ]
+
+
+def test_an_empty_state_is_incomplete(state_dir: Path) -> None:
+    """A zero-byte state would boot the game from scratch without a word.
+
+    Args:
+        state_dir: The patched state directory.
+    """
+    result = _preflight({".import/state/GZLE01.s01": b""})
+
+    assert [(r.reason, r.detail) for r in result.refusals] == [("incomplete_unit", "the file is empty")]
+
+
+@pytest.mark.parametrize("kind", ["save", "memcard"])
+@pytest.mark.parametrize("prefix", ["", "GC/", "saves/dolphin-emu/User/GC/"])
+def test_a_gci_lands_in_its_regions_card_however_deep_it_was_packed(
+    state_dir: Path, kind: str, prefix: str
+) -> None:
+    """A GCI is taken as a save or a card, below any wrapper a copy of the user folder leaves.
+
+    Args:
+        state_dir: The patched state directory.
+        kind: The declared kind.
+        prefix: The folders the GCI was packed under.
+    """
+    result = _preflight({f".import/{kind}/{prefix}USA/Card A/01-GZLE-zelda.gci": _GCI}, rom=_ROMM_ID)
+
+    assert result.refusals == ()
+    assert [p.dest for p in result.placements] == [PurePosixPath("GC/USA/Card A/01-GZLE-zelda.gci")]
+
+
+def test_another_games_gci_is_allowed(state_dir: Path) -> None:
+    """A game can read another game's save, so a GCI's game code is only logged, never refused.
+
+    Args:
+        state_dir: The patched state directory.
+    """
+    melee = b"GALE01" + bytes(0x40 - 6 + 0x2000)
+
+    result = _preflight({".import/save/USA/Card A/01-GALE-melee.gci": melee}, rom=_ROMM_ID)
+
+    assert result.refusals == ()
+
+
+@pytest.mark.parametrize(
+    "member", [".import/save/01-GZLE-zelda.gci", ".import/save/USA/Card B/01-GZLE-zelda.gci"]
+)
+def test_a_gci_outside_a_regions_card_a_is_refused(state_dir: Path, member: str) -> None:
+    """Slot A is pinned to a folder card, which reads GCIs from `<region>/Card A` only.
+
+    Args:
+        state_dir: The patched state directory.
+        member: The member's zip name.
+    """
+    result = _preflight({member: _GCI})
+
+    assert [(r.reason, r.detail) for r in result.refusals] == [
+        ("unrecognised_layout", "a GCI goes in <USA|EUR|JAP>/Card A/")
+    ]
+
+
+@pytest.mark.parametrize("data", [_GCI[:-1], _GCI[:0x40]])
+def test_a_gci_that_is_not_whole_blocks_is_refused(state_dir: Path, data: bytes) -> None:
+    """A GCI is its 64-byte directory entry followed by at least one whole 8 KiB block.
+
+    Args:
+        state_dir: The patched state directory.
+        data: The member's bytes.
+    """
+    result = _preflight({".import/save/USA/Card A/01-GZLE-zelda.gci": data})
+
+    assert [(r.reason, r.detail) for r in result.refusals] == [
+        ("unrecognised_layout", "not a 64-byte header followed by whole 8 KiB blocks")
+    ]
+
+
+@pytest.mark.parametrize("name", ["card.raw", "card.mcd", "card.gcp"])
+def test_a_card_image_needs_its_saves_exported(state_dir: Path, name: str) -> None:
+    """A folder card cannot take a whole card image; each save has to be exported from it as a GCI.
+
+    Args:
+        state_dir: The patched state directory.
+        name: The image's file name.
+    """
+    result = _preflight({f".import/memcard/{name}": bytes(0x40)})
+
+    assert [(r.reason, r.detail) for r in result.refusals] == [
+        ("needs_conversion", "a memory card image; export each save from it as a .gci")
+    ]
+
+
+@pytest.mark.parametrize("prefix", ["", "Wii/", "saves/dolphin-emu/User/Wii/"])
+def test_a_wii_save_lands_in_the_nand_with_lower_case_ids(state_dir: Path, prefix: str) -> None:
+    """A title's save goes under `Wii/title`, with its id folders lower-cased, as Dolphin writes them.
+
+    Args:
+        state_dir: The patched state directory.
+        prefix: The folders the title was packed under.
+    """
+    member = f".import/save/{prefix}title/00010000/524D4345/data/banner.bin"
+
+    result = _preflight({member: b"banner"}, platform="wii", rom=_WII_ID)
+
+    assert result.refusals == ()
+    assert [p.dest for p in result.placements] == [
+        PurePosixPath("Wii/title/00010000/524d4345/data/banner.bin")
+    ]
+
+
+def test_a_wii_save_for_another_title_is_refused(state_dir: Path) -> None:
+    """A Wii title's save is held to the session's game.
+
+    Args:
+        state_dir: The patched state directory.
+    """
+    result = _preflight(
+        {".import/save/title/00010000/534D4E45/data/banner.bin": b"banner"}, platform="wii", rom=_WII_ID
+    )
+
+    assert [r.reason for r in result.refusals] == ["identity_mismatch"]
+
+
+@pytest.mark.parametrize(
+    "rel",
+    [
+        "sys/uid.sys",
+        "ticket/00010000/524d4345.tik",
+        "title/00000001/00000002/data/setting.txt",
+        "title/00010000/524d4345/content/title.tmd",
+    ],
+)
+def test_wii_system_and_install_data_is_refused_as_emulator_configuration(state_dir: Path, rel: str) -> None:
+    """The NAND's system files, tickets, system titles and installed content are no player's save.
+
+    Args:
+        state_dir: The patched state directory.
+        rel: The member's path below `.import/save/`.
+    """
+    result = _preflight({f".import/save/{rel}": b"x"}, platform="wii", rom=_WII_ID)
+
+    assert [(r.reason, r.detail) for r in result.refusals] == [
+        ("protected_destination", f"Wii/{rel} is emulator configuration")
+    ]
+
+
+@pytest.mark.parametrize(
+    ("rel", "reason", "detail"),
+    [
+        (
+            "data.bin",
+            "needs_conversion",
+            "a Wii SD-card export; import it with Dolphin's Import Wii Save, then send the title folder",
+        ),
+        (
+            "private/wii/title/RMCE/data.bin",
+            "needs_conversion",
+            "a Wii SD-card export; import it with Dolphin's Import Wii Save, then send the title folder",
+        ),
+        ("nand.bin", "source_incompatible", "a whole NAND dump; send the title folder from it instead"),
+        (
+            "USA/Card A/01-GZLE-zelda.gci",
+            "unrecognised_layout",
+            "a GameCube save; a Wii session takes NAND title saves",
+        ),
+        ("mysaves/banner.bin", "unrecognised_layout", None),
+    ],
+)
+def test_a_wii_member_that_is_not_a_title_save_is_refused(
+    state_dir: Path, rel: str, reason: str, detail: Optional[str]
+) -> None:
+    """Each wrong shape is refused with the reason that tells the player what to do.
+
+    Args:
+        state_dir: The patched state directory.
+        rel: The member's path below `.import/save/`.
+        reason: The refusal code.
+        detail: The refusal's detail.
+    """
+    result = _preflight({f".import/save/{rel}": b"x"}, platform="wii", rom=_WII_ID)
+
+    assert [(r.reason, r.detail) for r in result.refusals] == [(reason, detail)]
+
+
+def test_an_imported_gci_beside_an_archived_card_is_refused(state_dir: Path) -> None:
+    """An archive carries one GameCube card: its own card members, or imported GCIs, never both.
+
+    Args:
+        state_dir: The patched state directory.
+    """
+    melee = b"GALE01" + bytes(0x40 - 6 + 0x2000)
+
+    result = _preflight(
+        {".import/save/USA/Card A/01-GZLE-zelda.gci": _GCI}, v1={"GC/USA/Card A/01-GALE-melee.gci": melee}
+    )
+
+    assert [(r.reason, r.detail) for r in result.refusals] == [
+        ("destination_conflict", "the archive already carries a GC card")
+    ]
+
+
+def test_a_gci_is_refused_while_the_card_syncs_on_its_own_routes(state_dir: Path) -> None:
+    """With the card synced separately, the restore leaves `GC` alone, so nothing may be imported into it.
+
+    Args:
+        state_dir: The patched state directory.
+    """
+    result = _preflight(
+        {".import/save/USA/Card A/01-GZLE-zelda.gci": _GCI}, memory_card_synced=True, excluded=("GC",)
+    )
+
+    assert [(r.reason, r.detail) for r in result.refusals] == [
+        ("memcard_synced_separately", "the card travels on its own routes this session")
+    ]
+
+
+@pytest.mark.parametrize(
+    ("head", "accepted"),
+    [(b"GZLE01" + bytes(58), True), (bytes(64), True), (b"GALE01" + bytes(58), False)],
+)
+def test_a_pushed_state_is_held_to_the_session_by_its_header(head: bytes, accepted: bool) -> None:
+    """The push route refuses a state whose header names another game, and trusts one that names none.
+
+    Args:
+        head: The pushed state's first bytes.
+        accepted: Whether the push may be written.
+    """
+    emu = dolphin.Dolphin()
+    emu.import_identity = imports.SessionIdentity(imports.NORMALISERS["gc_wii_disc"]("GZLE01"), "romm")
+
+    assert emu.check_state_bytes(head) is accepted
+
+
+@pytest.mark.parametrize(
+    ("platform", "kinds", "card"),
+    [
+        ("ngc", ["save", "memcard", "state"], "GC"),
+        ("wii", ["save", "state"], None),
+        (None, [], None),
+        ("wiiu", [], None),
+    ],
+)
+def test_the_platform_picks_what_dolphin_takes(
+    platform: Optional[str], kinds: list[str], card: Optional[str]
+) -> None:
+    """GameCube takes GCIs as saves or cards, Wii takes NAND saves, and any other platform takes nothing.
+
+    Args:
+        platform: The loaded platform.
+        kinds: The kinds the spec declares, in order.
+        card: The card subtree discovery reports.
+    """
+    emu = dolphin.Dolphin()
+    emu.platform = platform
+    spec = emu.import_spec()
+
+    assert ([k.kind for k in spec.kinds], spec.card_subtree) == (kinds, card)
+
+
+def test_a_push_after_an_import_is_held_to_the_imported_state(state_dir: Path) -> None:
+    """The slot holds the imported state, so a push must be for the same game, by name and by header.
+
+    Args:
+        state_dir: The patched state directory.
+    """
+    emu = dolphin.Dolphin()
+    emu.platform = "ngc"
+    body = import_zip({".import/state/GZLE01.s04": b"GZLE01progress"})
+    result = preflight_import(emu, body, rom_file=None, resume_slot=1, rom=_ROMM_ID)
+    restore_import(emu, body, result)
+
+    assert emu.state_target("GZLE01.s03") == state_dir / f"GZLE01.s{dolphin.STATE_SLOT:02d}"
+    assert emu.state_target("GALE01.s03") is None
+    assert emu.check_state_bytes(b"GALE01" + bytes(58)) is False
