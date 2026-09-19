@@ -647,7 +647,7 @@ def test_the_launch_env_points_at_the_labwc_session(monkeypatch: pytest.MonkeyPa
     assert env["DISPLAY"] == ":0"
 
 
-_IMPORTING: frozenset[str] = frozenset({"flycast"})
+_IMPORTING: frozenset[str] = frozenset({"duckstation", "flycast"})
 """The emulators that accept declared imports; every other one inherits the refusing base hooks."""
 
 
