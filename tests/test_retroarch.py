@@ -392,7 +392,7 @@ class TestResumeGate:
 
         launch() also unconditionally starts a `_track_first_playing` thread,
         which this gate doesn't care about, so the stand-in only records
-        starts targeting `_deferred_load_state` — the thread this class is
+        starts targeting `_deferred_load_state`, the thread this class is
         actually about.
 
         Args:
@@ -2490,6 +2490,31 @@ _STATE_AS_SAVE = "a RetroArch state, which is PUT to /api/session/state-file aft
 """The detail a state sent as a save is refused with."""
 _PUSHED = "a state PUT to /api/session/state-file after activate, with resume_slot set"
 """What the kind gate tells a state sent to an emulator that takes states through the push routes."""
+_WII_SHAPE = "title/<00010000|00010001|00010004>/<title id>/data/..."
+"""The one save shape a Wii session advertises."""
+_WII_EXPECTED = f"a Wii save, {_WII_SHAPE}"
+"""What a refused Wii save is told to look like."""
+_WII_NAND = "saves/dolphin-emu/User/Wii"
+"""Where the Dolphin core keeps its emulated NAND, relative to the data root."""
+_WII_PROTECTED = (f"{_WII_NAND}/title/00000001/*", f"{_WII_NAND}/title/????????/????????/content/*")
+"""The globs no Wii import may write: system titles, and every title's installed content."""
+_ID32 = "0" * 32
+"""An Azahar id0 or id1: a 128-bit hash, as 32 hex digits."""
+_N3DS_SD = f"saves/Azahar/sdmc/Nintendo 3DS/{_ID32}/{_ID32}"
+"""The emulated SD card's title tree, as Azahar lays it out."""
+_N3DS_SHAPES = (
+    "saves/Azahar/sdmc/Nintendo 3DS/<id0>/<id1>/title/<high>/<low>/...",
+    "saves/Azahar/sdmc/Nintendo 3DS/<id0>/<id1>/extdata/<high>/<low>/...",
+    "saves/Azahar/nand/data/<id0>/...",
+)
+"""The save shapes a 3DS session advertises."""
+_N3DS_EXPECTED = "a 3DS save, " + " or ".join(_N3DS_SHAPES)
+"""What a refused 3DS save is told to look like."""
+_N3DS_PROTECTED = (
+    f"saves/Azahar/nand/data/{'?' * 32}/sysdata/*",
+    f"saves/Azahar/sdmc/Nintendo 3DS/{'?' * 32}/{'?' * 32}/title/????????/????????/content/*",
+)
+"""The globs no 3DS import may write: the NAND's system save data, and every title's installed content."""
 
 
 def _unconverted(suffix: str) -> str:
@@ -2504,16 +2529,11 @@ def _unconverted(suffix: str) -> str:
     return f"{suffix} files are not placed until each core's name for them is verified; send the core's .srm"
 
 
-def _own_folders(core: str) -> str:
-    """The detail a save for a core with its own save folders is refused with.
-
-    Args:
-        core: The core's name.
-
-    Returns:
-        The detail.
-    """
-    return f"the {core} core keeps its saves in its own folders, which imports do not place yet"
+_NGC_UNVERIFIED = (
+    "the dolphin core keeps GameCube saves as GCI files in its own folders, "
+    "which imports do not place yet"
+)
+"""The detail a GameCube save is refused with."""
 
 
 def _no_srm(core: str, platform: str) -> str:
@@ -2551,35 +2571,42 @@ def _member(tail: str, kind: str) -> imports.ImportMember:
 
 
 @pytest.mark.parametrize(
-    ("platform", "shapes", "max_members", "channel"),
+    ("platform", "shapes", "max_members", "channel", "protected"),
     [
-        ("snes", ["<name>.srm"], 1, "push"),
-        ("psx", ["<name>.srm"], 1, "push"),
-        ("jaguar", ["<name>.srm"], 1, "none"),
-        ("dc", [], None, "push"),
-        ("arcade", [], None, "push"),
-        ("segacd", [], None, "push"),
-        ("psp", [], None, "push"),
-        ("ngc", [], None, "push"),
-        ("3ds", [], None, "push"),
-        ("ps2", [], None, "none"),
-        (None, [], None, "none"),
+        ("snes", ["<name>.srm"], 1, "push", ()),
+        ("psx", ["<name>.srm"], 1, "push", ()),
+        ("jaguar", ["<name>.srm"], 1, "none", ()),
+        ("dc", [], None, "push", ()),
+        ("arcade", [], None, "push", ()),
+        ("segacd", [], None, "push", ()),
+        ("psp", [], None, "push", ()),
+        ("ngc", [], None, "push", ()),
+        ("wii", [_WII_SHAPE], None, "push", _WII_PROTECTED),
+        ("3ds", list(_N3DS_SHAPES), None, "push", _N3DS_PROTECTED),
+        ("ps2", [], None, "none", ()),
+        (None, [], None, "none", ()),
     ],
 )
 def test_the_import_spec_follows_the_platform(
-    platform: Optional[str], shapes: list[str], max_members: Optional[int], channel: str
+    platform: Optional[str],
+    shapes: list[str],
+    max_members: Optional[int],
+    channel: str,
+    protected: tuple[str, ...],
 ) -> None:
-    """One `.srm` where the core loads SRAM from one, none elsewhere; states go through the push routes.
+    """One `.srm` where the core loads SRAM from one, NAND or SD files on wii and 3ds, none elsewhere.
 
     An empty shape list tells RomM the save is refused on that platform, and
     `place_import` says why. Jaguar's core has no states, and nothing launches
-    on an unmapped platform, so neither takes a pushed state.
+    on an unmapped platform, so neither takes a pushed state. Only wii and 3ds
+    guard protected paths, since only they place more than one file.
 
     Args:
         platform: The RomM platform slug, or None.
         shapes: The save shapes discovery reports.
         max_members: The most saves one archive may place.
         channel: How states are taken.
+        protected: The globs the spec guards.
     """
     spec = _on(platform).import_spec()
 
@@ -2590,7 +2617,7 @@ def test_the_import_spec_follows_the_platform(
         "state_channel": channel,
         "card_subtree": None,
     }
-    assert spec.protected == ()
+    assert spec.protected == protected
     save = spec.kind("save")
     assert save is not None and save.counts_v1 is False
 
@@ -2674,9 +2701,7 @@ def test_a_save_that_is_not_one_srm_is_refused(
             "the PPSSPP core keeps saves as SAVEDATA folders, not a .srm",
             "ppsspp",
         ),
-        ("ngc", "shape_unverified", None, _own_folders("dolphin"), None),
-        ("wii", "shape_unverified", None, _own_folders("dolphin"), None),
-        ("3ds", "shape_unverified", None, _own_folders("azahar"), None),
+        ("ngc", "shape_unverified", None, _NGC_UNVERIFIED, None),
         ("dc", "destination_unresolvable", None, _no_srm("flycast", "dc"), None),
         ("arcade", "destination_unresolvable", None, _no_srm("fbneo", "arcade"), None),
         ("nds", "destination_unresolvable", None, _no_srm("melonds", "nds"), None),
@@ -2719,10 +2744,11 @@ def test_a_save_on_a_platform_without_a_srm_is_refused_with_the_reason(
 
 @pytest.mark.parametrize("platform", sorted(retroarch.PLATFORMS))
 def test_a_platform_advertises_a_srm_exactly_when_it_places_one(ra_dirs: Path, platform: str) -> None:
-    """The spec's save shapes and `place_import` agree on every platform in the table.
+    """The spec's `.srm` shape and `place_import` agree on every platform in the table.
 
-    `suggest_for` reads the shapes, so a platform that advertised a `.srm`
-    it then refused would send players to a dead end.
+    `suggest_for` reads the shapes for one ending in `.srm`, so a platform
+    that advertised a `.srm` it then refused would send players to a dead
+    end. Wii and 3ds advertise other shapes, and refuse a `.srm`.
 
     Args:
         ra_dirs: The patched data root.
@@ -2735,7 +2761,8 @@ def test_a_platform_advertises_a_srm_exactly_when_it_places_one(ra_dirs: Path, p
 
     save = emu.import_spec().kind("save")
     assert save is not None
-    assert bool(save.shapes) is (result.refusals == ()), [r.as_dict() for r in result.refusals]
+    advertised = any(shape.endswith(".srm") for shape in save.shapes)
+    assert advertised is (result.refusals == ()), [r.as_dict() for r in result.refusals]
 
 
 def test_a_srm_with_no_rom_to_name_it_after_is_refused(ra_dirs: Path) -> None:
@@ -2932,6 +2959,8 @@ def test_an_imported_srm_is_written_where_the_core_loads_it(ra_dirs: Path) -> No
         ("snes", ["<name>.srm"], "push", retroarch.STATE_SLOT),
         ("jaguar", ["<name>.srm"], "none", None),
         ("dc", [], "push", retroarch.STATE_SLOT),
+        ("wii", [_WII_SHAPE], "push", retroarch.STATE_SLOT),
+        ("3ds", list(_N3DS_SHAPES), "push", retroarch.STATE_SLOT),
     ],
 )
 def test_discovery_reports_the_srm_and_the_state_slot(
@@ -2954,3 +2983,377 @@ def test_discovery_reports_the_srm_and_the_state_slot(
     assert response.status_code == 200
     body = response.json()
     assert (body["kinds"][0]["shapes"], body["state_channel"], body["state_slot"]) == (shapes, channel, slot)
+
+
+# -- Wii, 3DS and GameCube saves --
+
+_WII_ROMM = imports.RomRef(1, "Game", "wii", title_id="RMCE01")
+"""RomM's rom for a Wii game whose code is `RMCE`."""
+_N3DS_ROMM = imports.RomRef(1, "Game", "3ds", title_id="0004000000030100")
+"""RomM's rom for a 3DS game whose title id is `0004000000030100`."""
+_N3DS_TITLE = f"{_N3DS_SD}/title/00040000/00030100"
+"""That game's folder on the emulated SD card."""
+
+
+def _place_save(
+    ra_dirs: Path, platform: str, tail: str, rom: Optional[imports.RomRef] = None
+) -> imports.PreflightResult:
+    """Preflight one `.import/save/<tail>` member on a platform.
+
+    Args:
+        ra_dirs: The patched data root.
+        platform: The RomM platform slug.
+        tail: The member's path below `.import/save/`.
+        rom: The activate body's rom, or None.
+
+    Returns:
+        What preflight decided.
+    """
+    body = import_zip({f".import/save/{tail}": b"data"})
+    return preflight_import(_on(platform), body, rom_file=ra_dirs / "Game.iso", rom=rom)
+
+
+def test_only_ngc_wii_and_3ds_scope_their_saves() -> None:
+    """`_srm_dir` has no generic answer for a scoped core, so a new scoped platform has to be looked at."""
+    scoped = {slug for slug, info in retroarch.PLATFORMS.items() if "save_subtrees" in info}
+
+    assert scoped == {"ngc", "wii", "3ds"}
+
+
+@pytest.mark.parametrize(
+    ("tail", "dest"),
+    [
+        ("title/00010000/524D4345/data/banner.bin", "title/00010000/524d4345/data/banner.bin"),
+        ("Wii/title/00010000/524D4345/data/banner.bin", "title/00010000/524d4345/data/banner.bin"),
+        (
+            "saves/dolphin-emu/User/Wii/title/00010000/524D4345/data/opt/save.dat",
+            "title/00010000/524d4345/data/opt/save.dat",
+        ),
+        ("title/00010001/524d4345/data/save.dat", "title/00010001/524d4345/data/save.dat"),
+    ],
+)
+def test_a_wii_nand_save_lands_in_the_cores_nand(ra_dirs: Path, tail: str, dest: str) -> None:
+    """The title folder is found under any of the wrappers, and lands in the core's NAND in lower case.
+
+    Args:
+        ra_dirs: The patched data root.
+        tail: The member's path below `.import/save/`.
+        dest: Where it must land, below the core's Wii folder.
+    """
+    result = _place_save(ra_dirs, "wii", tail, _WII_ROMM)
+
+    assert result.refusals == ()
+    assert [p.dest.as_posix() for p in result.placements] == [f"{_WII_NAND}/{dest}"]
+
+
+def test_a_wii_save_for_another_game_is_refused_with_the_override_hint(ra_dirs: Path) -> None:
+    """A title folder for another game is `identity_mismatch`, and the hint points at RomM's override.
+
+    Args:
+        ra_dirs: The patched data root.
+    """
+    result = _place_save(ra_dirs, "wii", "title/00010000/524D4346/data/save.dat", _WII_ROMM)
+
+    assert [(r.reason, r.member, r.expected, r.detail) for r in result.refusals] == [
+        (
+            "identity_mismatch",
+            ".import/save/title/00010000/524D4346/data/save.dat",
+            _WII_EXPECTED,
+            "member 524D4346, session 524D4345 (from romm)"
+            " - fix via PUT /api/roms/{id}/identity if RomM is wrong",
+        )
+    ]
+
+
+def test_a_wii_save_is_placed_when_nobody_names_the_game(ra_dirs: Path) -> None:
+    """With no id from RomM, the strict check has nothing to compare against, so it places the save.
+
+    Args:
+        ra_dirs: The patched data root.
+    """
+    result = _place_save(ra_dirs, "wii", "title/00010000/524D4346/data/save.dat")
+
+    assert result.refusals == ()
+    assert [p.dest.as_posix() for p in result.placements] == [
+        f"{_WII_NAND}/title/00010000/524d4346/data/save.dat"
+    ]
+
+
+@pytest.mark.parametrize(
+    "tail",
+    [
+        "title/00000001/00000002/data/setting.txt",
+        "Wii/title/00000001/00000002/data/setting.txt",
+        "title/00010000/524D4345/content/00000001.app",
+        "title/00010001/48414141/content/00000000.app",
+    ],
+)
+def test_wii_system_titles_and_install_data_are_protected(ra_dirs: Path, tail: str) -> None:
+    """A system title's tree and a title's installed content are inside the saves and refused as protected.
+
+    Args:
+        ra_dirs: The patched data root.
+        tail: The member's path below `.import/save/`.
+    """
+    result = _place_save(ra_dirs, "wii", tail, _WII_ROMM)
+
+    assert [(r.reason, r.member) for r in result.refusals] == [
+        ("protected_destination", f".import/save/{tail}")
+    ]
+
+
+@pytest.mark.parametrize("tail", ["sys/SYSCONF", "Wii/sys/SYSCONF", "ticket/00010000/524d4345.tik"])
+def test_wii_sys_and_ticket_are_outside_the_saves(ra_dirs: Path, tail: str) -> None:
+    """The platform's save subtrees leave `sys` and `ticket` out, so the plan check refuses them.
+
+    Args:
+        ra_dirs: The patched data root.
+        tail: The member's path below `.import/save/`.
+    """
+    result = _place_save(ra_dirs, "wii", tail, _WII_ROMM)
+
+    assert [(r.reason, r.member) for r in result.refusals] == [
+        ("unrecognised_layout", f".import/save/{tail}")
+    ]
+
+
+@pytest.mark.parametrize(
+    ("tail", "reason"),
+    [
+        ("data.bin", "needs_conversion"),
+        ("private/wii/title/RMCE/data.bin", "needs_conversion"),
+        ("nand.bin", "source_incompatible"),
+        ("USA/Card A/01-GZLE-zelda.gci", "unrecognised_layout"),
+        ("shared2/menu/FaceLib/RFL_DB.dat", "unrecognised_layout"),
+        ("title/00010000/524D4345/banner.bin", "unrecognised_layout"),
+        ("Game.bin", "unrecognised_layout"),
+    ],
+)
+def test_a_wii_member_that_is_not_a_title_save_is_refused_by_what_it_looks_like(
+    ra_dirs: Path, tail: str, reason: str
+) -> None:
+    """An SD-card export, a whole NAND, a GameCube save and any other layout each get their own code.
+
+    Args:
+        ra_dirs: The patched data root.
+        tail: The member's path below `.import/save/`.
+        reason: The refusal code.
+    """
+    result = _place_save(ra_dirs, "wii", tail, _WII_ROMM)
+
+    assert [(r.reason, r.expected) for r in result.refusals] == [(reason, _WII_EXPECTED)]
+
+
+def test_an_imported_wii_save_is_written_into_the_nand(ra_dirs: Path) -> None:
+    """The restore writes the file where the Dolphin core reads the title's data, byte for byte.
+
+    Args:
+        ra_dirs: The patched data root.
+    """
+    emu = _on("wii")
+    body = import_zip({".import/save/Wii/title/00010000/524D4345/data/save.dat": b"nand"})
+    result = preflight_import(emu, body, rom_file=ra_dirs / "Game.iso", rom=_WII_ROMM)
+
+    report = restore_import(emu, body, result)
+
+    assert (report["imported"], report["failed"]) == (1, 0)
+    written = ra_dirs / _WII_NAND / "title/00010000/524d4345/data/save.dat"
+    assert written.read_bytes() == b"nand"
+
+
+@pytest.mark.parametrize(
+    "tail",
+    [
+        f"{_N3DS_TITLE}/data/00000001/game.sav",
+        f"{_N3DS_SD}/extdata/00000000/00001234/00000001",
+        f"saves/Azahar/nand/data/{_ID32}/extdata/00048000/f000000b/Quota.dat",
+    ],
+)
+def test_a_3ds_save_is_placed_exactly_as_named(ra_dirs: Path, tail: str) -> None:
+    """A member already under Azahar's SD or NAND folders keeps every component of its path.
+
+    Args:
+        ra_dirs: The patched data root.
+        tail: The member's path below `.import/save/`.
+    """
+    result = _place_save(ra_dirs, "3ds", tail, _N3DS_ROMM)
+
+    assert result.refusals == ()
+    assert [p.dest.as_posix() for p in result.placements] == [tail]
+
+
+def test_a_3ds_title_for_another_game_is_refused_with_the_override_hint(ra_dirs: Path) -> None:
+    """The title in the path is held to the session's title id; extdata carries no such id.
+
+    Args:
+        ra_dirs: The patched data root.
+    """
+    other = f"{_N3DS_SD}/title/00040000/00030200/data/00000001/game.sav"
+
+    result = _place_save(ra_dirs, "3ds", other, _N3DS_ROMM)
+
+    assert [(r.reason, r.expected, r.detail) for r in result.refusals] == [
+        (
+            "identity_mismatch",
+            _N3DS_EXPECTED,
+            "member 0004000000030200, session 0004000000030100 (from romm)"
+            " - fix via PUT /api/roms/{id}/identity if RomM is wrong",
+        )
+    ]
+
+
+@pytest.mark.parametrize("rom", [None, imports.RomRef(1, "Game", "3ds", title_id="0004000000030100")])
+def test_a_3ds_extdata_and_a_title_without_a_session_id_are_not_held_to_an_id(
+    ra_dirs: Path, rom: Optional[imports.RomRef]
+) -> None:
+    """Extdata is shared between titles, so it is placed whatever the session's id; so is a title with no id.
+
+    Args:
+        ra_dirs: The patched data root.
+        rom: The activate body's rom, or None.
+    """
+    extdata = f"{_N3DS_SD}/extdata/00000000/00009999/00000001"
+
+    assert _place_save(ra_dirs, "3ds", extdata, rom).refusals == ()
+    if rom is None:
+        other = f"{_N3DS_SD}/title/00040000/00030200/data/00000001/game.sav"
+        assert _place_save(ra_dirs, "3ds", other, rom).refusals == ()
+
+
+@pytest.mark.parametrize(
+    "tail",
+    [
+        f"saves/Azahar/nand/data/{_ID32}/sysdata/00010011/00000000",
+        f"{_N3DS_TITLE}/content/00000000.app",
+    ],
+)
+def test_3ds_system_save_data_and_install_data_are_protected(ra_dirs: Path, tail: str) -> None:
+    """The NAND's system save data and a title's installed content are refused as protected.
+
+    Args:
+        ra_dirs: The patched data root.
+        tail: The member's path below `.import/save/`.
+    """
+    result = _place_save(ra_dirs, "3ds", tail, _N3DS_ROMM)
+
+    assert [(r.reason, r.member) for r in result.refusals] == [
+        ("protected_destination", f".import/save/{tail}")
+    ]
+
+
+@pytest.mark.parametrize(
+    "tail",
+    [
+        "game.sav",
+        "title/00040000/00030100/data/00000001/game.sav",
+        "Azahar/sdmc/Nintendo 3DS/" + _ID32 + "/" + _ID32 + "/title/00040000/00030100/data/x",
+        "saves/Azahar/config/qt-config.ini",
+        f"saves/Azahar/sdmc/Nintendo 3DS/{_ID32}/{_ID32}/dbs/title.db",
+        f"saves/Azahar/sdmc/Nintendo 3DS/{_ID32}/{_ID32}/title/00040000/00030100",
+        f"saves/Azahar/sdmc/Nintendo 3DS/{_ID32}/title/00040000/00030100/data/x",
+        f"saves/Azahar/sdmc/Nintendo 3DS/{'0' * 31}/{_ID32}/title/00040000/00030100/data/x",
+        f"saves/Azahar/sdmc/Nintendo 3DS/{_ID32}/{_ID32}/title/0004/00030100/data/x",
+        "saves/Azahar/nand/data/short/extdata/x",
+        f"saves/Azahar/nand/{_ID32}/x",
+        f"saves/Azahar/sdmc/Nintendo 3DS/{_ID32}/{_ID32}/Nintendo DSiWare/x",
+    ],
+)
+def test_a_3ds_member_outside_azahars_layout_is_left_unplaced(ra_dirs: Path, tail: str) -> None:
+    """Anything not already in Azahar's folders, and not in the two places a save lives, is unverified.
+
+    Args:
+        ra_dirs: The patched data root.
+        tail: The member's path below `.import/save/`.
+    """
+    result = _place_save(ra_dirs, "3ds", tail, _N3DS_ROMM)
+
+    assert [(r.reason, r.expected, r.detail) for r in result.refusals] == [
+        (
+            "shape_unverified",
+            _N3DS_EXPECTED,
+            "3DS saves are placed only as they sit in Azahar's folders, and only inside "
+            "sdmc/Nintendo 3DS or nand/data; anything else is not placed until the core's layout is verified",
+        )
+    ]
+
+
+def test_an_imported_3ds_save_is_written_where_azahar_reads_it(ra_dirs: Path) -> None:
+    """The restore writes the file to the same path under the data root.
+
+    Args:
+        ra_dirs: The patched data root.
+    """
+    emu = _on("3ds")
+    member = f"{_N3DS_TITLE}/data/00000001/game.sav"
+    body = import_zip({f".import/save/{member}": b"3ds"})
+    result = preflight_import(emu, body, rom_file=ra_dirs / "Game.3ds", rom=_N3DS_ROMM)
+
+    report = restore_import(emu, body, result)
+
+    assert (report["imported"], report["failed"]) == (1, 0)
+    assert (ra_dirs / member).read_bytes() == b"3ds"
+
+
+@pytest.mark.parametrize(
+    ("platform", "expected", "detail"),
+    [
+        (
+            "wii",
+            _WII_EXPECTED,
+            "the dolphin core keeps Wii saves as NAND title folders, not a .srm",
+        ),
+        (
+            "3ds",
+            _N3DS_EXPECTED,
+            "the azahar core keeps 3DS saves in its own SD and NAND folders, not a .srm",
+        ),
+    ],
+)
+def test_a_srm_on_wii_or_3ds_is_refused_with_the_layout_it_should_have(
+    ra_dirs: Path, platform: str, expected: str, detail: str
+) -> None:
+    """These cores load no `.srm`, so one is refused, whatever its name, and told what to send instead.
+
+    Args:
+        ra_dirs: The patched data root.
+        platform: The RomM platform slug.
+        expected: The refusal's expected shape.
+        detail: The refusal's detail.
+    """
+    result = _place_save(ra_dirs, platform, "Game.SRM")
+
+    assert [(r.reason, r.member, r.expected, r.detail) for r in result.refusals] == [
+        ("unrecognised_layout", ".import/save/Game.SRM", expected, detail)
+    ]
+
+
+@pytest.mark.parametrize("tail", ["Game.srm", "USA/Card A/01-GZLE-zelda.gci", "GC/USA/Card A/x.gci"])
+def test_a_gamecube_save_stays_refused_as_unverified(ra_dirs: Path, tail: str) -> None:
+    """The libretro Dolphin core's GameCube folder layout is not verified, so nothing is placed for it.
+
+    Args:
+        ra_dirs: The patched data root.
+        tail: The member's path below `.import/save/`.
+    """
+    result = _place_save(ra_dirs, "ngc", tail)
+
+    assert [(r.reason, r.member, r.expected, r.detail) for r in result.refusals] == [
+        ("shape_unverified", f".import/save/{tail}", None, _NGC_UNVERIFIED)
+    ]
+
+
+@pytest.mark.parametrize(
+    ("platform", "family"),
+    [("wii", "gc_wii_disc"), ("3ds", "hex16"), ("ngc", None), ("snes", None), ("psp", None), (None, None)],
+)
+def test_only_wii_and_3ds_declare_an_identity_source(platform: Optional[str], family: Optional[str]) -> None:
+    """The two platforms that check a title id name its family; neither reads it off the rom.
+
+    Args:
+        platform: The RomM platform slug, or None.
+        family: The id family the source names, or None for no source.
+    """
+    source = _on(platform).identity_source()
+
+    assert (source.family if source else None) == family
+    assert source is None or (source.rom_reader, source.use_save_target) == (None, False)
