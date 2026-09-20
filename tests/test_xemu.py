@@ -5,25 +5,29 @@ libfatx compares path names byte for byte, and that detail is exactly what the
 inject and extract hooks have to get right.
 """
 
+import dataclasses
 import gc
 import logging
 import os
 import signal
 import struct
 import tomllib
-from pathlib import Path
+import zipfile
+from pathlib import Path, PurePosixPath
 from typing import Any, NoReturn, Optional
 
 import pytest
 from pyfatx import Fatx
 
-from webstation_broker import settings
+from webstation_broker import imports, settings
 from webstation_broker.emulators import xemu
+
+from .conftest import import_zip, preflight_import, restore_import
 
 SECTOR = 2048
 
 
-# ── Disc images ──────────────────────────────────────────────────────────────
+# -- Disc images --
 
 
 def _xiso(path: Path, title_id: int = 0x4D530064, *, base: int = 0,
@@ -127,7 +131,7 @@ def test_a_disc_claiming_an_absurd_root_directory_is_not_read(tmp_path: Path, cl
     assert xemu._disc_title_id(disc) is None
 
 
-# ── ROM resolution ───────────────────────────────────────────────────────────
+# -- ROM resolution --
 
 
 @pytest.fixture
@@ -206,7 +210,7 @@ def test_a_direct_path_that_is_a_symlink_out_of_the_rom_root_is_rejected(
     assert xemu.Xemu.resolve_rom_file(None, linked) is None
 
 
-# ── HDD image location ───────────────────────────────────────────────────────
+# -- HDD image location --
 
 
 def _toml(tmp_path: Path, hdd_path: str) -> Path:
@@ -253,7 +257,7 @@ def test_an_unparseable_config_falls_back(monkeypatch: pytest.MonkeyPatch, tmp_p
     assert xemu._hdd_image_path() == xemu.FALLBACK_HDD_IMAGE
 
 
-# ── One-time raw conversion ──────────────────────────────────────────────────
+# -- One-time raw conversion --
 
 
 def test_a_raw_image_is_left_alone(tmp_path: Path) -> None:
@@ -304,7 +308,7 @@ def test_a_failed_conversion_leaves_the_qcow2_playable(
     assert image.read_bytes() == original
 
 
-# ── Display settings pin ─────────────────────────────────────────────────────
+# -- Display settings pin --
 
 
 # A config shaped like the one xemu writes: comments, several tables, and a
@@ -608,7 +612,7 @@ def test_a_launch_tells_xemu_which_toml_the_broker_pinned(
     assert cmd[cmd.index("-config_path") + 1] == str(xemu.XEMU_TOML)
 
 
-# ── Stray process reaping ────────────────────────────────────────────────────
+# -- Stray process reaping --
 
 
 @pytest.fixture
@@ -688,7 +692,7 @@ def test_a_stray_that_ignores_sigterm_is_killed(
     assert signals == [(777, signal.SIGTERM), (777, signal.SIGKILL)]
 
 
-# ── FATX save sync ───────────────────────────────────────────────────────────
+# -- FATX save sync --
 
 
 @pytest.fixture
@@ -1093,7 +1097,7 @@ def test_a_successful_extraction_replaces_the_staged_files(emulator: xemu.Xemu) 
     assert (emulator.staging_dir / "UDATA/4D530064/saved.dat").read_bytes() == b"progress"
 
 
-# ── Stale save clear ─────────────────────────────────────────────────────────
+# -- Stale save clear --
 
 
 def test_the_clear_takes_the_launched_titles_saves_off_the_image(emulator: xemu.Xemu) -> None:
@@ -1285,7 +1289,7 @@ def test_a_launch_that_cannot_clear_the_image_neither_injects_nor_archives(
     assert emulator.save_and_exit(None)["saves_extracted"] == 0
 
 
-# ── Session contract ─────────────────────────────────────────────────────────
+# -- Session contract --
 
 
 def test_xemu_reports_no_save_state_support() -> None:
@@ -1330,3 +1334,371 @@ def test_exit_keeps_the_staged_saves_when_the_image_cannot_be_read(
     result = emulator.save_and_exit(None)
     assert result["saves_extracted"] == 0
     assert (emulator.staging_dir / "UDATA/4D530064/restored.dat").exists()
+
+
+# -- declared imports --
+
+_TID = "4D530064"
+"""The title id the session runs, in the case the dashboard names its save folder."""
+_ROMM = imports.RomRef(1, "Game", "xbox", title_id=_TID)
+"""The rom an Xbox activate carries, with RomM's id for it."""
+_META = f"UDATA/{_TID}/TitleMeta.xbx"
+"""A save file as a hand-collected export spells it."""
+
+
+@pytest.fixture
+def image_dir(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
+    """Point the HDD image xemu resolves at tmp_path, with no image on it.
+
+    The import hooks never open the image, but `Xemu()` resolves it at
+    construction and would otherwise name `/config`.
+
+    Args:
+        monkeypatch: The pytest monkeypatch fixture.
+        tmp_path: The per-test temporary directory.
+
+    Returns:
+        The directory holding the (absent) image and the staging directory.
+    """
+    monkeypatch.setattr(xemu, "XEMU_TOML", tmp_path / "missing.toml")
+    monkeypatch.setattr(xemu, "FALLBACK_HDD_IMAGE", tmp_path / "xbox_hdd.qcow2")
+    return tmp_path
+
+
+def _preflight(
+    members: dict[str, bytes],
+    *,
+    rom: Optional[imports.RomRef] = _ROMM,
+    rom_file: Optional[Path] = None,
+    v1: Optional[dict[str, bytes]] = None,
+) -> imports.PreflightResult:
+    """Preflight an archive of import members against xemu.
+
+    Args:
+        members: `.import/<kind>/...` names mapped to bytes.
+        rom: The activate body's rom, or None.
+        rom_file: The resolved disc image, or None.
+        v1: Ordinary archive members to carry beside them, or None.
+
+    Returns:
+        What preflight decided.
+    """
+    return preflight_import(xemu.Xemu(), import_zip(members, v1), rom_file=rom_file, rom=rom)
+
+
+def _save(rel: str, data: bytes = b"x") -> dict[str, bytes]:
+    """One save member's archive, named by its path below `.import/save/`.
+
+    Args:
+        rel: The path below `.import/save/`.
+        data: The member's bytes.
+
+    Returns:
+        The members mapping `_preflight` takes.
+    """
+    return {f".import/save/{rel}": data}
+
+
+def _member(rel: str) -> imports.ImportMember:
+    """One save member, built without an archive, for a hook that reads only its path.
+
+    Args:
+        rel: The path below `.import/save/`.
+
+    Returns:
+        The member.
+    """
+    name = f".import/save/{rel}"
+    return imports.ImportMember(
+        name, "save", "unknown", PurePosixPath(rel), tuple(rel.split("/")), 1, zipfile.ZipInfo(name)
+    )
+
+
+@pytest.mark.usefixtures("image_dir")
+@pytest.mark.parametrize(
+    ("rel", "dest"),
+    [
+        (_META, f"saves/UDATA/{_TID}/TitleMeta.xbx"),
+        (f"udata/{_TID.lower()}/TitleMeta.xbx", f"saves/UDATA/{_TID}/TitleMeta.xbx"),
+        (f"TDATA/{_TID}/0000000000000001/savedata.dat", f"saves/TDATA/{_TID}/0000000000000001/savedata.dat"),
+        (f"Udata/{_TID}/a/b/c/deep.dat", f"saves/UDATA/{_TID}/a/b/c/deep.dat"),
+    ],
+    ids=["verbatim", "lower case", "tdata", "nested"],
+)
+def test_a_save_lands_in_the_staging_tree_under_the_sessions_title(rel: str, dest: str) -> None:
+    """The top folder and title id are upper-cased, since the image names them that way.
+
+    Args:
+        rel: The member's path below `.import/save/`.
+        dest: Where it lands, below the image's directory.
+    """
+    result = _preflight(_save(rel))
+
+    assert result.refusals == ()
+    assert [str(p.dest) for p in result.placements] == [dest]
+
+
+@pytest.mark.usefixtures("image_dir")
+def test_a_publisher_code_from_romm_names_the_same_title() -> None:
+    """RomM may spell the id as a publisher code; it normalises to the hex the disc carries."""
+    rom = imports.RomRef(1, "Game", "xbox", title_id="MS-100")
+
+    result = _preflight(_save(_META), rom=rom)
+
+    assert result.refusals == ()
+
+
+@pytest.mark.usefixtures("image_dir")
+def test_the_disc_outranks_romm_for_the_sessions_title(tmp_path: Path) -> None:
+    """The id read off the disc is what xemu will run, so RomM's is not consulted when it is present.
+
+    Args:
+        tmp_path: The per-test temporary directory.
+    """
+    disc = _xiso(tmp_path / "g.iso", 0x4D530064)
+    rom = imports.RomRef(1, "Game", "xbox", title_id="DEADBEEF")
+
+    result = _preflight(_save(_META), rom=rom, rom_file=disc)
+
+    assert result.refusals == ()
+    assert [str(p.dest) for p in result.placements] == [f"saves/UDATA/{_TID}/TitleMeta.xbx"]
+
+
+@pytest.mark.usefixtures("image_dir")
+def test_the_disc_is_read_once_however_many_members_there_are(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Each member asks for the session's title, and the shared memo answers all but the first.
+
+    Args:
+        monkeypatch: The pytest monkeypatch fixture.
+        tmp_path: The per-test temporary directory.
+    """
+    disc = _xiso(tmp_path / "g.iso", 0x4D530064)
+    reads: list[Path] = []
+    real = xemu._disc_title_id
+
+    def spy(rom_path: Path) -> Optional[str]:
+        """Count each read of the disc, then answer as the real reader does.
+
+        Args:
+            rom_path: The disc.
+
+        Returns:
+            The real reader's answer.
+        """
+        reads.append(rom_path)
+        return real(rom_path)
+
+    monkeypatch.setattr(xemu, "_disc_title_id", spy)
+    members = {**_save(_META), **_save(f"UDATA/{_TID}/b.dat"), **_save(f"TDATA/{_TID}/c.dat")}
+
+    result = _preflight(members, rom_file=disc)
+
+    assert result.refusals == ()
+    assert reads == [disc]
+
+
+@pytest.mark.usefixtures("image_dir")
+@pytest.mark.parametrize(
+    ("rom", "rom_file"),
+    [(None, None), (imports.RomRef(1, "Game", "xbox", title_id="not an id"), None)],
+    ids=["no rom", "an id that is not one"],
+)
+def test_nothing_is_placed_without_a_session_id(
+    rom: Optional[imports.RomRef], rom_file: Optional[Path]
+) -> None:
+    """A save cannot be filed under a title the session cannot name, so it is refused.
+
+    Args:
+        rom: The activate body's rom.
+        rom_file: The resolved disc image.
+    """
+    result = _preflight(_save(_META), rom=rom, rom_file=rom_file)
+
+    assert [r.reason for r in result.refusals] == ["identity_unknown"]
+    assert result.placements == ()
+
+
+@pytest.mark.usefixtures("image_dir")
+@pytest.mark.parametrize(
+    ("rel", "reason"),
+    [
+        ("UDATA/DEADBEEF/TitleMeta.xbx", "identity_mismatch"),
+        ("TDATA/DEADBEEF/x", "identity_mismatch"),
+        (f"UDATA/{_TID}", "unrecognised_layout"),
+        ("UDATA/notatid/x", "unrecognised_layout"),
+        ("UDATA/x", "unrecognised_layout"),
+        (f"E/UDATA/{_TID}/x", "unrecognised_layout"),
+        (f"Partition1/UDATA/{_TID}/x", "unrecognised_layout"),
+        (f"Harddisk/Partition1/UDATA/{_TID}/x", "unrecognised_layout"),
+        (f"saves/UDATA/{_TID}/x", "unrecognised_layout"),
+        (f"UDATA/{_TID}0/x", "unrecognised_layout"),
+        ("notes.txt", "unrecognised_layout"),
+        ("xbox_hdd.qcow2", "source_incompatible"),
+        ("disk/hdd.img", "source_incompatible"),
+        ("hdd.raw", "source_incompatible"),
+    ],
+    ids=[
+        "another title",
+        "another title in TDATA",
+        "no file under the title",
+        "title is not hex",
+        "no title level",
+        "drive letter",
+        "partition folder",
+        "harddisk and partition",
+        "the staging folder",
+        "nine hex digits",
+        "unrelated file",
+        "qcow2 image",
+        "img image",
+        "raw image",
+    ],
+)
+def test_a_member_xemu_would_not_read_is_refused(rel: str, reason: str) -> None:
+    """Each shape the spec names is refused with its own code, and nothing is placed.
+
+    Args:
+        rel: The member's path below `.import/save/`.
+        reason: The refusal code.
+    """
+    result = _preflight(_save(rel))
+
+    assert [r.reason for r in result.refusals] == [reason]
+    assert result.placements == ()
+
+
+@pytest.mark.usefixtures("image_dir")
+def test_an_image_is_known_by_its_header_when_its_name_says_nothing() -> None:
+    """A disk image renamed to something innocent is still a disk image."""
+    result = _preflight(_save("data.bin", xemu.QCOW2_MAGIC + b"\x00" * 60))
+
+    assert [r.reason for r in result.refusals] == ["source_incompatible"]
+
+
+@pytest.mark.usefixtures("image_dir")
+@pytest.mark.parametrize(
+    ("name", "data"),
+    [("backup.img", b"x"), ("disk.qcow2", b"x"), ("progress.dat", xemu.QCOW2_MAGIC + b"\x00" * 60)],
+    ids=["img suffix", "qcow2 suffix", "qcow2 header"],
+)
+def test_a_well_shaped_member_is_a_save_whatever_its_name_or_header_says(name: str, data: bytes) -> None:
+    """The image tests only explain a member that already failed to match, so they never veto one.
+
+    A save under the title is what the game wrote; its bytes and suffix are
+    the game's business.
+
+    Args:
+        name: The file's name below the title.
+        data: The file's bytes.
+    """
+    result = _preflight(_save(f"UDATA/{_TID}/{name}", data))
+
+    assert result.refusals == ()
+    assert [str(p.dest) for p in result.placements] == [f"saves/UDATA/{_TID}/{name}"]
+
+
+@pytest.mark.usefixtures("image_dir")
+def test_a_name_over_the_fatx_limit_is_refused() -> None:
+    """FATX names a file in 42 bytes at most; a longer one could not be written to the image."""
+    ok = _preflight(_save(f"UDATA/{_TID}/{'a' * xemu.FATX_NAME_LIMIT}"))
+    long = _preflight(_save(f"UDATA/{_TID}/{'a' * (xemu.FATX_NAME_LIMIT + 1)}"))
+
+    assert ok.refusals == ()
+    assert [r.reason for r in long.refusals] == ["unsafe_path"]
+
+
+@pytest.mark.usefixtures("image_dir")
+def test_the_hook_holds_a_name_to_the_specs_limit_not_a_number_of_its_own() -> None:
+    """Preflight refuses a long name first, so only a direct call shows where the hook's limit comes from."""
+    member = _member(f"UDATA/{_TID}/toolong.dat")
+    emu = xemu.Xemu()
+    spec = dataclasses.replace(emu.import_spec(), max_component_bytes=8)
+    ctx = imports.ImportCtx(rom_file=None, rom=_ROMM, memory_card_synced=False, excluded=(), resume_slot=None)
+
+    answer = emu.place_import(member, spec, ctx)
+
+    assert isinstance(answer, imports.ImportRefusal)
+    assert answer.reason == "unsafe_path"
+
+
+@pytest.mark.usefixtures("image_dir")
+def test_two_members_that_differ_only_in_case_are_a_destination_conflict() -> None:
+    """FATX compares names without regard to case, so these are one file to the image."""
+    members = {**_save(f"UDATA/{_TID}/Save.dat"), **_save(f"UDATA/{_TID}/save.dat")}
+
+    result = _preflight(members)
+
+    assert {r.reason for r in result.refusals} == {"destination_conflict"}
+
+
+@pytest.mark.usefixtures("image_dir")
+def test_a_save_beside_the_archives_in_another_case_is_a_destination_conflict() -> None:
+    """The archive already holds this file under another spelling of its name."""
+    result = _preflight(_save(f"UDATA/{_TID}/save.dat"), v1={f"saves/UDATA/{_TID}/Save.dat": b"archived"})
+
+    assert [r.reason for r in result.refusals] == ["destination_conflict"]
+
+
+@pytest.mark.usefixtures("image_dir")
+def test_a_state_or_memory_card_is_not_taken() -> None:
+    """Xemu has no states and no cards, so the kind gate stops them before the hook."""
+    result = _preflight({".import/state/game.sav": b"x", ".import/memcard/card.bin": b"x"})
+
+    assert sorted(r.reason for r in result.refusals) == ["kind_not_accepted", "kind_not_accepted"]
+
+
+def test_an_imported_save_reaches_the_image_and_comes_back_out(emulator: xemu.Xemu, tmp_path: Path) -> None:
+    """The staged file is the one the launch injects and the exit extracts.
+
+    The read-back is from the FATX image by its upper-case path: the image
+    compares names byte for byte, so a destination xemu's own hooks never
+    open would be written and no refusal could catch it.
+
+    Args:
+        emulator: An Xemu on a freshly formatted image.
+        tmp_path: The per-test temporary directory.
+    """
+    disc = _xiso(tmp_path / "g.iso", 0x4D530064)
+    body = import_zip(
+        {
+            f".import/save/udata/{_TID.lower()}/TitleMeta.xbx": b"meta",
+            f".import/save/UDATA/{_TID}/0000000000000001/savedata.dat": b"progress",
+            f".import/save/TDATA/{_TID}/settings.bin": b"tdata",
+        }
+    )
+    result = preflight_import(emulator, body, rom_file=disc, rom=_ROMM)
+    restore_import(emulator, body, result)
+    emulator._title_id = _TID
+
+    assert emulator._inject_saves() == 3
+
+    fs = _fatx(emulator.hdd_image)
+    assert bytes(fs.read(f"/UDATA/{_TID}/TitleMeta.xbx")) == b"meta"
+    assert bytes(fs.read(f"/UDATA/{_TID}/0000000000000001/savedata.dat")) == b"progress"
+    assert bytes(fs.read(f"/TDATA/{_TID}/settings.bin")) == b"tdata"
+    del fs
+    emulator._clear_staging()
+    assert emulator._extract_saves() == 3
+    assert (emulator.staging_dir / f"UDATA/{_TID}/TitleMeta.xbx").read_bytes() == b"meta"
+
+
+@pytest.mark.usefixtures("image_dir")
+def test_xemu_declares_a_save_kind_with_fatx_limits() -> None:
+    """The spec names the save kind alone, with FATX's name limit and case-insensitive destinations."""
+    spec = xemu.Xemu().import_spec()
+
+    assert [k.kind for k in spec.kinds] == ["save"]
+    assert spec.state_channel == "none"
+    assert spec.protected == ()
+    assert spec.max_component_bytes == 42
+    assert spec.case_insensitive_dest is True
+
+
+@pytest.mark.usefixtures("image_dir")
+def test_xemus_session_id_is_the_discs_then_romms_xbox_id() -> None:
+    """The disc's certificate is read first, and RomM's id is read as an Xbox one."""
+    source = xemu.Xemu().identity_source()
+
+    assert source == imports.IdentitySource("hex8", rom_reader=xemu._disc_title_id, romm_family="xbox")

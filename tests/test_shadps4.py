@@ -1,5 +1,6 @@
 """shadPS4 ROM resolution, binary version selection, launch, and IPC-driven stop."""
 
+import fnmatch
 import json
 import os
 import subprocess
@@ -12,8 +13,10 @@ from typing import NoReturn, Optional
 
 import pytest
 
-from webstation_broker import settings
+from webstation_broker import imports, saves, settings
 from webstation_broker.emulators import base, shadps4
+
+from .conftest import import_zip, preflight_import, restore_import
 
 
 @pytest.fixture(autouse=True)
@@ -923,7 +926,7 @@ def test_ipc_send_returns_false_when_there_is_no_stdin() -> None:
     assert emu._ipc_send("RUN") is False
 
 
-# ── shutdown verdict and unmounted saves ───────────────────────────────
+# -- shutdown verdict and unmounted saves --
 
 
 @pytest.fixture
@@ -1122,7 +1125,7 @@ def test_unmounted_saves_is_empty_without_a_savedata_tree(tmp_path: Path) -> Non
     assert shadps4._unmounted_saves(tmp_path / "nope") == []
 
 
-# ── clearing stale save data at activate ───────────────────────────────
+# -- clearing stale save data at activate --
 
 
 def test_shadps4_declares_that_it_clears_stale_saves() -> None:
@@ -1231,7 +1234,7 @@ def test_clearing_the_working_slot_is_a_noop_without_a_savedata_tree(
     assert not (tmp_path / "shadPS4").exists()
 
 
-# ── pkg extraction / extraction cache ──────────────────────────────────
+# -- pkg extraction / extraction cache --
 
 
 def _touch(path: Path, mtime: Optional[float] = None) -> Path:
@@ -1922,7 +1925,7 @@ def test_extract_and_cache_pkg_serializes_a_second_call_racing_the_same_pkg(
     second.join(timeout=5)
 
 
-# ── archive extraction (zip/7z/rar) feeding pkg_extractor ──────────────
+# -- archive extraction (zip/7z/rar) feeding pkg_extractor --
 
 
 def _make_zip(path: Path, members: dict) -> Path:
@@ -2265,7 +2268,7 @@ def test_the_cache_is_disabled_by_default(monkeypatch: pytest.MonkeyPatch) -> No
     assert shadps4._truthy(os.environ.get("SHADPS4_CACHE_ENABLED", "false")) is False
 
 
-# ── archive listings must fail closed ──────────────────────────────────
+# -- archive listings must fail closed --
 
 
 def test_rar_member_paths_raises_when_the_listing_names_nothing(
@@ -2380,7 +2383,7 @@ def test_extract_archive_discards_a_tree_that_escaped_dest(
     assert outside.exists()
 
 
-# ── cache lock and expansion accounting ────────────────────────────────
+# -- cache lock and expansion accounting --
 
 
 def test_the_cache_lock_gives_up_rather_than_parking_a_request(
@@ -2448,3 +2451,290 @@ def test_an_extraction_past_the_whole_cache_cap_is_refused(
         shadps4._check_expansion(
             actual_bytes=2 * shadps4._GB, reserved_bytes=shadps4._GB // 2, rom_name="Game.pkg"
         )
+
+
+# -- declared imports --
+
+_SAVE = "home/1000/savedata/CUSA12345/SAVE00"
+"""Where the placement tests' save lands, relative to the data directory."""
+
+
+def _preflight(members: dict[str, bytes], v1: Optional[dict[str, bytes]] = None) -> imports.PreflightResult:
+    """Preflight an archive of import members against shadPS4.
+
+    Args:
+        members: `.import/<kind>/...` names mapped to bytes.
+        v1: Ordinary archive members to carry beside them, or None.
+
+    Returns:
+        What preflight decided.
+    """
+    return preflight_import(shadps4.Shadps4(), import_zip(members, v1), rom_file=None)
+
+
+def _save(rel: str, data: bytes = b"x") -> dict[str, bytes]:
+    """One save member's archive, named by its path below `.import/save/`.
+
+    Args:
+        rel: The path below `.import/save/`.
+        data: The member's bytes.
+
+    Returns:
+        The members mapping `_preflight` takes.
+    """
+    return {f".import/save/{rel}": data}
+
+
+@pytest.mark.usefixtures("savedata_root")
+@pytest.mark.parametrize(
+    ("rel", "dest"),
+    [
+        ("CUSA12345/SAVE00/data.bin", f"{_SAVE}/data.bin"),
+        ("cusa12345/SAVE00/data.bin", f"{_SAVE}/data.bin"),
+        ("savedata/CUSA12345/SAVE00/data.bin", f"{_SAVE}/data.bin"),
+        ("home/1000/savedata/CUSA12345/SAVE00/data.bin", f"{_SAVE}/data.bin"),
+        ("home/1001/savedata/CUSA12345/SAVE00/data.bin", f"{_SAVE}/data.bin"),
+        ("home/7/savedata/CUSA12345/SAVE00/data.bin", f"{_SAVE}/data.bin"),
+        ("CUSA12345/SAVE00/sce_sys/param.sfo", f"{_SAVE}/sce_sys/param.sfo"),
+        ("CUSA12345/SAVE00/a/b/c.bin", f"{_SAVE}/a/b/c.bin"),
+        ("PPSA01234/SAVE01/data.bin", "home/1000/savedata/PPSA01234/SAVE01/data.bin"),
+    ],
+    ids=[
+        "bare",
+        "lower-case serial",
+        "savedata wrapper",
+        "user 1000",
+        "another user is re-rooted",
+        "one-digit user",
+        "sce_sys metadata",
+        "nested",
+        "PS5 style serial",
+    ],
+)
+def test_a_save_lands_under_the_default_user(rel: str, dest: str) -> None:
+    """Each accepted wrapper resolves to `home/1000/savedata/<SERIAL>/<save dir>/<tail>`.
+
+    Args:
+        rel: The member's path below `.import/save/`.
+        dest: Where it lands, below the data directory.
+    """
+    result = _preflight(_save(rel))
+
+    assert result.refusals == ()
+    assert [str(p.dest) for p in result.placements] == [dest]
+
+
+@pytest.mark.usefixtures("savedata_root")
+def test_a_save_dirs_case_is_kept() -> None:
+    """Only the serial is upper-cased; the filesystem tells `SAVE00` from `save00`."""
+    result = _preflight({**_save("CUSA12345/SAVE00/d.bin"), **_save("CUSA12345/save00/d.bin")})
+
+    assert result.refusals == ()
+    assert len(result.placements) == 2
+
+
+@pytest.mark.usefixtures("savedata_root")
+@pytest.mark.parametrize(
+    ("rel", "reason"),
+    [
+        ("SAVE00/data.bin", "identity_unknown"),
+        ("savedata/SAVE00/data.bin", "identity_unknown"),
+        ("home/1000/savedata/SAVE00/sce_sys/param.sfo", "identity_unknown"),
+        ("CUSA1234/SAVE00/data.bin", "identity_unknown"),
+        ("CUSA123456/SAVE00/data.bin", "identity_unknown"),
+        ("savedata/savedata/CUSA12345/SAVE00/d", "identity_unknown"),
+        ("home/1000/savedata/savedata/CUSA12345/SAVE00/d", "identity_unknown"),
+        ("savedata/home/1000/savedata/CUSA12345/SAVE00/d", "identity_unknown"),
+        ("CUSA12345/SAVE00", "unrecognised_layout"),
+        ("CUSA12345", "unrecognised_layout"),
+        ("data.bin", "unrecognised_layout"),
+        ("savedata/data.bin", "unrecognised_layout"),
+        ("home/1000/savedata/data.bin", "unrecognised_layout"),
+        ("home/1000/savedata", "unrecognised_layout"),
+        ("config.json", "unrecognised_layout"),
+        ("extracted/CUSA12345/eboot.bin", "unrecognised_layout"),
+        ("sys_modules/libc.prx", "unrecognised_layout"),
+        ("home/1000/trophy/CUSA12345/a/b", "unrecognised_layout"),
+        ("home/abc/savedata/CUSA12345/SAVE00/data.bin", "unrecognised_layout"),
+        ("CUSA12345/SAVE00/sce_sys/corrupted", "protected_destination"),
+        ("home/1000/savedata/CUSA12345/SAVE00/sce_sys/corrupted", "protected_destination"),
+        ("game.srm", "source_incompatible"),
+        ("GAME.SRM", "source_incompatible"),
+    ],
+    ids=[
+        "no serial",
+        "no serial under savedata",
+        "no serial under the full wrapper",
+        "serial one digit short",
+        "serial one digit long",
+        "a repeated savedata wrapper",
+        "savedata inside the full wrapper",
+        "the full wrapper inside savedata",
+        "no file below the save dir",
+        "serial alone",
+        "loose file",
+        "loose file under savedata",
+        "loose file under the full wrapper",
+        "the wrapper alone",
+        "config",
+        "extracted game",
+        "system modules",
+        "another home folder",
+        "non-numeric user",
+        "mount marker",
+        "mount marker under the full wrapper",
+        "flat srm",
+        "flat upper-case SRM",
+    ],
+)
+def test_a_member_shadps4_would_not_read_is_refused(rel: str, reason: str) -> None:
+    """Each shape the spec names is refused with its own code, and nothing is placed.
+
+    Args:
+        rel: The member's path below `.import/save/`.
+        reason: The refusal code.
+    """
+    result = _preflight(_save(rel))
+
+    assert [r.reason for r in result.refusals] == [reason]
+    assert result.placements == ()
+
+
+@pytest.mark.usefixtures("savedata_root")
+def test_a_non_numeric_user_folder_is_named_rather_than_the_whole_tree() -> None:
+    """A `home/<name>/savedata` tree is the right tree with a bad user, and the detail says so."""
+    result = _preflight(_save("home/abc/savedata/CUSA12345/SAVE00/data.bin"))
+
+    assert "user folder" in (result.refusals[0].detail or "")
+
+
+@pytest.mark.usefixtures("savedata_root")
+def test_a_flat_srm_names_the_retroarch_save_it_is() -> None:
+    """A loose `.srm` is refused as another emulator's save, not as a misplaced one."""
+    result = _preflight(_save("game.srm"))
+
+    assert "RetroArch" in (result.refusals[0].detail or "")
+
+
+@pytest.mark.usefixtures("savedata_root")
+def test_a_well_shaped_member_is_not_taken_for_a_srm_by_its_name() -> None:
+    """The `.srm` check reads a loose file only: a file in a save folder keeps its name."""
+    result = _preflight(_save("CUSA12345/SAVE00/game.srm"))
+
+    assert result.refusals == ()
+    assert [str(p.dest) for p in result.placements] == [f"{_SAVE}/game.srm"]
+
+
+@pytest.mark.usefixtures("savedata_root")
+def test_a_name_over_the_filesystems_limit_is_refused() -> None:
+    """A component of 256 bytes cannot be created, so preflight says so rather than the restore."""
+    result = _preflight(_save(f"CUSA12345/SAVE00/{'a' * 256}"))
+
+    assert [r.reason for r in result.refusals] == ["unsafe_path"]
+
+
+@pytest.mark.usefixtures("savedata_root")
+@pytest.mark.parametrize(
+    "names",
+    [
+        ("home/1000/savedata/CUSA12345/SAVE00/d.bin", "home/1001/savedata/CUSA12345/SAVE00/d.bin"),
+        ("CUSA12345/SAVE00/d.bin", "cusa12345/SAVE00/d.bin"),
+        ("CUSA12345/SAVE00/d.bin", "savedata/CUSA12345/SAVE00/d.bin"),
+    ],
+    ids=["two users", "two spellings of the serial", "with and without the wrapper"],
+)
+def test_two_members_for_one_destination_are_a_destination_conflict(names: tuple[str, str]) -> None:
+    """The user is re-rooted and the serial upper-cased, so these spellings name one file.
+
+    Args:
+        names: Two members' paths below `.import/save/`.
+    """
+    result = _preflight({**_save(names[0], b"one"), **_save(names[1], b"two")})
+
+    assert {r.reason for r in result.refusals} == {"destination_conflict"}
+
+
+@pytest.mark.usefixtures("savedata_root")
+def test_a_save_beside_one_the_archive_holds_is_a_destination_conflict() -> None:
+    """A merge mode is the later fix; until then the import does not overwrite the archive's copy."""
+    result = _preflight(_save("CUSA12345/SAVE00/data.bin"), v1={f"{_SAVE}/data.bin": b"archived"})
+
+    assert [r.reason for r in result.refusals] == ["destination_conflict"]
+
+
+@pytest.mark.usefixtures("savedata_root")
+def test_a_state_or_memory_card_is_not_taken() -> None:
+    """shadPS4 has no states and no cards, so the kind gate stops them before the hook."""
+    result = _preflight({".import/state/x.sav": b"x", ".import/memcard/x.bin": b"x"})
+
+    assert sorted(r.reason for r in result.refusals) == ["kind_not_accepted", "kind_not_accepted"]
+
+
+def test_an_imported_save_is_dumped_and_cleared_like_one_the_game_wrote(savedata_root: Path) -> None:
+    """The placed files are the ones the exit dump ships and the next activate clears.
+
+    The files are aged past the dump's baseline first, so only `always_include` can carry them:
+    without it the dump omits them, and with it (the production call) it ships them.
+
+    Args:
+        savedata_root: The patched savedata subtree.
+    """
+    emu = shadps4.Shadps4()
+    body = import_zip(
+        {
+            ".import/save/home/1001/savedata/cusa12345/SAVE00/data.bin": b"progress",
+            ".import/save/home/1001/savedata/cusa12345/SAVE00/sce_sys/param.sfo": b"sfo",
+        }
+    )
+    result = preflight_import(emu, body, rom_file=None)
+    restore_import(emu, body, result)
+
+    assert (savedata_root / "CUSA12345/SAVE00/data.bin").read_bytes() == b"progress"
+    assert (savedata_root / "CUSA12345/SAVE00/sce_sys/param.sfo").read_bytes() == b"sfo"
+    baseline = time.time()
+    long_ago = baseline - 24 * 3600
+    for placed in (savedata_root / "CUSA12345/SAVE00").rglob("*"):
+        if placed.is_file():
+            os.utime(placed, (long_ago, long_ago))
+    always = frozenset(str(p.dest) for p in result.placements)
+
+    unforced = saves.build_save_archive(emu.save_root, emu.save_subtrees, baseline)
+    forced = saves.build_save_archive(emu.save_root, emu.save_subtrees, baseline, always_include=always)
+
+    assert unforced["files"] == []
+    assert sorted(f["path"] for f in forced["files"]) == [
+        f"{_SAVE}/data.bin",
+        f"{_SAVE}/sce_sys/param.sfo",
+    ]
+    emu.clear_working_slot()
+    assert list(savedata_root.iterdir()) == []
+
+
+def test_shadps4_declares_a_save_kind_and_protects_the_mount_marker() -> None:
+    """The spec names the save kind alone, and the `corrupted` marker as a protected destination."""
+    spec = shadps4.Shadps4().import_spec()
+
+    assert [k.kind for k in spec.kinds] == ["save"]
+    assert spec.state_channel == "none"
+    assert spec.protected == ("*/sce_sys/corrupted",)
+    assert spec.case_insensitive_dest is False
+
+
+def test_the_protected_glob_matches_the_marker_shadps4_writes(savedata_root: Path) -> None:
+    """The glob is the marker `_mounted_save` builds, the file the unmounted-save scan looks for.
+
+    Args:
+        savedata_root: The patched savedata subtree.
+    """
+    emu = shadps4.Shadps4()
+    marker = _mounted_save(savedata_root, "CUSA00001") / "sce_sys" / "corrupted"
+
+    rel = marker.relative_to(emu.save_root).as_posix()
+
+    assert fnmatch.fnmatchcase(rel, emu.import_spec().protected[0])
+    assert shadps4._unmounted_saves(savedata_root) == [marker.parent.parent]
+
+
+def test_shadps4_has_no_session_id() -> None:
+    """The serial is in the path of every save, so identity is `none` and nothing is read."""
+    assert shadps4.Shadps4().identity_source() is None

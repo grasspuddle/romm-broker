@@ -19,9 +19,21 @@ from typing import Optional
 import pytest
 
 from webstation_broker import emulators, imports, saves
-from webstation_broker.emulators import base, retroarch
+from webstation_broker.emulators import base, retroarch, xemu, xenia
 
 from .conftest import DETACHED_CMD, SLEEPER_CMD, await_cmdline, await_gone, import_zip, preflight_import
+
+
+@pytest.fixture(autouse=True)
+def _xemu_off_config(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Keep the registry's xemu instance off /config, which tests never touch.
+
+    Args:
+        monkeypatch: Pytest's attribute patcher.
+        tmp_path: The per-test temporary directory.
+    """
+    monkeypatch.setattr(xemu, "XEMU_TOML", tmp_path / "xemu.toml")
+    monkeypatch.setattr(xemu, "FALLBACK_HDD_IMAGE", tmp_path / "xemu" / "xbox_hdd.qcow2")
 
 
 def test_an_unknown_name_resolves_to_nothing() -> None:
@@ -647,7 +659,22 @@ def test_the_launch_env_points_at_the_labwc_session(monkeypatch: pytest.MonkeyPa
     assert env["DISPLAY"] == ":0"
 
 
-_IMPORTING: frozenset[str] = frozenset({"dolphin", "duckstation", "flycast", "pcsx2", "ppsspp", "retroarch"})
+_IMPORTING: frozenset[str] = frozenset(
+    {
+        "azahar",
+        "cemu",
+        "dolphin",
+        "duckstation",
+        "eden",
+        "flycast",
+        "pcsx2",
+        "ppsspp",
+        "retroarch",
+        "shadps4",
+        "xemu",
+        "xenia",
+    }
+)
 """The emulators that accept declared imports; every other one inherits the refusing base hooks."""
 
 
@@ -912,22 +939,39 @@ def test_a_flat_card_is_an_ordinary_save(name: str) -> None:
 
 
 _EXAMPLE_PLATFORM: dict[str, str] = {
+    "azahar": "3ds",
+    "cemu": "wiiu",
     "dolphin": "ngc",
     "duckstation": "psx",
+    "eden": "switch",
     "flycast": "dc",
     "pcsx2": "ps2",
     "ppsspp": "psp",
     "retroarch": "gb",
+    "shadps4": "ps4",
+    "xemu": "xbox",
+    "xenia": "xbox360",
 }
 """The platform each importing emulator's examples below are placed on."""
 
+_AZAHAR_SAVE = (
+    f".import/save/sdmc/Nintendo 3DS/{'0' * 32}/{'0' * 32}/title/00040000/00033500/data/00000001.sav"
+)
+"""A title save on an SD card, in Azahar's own layout."""
+
+_EDEN_DEVICE_SAVE = f".import/save/nand/user/save/{'0' * 16}/{'0' * 32}/0100000000010000/save.bin"
+"""A device save unit's file, the one Eden shape that needs no profile store beside it."""
+
 _EXAMPLES: list[tuple[str, str, bytes]] = [
+    ("azahar", _AZAHAR_SAVE, b"progress"),
+    ("cemu", ".import/save/usr/save/00050000/1010EC00/user/80000001/slot0.dat", b"save"),
     ("dolphin", ".import/save/USA/Card A/01-GZLE-zelda.gci", b"GZLE01" + bytes(0x40 - 6 + 0x2000)),
     ("dolphin", ".import/memcard/USA/Card A/01-GZLE-zelda.gci", b"GZLE01" + bytes(0x40 - 6 + 0x2000)),
     ("dolphin", ".import/state/GZLE01.s01", b"GZLE01" + b"progress"),
     ("duckstation", ".import/save/card.mcd", bytes(131072)),
     ("duckstation", ".import/memcard/card.mcr", bytes(131072)),
     ("duckstation", ".import/state/SLUS-00594_resume.sav", b"progress"),
+    ("eden", _EDEN_DEVICE_SAVE, b"save"),
     ("flycast", ".import/save/vmu_save_B2.bin", bytes(131072)),
     ("flycast", ".import/save/dc_nvmem.bin", b"flash"),
     ("flycast", ".import/memcard/card.bin", bytes(131072)),
@@ -937,8 +981,35 @@ _EXAMPLES: list[tuple[str, str, bytes]] = [
     ("ppsspp", ".import/save/ULUS10041DATA00/PARAM.SFO", b"sfo"),
     ("ppsspp", ".import/state/ULUS10041_1.00_1.ppst", b"progress"),
     ("retroarch", ".import/save/Game.srm", b"sram"),
+    ("shadps4", ".import/save/CUSA12345/SAVE00/data.bin", b"progress"),
+    ("xemu", ".import/save/UDATA/4D530064/TitleMeta.xbx", b"meta"),
+    ("xenia", ".import/save/content/E0FFFFFFFFFFFFFF/4D5307E6/00000001/SAVEGAME/savedata.bin", b"save"),
+    ("xenia", ".import/save/content/E0FFFFFFFFFFFFFF/4D5307E6/Headers/00000001/SAVEGAME", b"header"),
 ]
 """One member each importing emulator accepts, for every kind it accepts on its example platform."""
+
+
+def _seed_xenia(emu: base.Emulator) -> None:
+    """Sign a profile into the emulator's patched storage root, as the desktop launcher does.
+
+    Args:
+        emu: The Xenia instance whose `save_root` the test patched.
+    """
+    emu.save_root.mkdir(parents=True, exist_ok=True)
+    (emu.save_root / xenia.CONFIG_NAME).write_text('logged_profile_slot_0_xuid = "E000123456789ABC"\n')
+
+
+_EXAMPLE_ROM: dict[str, imports.RomRef] = {
+    "azahar": imports.RomRef(1, "Game", "3ds", title_id="0004000000033500", save_target="00040000/00033500"),
+    "cemu": imports.RomRef(1, "Game", "wiiu", title_id="1010EC00"),
+    "eden": imports.RomRef(1, "Game", "switch", title_id="0100000000010000"),
+    "xemu": imports.RomRef(1, "Game", "xbox", title_id="4D530064"),
+    "xenia": imports.RomRef(1, "Game", "xbox360", title_id="4D5307E6"),
+}
+"""The rom RomM would name for an emulator's examples, where the emulator needs a session id."""
+
+_EXAMPLE_SEED: dict[str, Callable[[base.Emulator], None]] = {"xenia": _seed_xenia}
+"""What an emulator's hook reads before launch, written into the emulator's patched `save_root`."""
 
 
 def test_every_accepted_kind_has_an_example() -> None:
@@ -967,7 +1038,8 @@ def test_an_accepted_member_lands_inside_the_save_tree(
     `check_plan` holds a member's own destination to the save tree, but not
     its sidecars. A sidecar written outside the tree is never shipped by the
     exit dump, so it is lost with the session, and never cleared, so it
-    outlives it.
+    outlives it. An emulator that needs a session id or a config file gets them from `_EXAMPLE_ROM`
+    and `_EXAMPLE_SEED`.
 
     Args:
         monkeypatch: Pytest's attribute patcher.
@@ -978,10 +1050,19 @@ def test_an_accepted_member_lands_inside_the_save_tree(
     """
     emu = _on(name, _EXAMPLE_PLATFORM[name])
     monkeypatch.setattr(emu, "save_root", tmp_path / "data")
+    seed = _EXAMPLE_SEED.get(name)
+    if seed is not None:
+        seed(emu)
     rom = tmp_path / "Game.bin"
     rom.write_bytes(b"rom")
 
-    result = preflight_import(emu, import_zip({member: data}), rom_file=rom, resume_slot=emu.state_slot)
+    result = preflight_import(
+        emu,
+        import_zip({member: data}),
+        rom_file=rom,
+        resume_slot=emu.state_slot,
+        rom=_EXAMPLE_ROM.get(name),
+    )
 
     assert result.refusals == ()
     assert [p.member.name for p in result.placements] == [member]

@@ -10,6 +10,10 @@ a minimal config is seeded before every launch. Cemu creates the default
 account (0x80000001) itself on first boot, so save paths line up across
 containers without the account store traveling.
 
+Declared imports (`import_spec`, `place_import`) place a title's save tree
+under that account: a donor console's persistent id is rewritten to
+`DEFAULT_PERSISTENT_ID`. See docs/content/docs/api/imports.mdx for the shapes.
+
 Cemu applies its built-in controller mapping only through the GUI, so the
 broker seeds a Wii U GamePad profile for player 0 bound to the selkies
 virtual pad. Cemu addresses SDL controllers by joystick GUID, and SDL >= 2.24
@@ -24,8 +28,9 @@ import time
 import xml.etree.ElementTree as ET
 from collections.abc import Iterable
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, NamedTuple, Optional, Union
 
+from .. import imports
 from .base import Emulator, base_launch_env, xdg_config_dir, xdg_data_dir
 
 log = logging.getLogger(__name__)
@@ -75,6 +80,35 @@ _HEX8_RE = re.compile(r"^[0-9a-fA-F]{8}$")
 Title save dirs are `usr/save/<titleHigh>/<titleLow>`; `system` holds the
 account store and play stats.
 """
+DEFAULT_PERSISTENT_ID = "80000001"
+"""The account id Cemu creates for itself on first boot, and the one an imported save is placed under.
+
+A Wii U keeps each player's save under `user/<persistent id>`, and the id is
+per console. Cemu here has one account, so a donor's id is rewritten to it.
+"""
+_TITLE_HIGH = "00050000"
+"""The title id high half of an eShop or disc title, the only kind that keeps a player's save."""
+_SAVE_WRAPPERS = (("mlc01", "usr", "save"), ("storage_mlc", "usr", "save"), ("usr", "save"), ("save",))
+"""Folders an archive may wrap the save tree in, longest first.
+
+Deliberately no `()`: a member with no wrapper is either the anchorless
+`user/...` shape, which `_split` reads next, or not a Cemu save at all.
+"""
+_SAVE_SUBTREE = "usr/save"
+"""The title save tree, relative to the MLC root; the same as `Cemu.save_subtrees`."""
+_PROTECTED = ("usr/save/system/*",)
+"""The account store. The hook refuses it first; the glob backstops a destination it would miss."""
+_EXPECTED = (
+    "usr/save/00050000/<title low>/user/<persistent id>/..., "
+    "or user/<persistent id>/... for the session's game"
+)
+"""The shape an import member is asked to take, for refusals."""
+_HEX8_LEVEL = re.compile(r"[0-9A-Fa-f]{8}", re.ASCII)
+"""One half of a title id, as a folder name."""
+_HEX16_LEVEL = re.compile(r"[0-9A-Fa-f]{16}", re.ASCII)
+"""A whole title id in one folder name, the way Saviine dumps it."""
+_PERSISTENT_ID_RE = re.compile(r"8[0-9A-Fa-f]{7}", re.ASCII)
+"""An account's persistent id. Cemu and the Wii U only issue ids with the top bit set."""
 
 _SETTINGS_PATCHES: dict[str, str] = {
     "check_update": "false",
@@ -252,6 +286,179 @@ def _is_account_store(entry: Path) -> bool:
     return not _HEX8_RE.match(entry.name)
 
 
+class _Split(NamedTuple):
+    """An import member's path, cut into the title's id halves and what sits below them.
+
+    Attributes:
+        high: The high half as the member spells it, or None for an anchorless member.
+        low: The low half as the member spells it, or None for an anchorless member.
+        tail: The components below the title's folder, `user/<id>/...` or `meta/...`.
+    """
+
+    high: Optional[str]
+    low: Optional[str]
+    tail: tuple[str, ...]
+
+    @property
+    def persistent_id(self) -> Optional[str]:
+        """The donor's account id in upper case, or None when the path names no account.
+
+        Returns:
+            The id under `user/`, or None for `user/common`, `meta` and the rest.
+        """
+        if len(self.tail) >= 2 and self.tail[0] == "user" and _PERSISTENT_ID_RE.fullmatch(self.tail[1]):
+            return self.tail[1].upper()
+        return None
+
+
+def _refuse(member: imports.ImportMember, reason: str, detail: str) -> imports.ImportRefusal:
+    """Refuse a member with the Cemu shape in the message.
+
+    Args:
+        member: The member.
+        reason: The refusal code.
+        detail: What is wrong with this member.
+
+    Returns:
+        The refusal.
+    """
+    return imports.ImportRefusal(reason, member.name, _EXPECTED, detail=detail)
+
+
+def _user_problem(tail: tuple[str, ...]) -> Optional[str]:
+    """Say why a path below a title's folder cannot be a file Cemu reads under `user/`.
+
+    Cemu opens `user/common/<file>` and `user/<persistent id>/<file>` only, so
+    anything else there would be written and never found.
+
+    Args:
+        tail: The components below the title's folder.
+
+    Returns:
+        What is wrong, or None when the path is not under `user/` or is well shaped.
+    """
+    if tail[0] != "user":
+        return None
+    if len(tail) < 3:
+        return "no file under an account folder"
+    if tail[1] != "common" and not _PERSISTENT_ID_RE.fullmatch(tail[1]):
+        return "not an account id a Wii U issues"
+    return None
+
+
+def _split(member: imports.ImportMember) -> Union[_Split, imports.ImportRefusal]:
+    """Read a member's path as a Cemu save: a wrapped title folder, or the anchorless `user/...` shape.
+
+    The system tree (`usr/save/system`) and any first level that is not a
+    title id are refused here, not left to the protected glob: a name like
+    `usr/save/notes` matches no glob and would otherwise be written into the
+    save tree. A title whose high half is not `00050000` (demos, updates, DLC)
+    holds no player's save.
+
+    Args:
+        member: The member.
+
+    Returns:
+        The split path, or a refusal.
+    """
+    found = imports.match_anchored(member.parts, wrappers=_SAVE_WRAPPERS, levels=())
+    if found is None:
+        if member.parts[0] != "user":
+            return _refuse(member, "unrecognised_layout", "not a file in a title's save folder")
+        problem = _user_problem(member.parts)
+        if problem is not None:
+            return _refuse(member, "unrecognised_layout", problem)
+        return _Split(None, None, member.parts)
+    rest = found.tail
+    if len(rest) < 2:
+        return _refuse(member, "unrecognised_layout", "a loose file in the save tree")
+    if _HEX16_LEVEL.fullmatch(rest[0]):
+        high, low, tail = rest[0][:8], rest[0][8:], rest[1:]
+    elif _HEX8_LEVEL.fullmatch(rest[0]):
+        if len(rest) < 3 or not _HEX8_LEVEL.fullmatch(rest[1]):
+            return _refuse(member, "unrecognised_layout", "no file under a title folder")
+        high, low, tail = rest[0], rest[1], rest[2:]
+    else:
+        return _refuse(
+            member,
+            "protected_destination",
+            "not a title's folder; the account store and play stats are Cemu's own",
+        )
+    if high.upper() != _TITLE_HIGH:
+        return _refuse(
+            member, "unrecognised_layout", "only titles with high half 00050000 keep a player's save"
+        )
+    problem = _user_problem(tail)
+    if problem is not None:
+        return _refuse(member, "unrecognised_layout", problem)
+    return _Split(high, low, tail)
+
+
+def _donor_persistent_ids(ctx: imports.ImportCtx) -> frozenset[str]:
+    """Collect the account ids the archive's saves were taken under.
+
+    Args:
+        ctx: The launch context; its `memo` holds the answer for the other members.
+
+    Returns:
+        Every distinct persistent id across the save members.
+    """
+    key = "cemu-persistent-ids"
+    cached = ctx.memo.get(key)
+    if isinstance(cached, frozenset):
+        return cached
+    found: set[str] = set()
+    for other in ctx.members:
+        split = _split(other) if other.kind == "save" else None
+        if isinstance(split, _Split) and split.persistent_id is not None:
+            found.add(split.persistent_id)
+    ctx.memo[key] = frozen = frozenset(found)
+    return frozen
+
+
+def _place_split(
+    member: imports.ImportMember, split: _Split, session: imports.SessionIdentity
+) -> Union[imports.Placement, imports.ImportRefusal]:
+    """Place a split path under the session's title on the account Cemu created.
+
+    A path that names its title is held strictly to the session's game; one
+    that does not takes the session's title, and so needs one.
+
+    Args:
+        member: The member.
+        split: Its path, cut by `_split`.
+        session: The session's identity.
+
+    Returns:
+        The placement, or a refusal.
+    """
+    anchored = split.low is not None
+    refusal = imports.check_member_identity(
+        member,
+        imports.NORMALISERS["hex8"](split.low) if split.low is not None else None,
+        session,
+        family="hex8",
+        policy="strict" if anchored else "required",
+        expected=_EXPECTED,
+        keyed=anchored,
+    )
+    if refusal is not None:
+        return refusal
+    low = split.low if split.low is not None else session.value
+    if low is None:
+        return imports.ImportRefusal("identity_unknown", member.name, _EXPECTED)
+    tail = split.tail
+    if split.persistent_id is not None:
+        tail = (tail[0], DEFAULT_PERSISTENT_ID, *tail[2:])
+    # Cemu formats the title folders in lower case.
+    dest = imports.build_dest(
+        _SAVE_SUBTREE, (_TITLE_HIGH, low.lower()), tail, member=member, expected=_EXPECTED
+    )
+    if isinstance(dest, imports.ImportRefusal):
+        return dest
+    return imports.Placement(member, dest)
+
+
 def _patch_settings() -> None:
     """Force broker-required settings.xml values before every launch.
 
@@ -426,6 +633,58 @@ class Cemu(Emulator):
     def prepare_restore(self) -> None:
         """Stop a running Cemu so the archive can be extracted under it."""
         self.stop()
+
+    def import_spec(self) -> imports.ImportSpec:
+        """Declare what Cemu takes: title save trees, and nothing else.
+
+        Cemu has no states and no cards, so the save kind is the only one.
+
+        Returns:
+            The spec.
+        """
+        shapes = (
+            "usr/save/00050000/<title low>/<tail>",
+            "user/<persistent id>/<tail>",
+        )
+        return imports.ImportSpec(kinds=(imports.KindSpec("save", shapes),), protected=_PROTECTED)
+
+    def place_import(
+        self, member: imports.ImportMember, spec: imports.ImportSpec, ctx: imports.ImportCtx
+    ) -> Union[imports.Placement, imports.ImportRefusal]:
+        """Place one declared save file under the session's title.
+
+        More than one donor account in the archive is refused, for every file
+        that names one: they would all land on Cemu's single account.
+
+        Args:
+            member: The member, already past the kind gate.
+            spec: This emulator's spec.
+            ctx: The launch context.
+
+        Returns:
+            The placement, or a refusal.
+        """
+        split = _split(member)
+        if isinstance(split, imports.ImportRefusal):
+            return split
+        if split.persistent_id is not None and len(_donor_persistent_ids(ctx)) > 1:
+            return _refuse(
+                member,
+                "destination_conflict",
+                "the archive holds saves for more than one account; Cemu has one here",
+            )
+        return _place_split(member, split, imports.identity_for(self, ctx))
+
+    def identity_source(self) -> Optional[imports.IdentitySource]:
+        """Take the session's game from RomM's title id, read as the Wii U low half.
+
+        Cemu boots titles by file, not by a path that names an id, so there is
+        no rom reader.
+
+        Returns:
+            A `hex8` source with no reader.
+        """
+        return imports.IdentitySource("hex8")
 
     def resolve_rom_file(self, path: Path) -> Optional[Path]:
         """The file Cemu should boot for `path`.

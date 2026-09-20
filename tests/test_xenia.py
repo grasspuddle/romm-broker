@@ -10,8 +10,10 @@ from typing import Any, Iterator, NoReturn, Optional
 
 import pytest
 
-from webstation_broker import saves
+from webstation_broker import imports, saves
 from webstation_broker.emulators import xenia
+
+from .conftest import import_zip, preflight_import, restore_import
 
 
 @pytest.fixture
@@ -40,7 +42,7 @@ def _touch(path: Path) -> Path:
     return path
 
 
-# ── ROM resolution ───────────────────────────────────────────────────────────
+# -- ROM resolution --
 
 
 def test_resolve_takes_a_file_as_given(rom_root: Path) -> None:
@@ -221,7 +223,7 @@ def test_resolve_prefers_an_executable_or_disc_over_a_container(rom_root: Path) 
     assert xenia.Xenia().resolve_rom_file(game) == iso
 
 
-# ── Launch ───────────────────────────────────────────────────────────────────
+# -- Launch --
 
 
 def _spawned(monkeypatch: pytest.MonkeyPatch, rom: Path, resume_slot: Optional[int] = None) -> list[str]:
@@ -322,7 +324,7 @@ def test_launch_records_the_session_baseline(
     assert before <= emu._session_start <= time.time()
 
 
-# ── Exit restamp ─────────────────────────────────────────────────────────────
+# -- Exit restamp --
 
 _XUID = "0000000000000000"
 _TITLE = "58410824"
@@ -488,7 +490,7 @@ def test_exit_reports_no_state(data_dir: Path) -> None:
     }
 
 
-# ── Stale save data ──────────────────────────────────────────────────────────
+# -- Stale save data --
 
 
 def test_clearing_the_working_slot_drops_the_last_players_save(data_dir: Path) -> None:
@@ -645,7 +647,7 @@ def test_the_profile_survives_a_clear_that_no_restore_follows(data_dir: Path) ->
     assert not stale.exists()
 
 
-# ── Profile restore ──────────────────────────────────────────────────────────
+# -- Profile restore --
 
 _PROFILE_REL = f"content/{_XUID}/FFFE07D1/00010000/Account"
 _SAVE_REL = f"content/{_XUID}/{_TITLE}/00000001/SAVEGAME/savedata.bin"
@@ -743,3 +745,438 @@ def test_a_restored_profile_does_not_ride_forward_into_the_next_players_archive(
 def test_only_profile_members_skip_the_newer_file_guard(rel: str, exempt: bool) -> None:
     """Only a file under `content/<XUID>/FFFE07D1` is exempt from the guard."""
     assert xenia.Xenia().always_restore(rel) is exempt
+
+
+# -- the logged-in profile's XUID --
+
+_PROFILE_XUID = "E000123456789ABC"
+"""A profile XUID, in the spelling Xenia names its content folder."""
+
+
+def _config(root: Path, text: str) -> Path:
+    """Write Xenia's config file under a storage root.
+
+    Args:
+        root: The storage root.
+        text: The file's TOML text.
+
+    Returns:
+        The config file's path.
+    """
+    root.mkdir(parents=True, exist_ok=True)
+    path = root / xenia.CONFIG_NAME
+    path.write_text(text)
+    return path
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        f'logged_profile_slot_0_xuid = "{_PROFILE_XUID}"\n',
+        f'logged_profile_slot_0_xuid = "{_PROFILE_XUID.lower()}"\n',
+        f'logged_profile_slot_0_xuid = "0x{_PROFILE_XUID}"\n',
+        f'[Live]\nlogged_profile_slot_0_xuid = "{_PROFILE_XUID}"\n',
+        f'[Live]\nother = 1\n[Live.Slots]\nlogged_profile_slot_0_xuid = " {_PROFILE_XUID} "\n',
+        f'[[Accounts]]\nlogged_profile_slot_0_xuid = "{_PROFILE_XUID}"\n',
+        f'a = "1"\n[A]\nlogged_profile_slot_0_xuid = "{_PROFILE_XUID}"\n[B]\n'
+        f'logged_profile_slot_0_xuid = "{_PROFILE_XUID.lower()}"\n',
+    ],
+)
+def test_the_profile_xuid_is_read_in_the_spelling_the_content_folder_uses(tmp_path: Path, text: str) -> None:
+    """The key is found at any depth, and its value comes back as 16 upper-case hex digits.
+
+    The last case names the same profile twice, in two spellings, which is
+    still one profile.
+
+    Args:
+        tmp_path: The per-test temporary directory.
+        text: The config's text.
+    """
+    assert xenia._logged_profile_xuid(_config(tmp_path, text)) == _PROFILE_XUID
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "",
+        "[Live]\nother = 1\n",
+        'logged_profile_slot_0_xuid = ""\n',
+        "logged_profile_slot_0_xuid = 12345\n",
+        'logged_profile_slot_0_xuid = "E000"\n',
+        'logged_profile_slot_0_xuid = "E00012345678GHIJ"\n',
+        f'logged_profile_slot_0_xuid = "{_PROFILE_XUID}F"\n',
+        f'[A]\nlogged_profile_slot_0_xuid = "{_PROFILE_XUID}"\n[B]\n'
+        'logged_profile_slot_0_xuid = "E0FFFFFFFFFFFFFF"\n',
+        f'[A]\nlogged_profile_slot_0_xuid = "{_PROFILE_XUID}"\n[B]\n'
+        'logged_profile_slot_0_xuid = "junk"\n',
+        "this is not toml\n",
+    ],
+    ids=[
+        "empty file",
+        "no key",
+        "blank value",
+        "not a string",
+        "too short",
+        "not hex",
+        "too long",
+        "two profiles",
+        "one profile and one junk value",
+        "malformed toml",
+    ],
+)
+def test_no_unambiguous_xuid_reads_as_none(tmp_path: Path, text: str) -> None:
+    """A config that names no profile, or more than one, or a value that is no XUID, gives None.
+
+    Guessing among two profiles would place a save under the wrong account.
+
+    Args:
+        tmp_path: The per-test temporary directory.
+        text: The config's text.
+    """
+    assert xenia._logged_profile_xuid(_config(tmp_path, text)) is None
+
+
+def test_a_missing_config_reads_as_none(tmp_path: Path) -> None:
+    """No config file means no profile has ever signed in.
+
+    Args:
+        tmp_path: The per-test temporary directory.
+    """
+    assert xenia._logged_profile_xuid(tmp_path / xenia.CONFIG_NAME) is None
+
+
+def test_an_unreadable_config_is_logged_and_reads_as_none(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A config that cannot be parsed says so in the log, since the import it blocks will not.
+
+    Args:
+        tmp_path: The per-test temporary directory.
+        caplog: Pytest's log capture.
+    """
+    config = _config(tmp_path, "this is not toml\n")
+
+    with caplog.at_level(logging.WARNING, logger=xenia.log.name):
+        assert xenia._logged_profile_xuid(config) is None
+
+    assert [r.getMessage() for r in caplog.records if str(config) in r.getMessage()]
+
+
+# -- declared imports --
+
+_DONOR_XUID = "E0FFFFFFFFFFFFFF"
+"""The XUID another console's save was taken under."""
+_IMPORT_TITLE = "4D5307E6"
+"""The title the session runs, in the case Xenia names its folder."""
+_OTHER_TITLE = "58410824"
+"""A title the session does not run."""
+_ROMM = imports.RomRef(1, "Game", "xbox360", title_id=_IMPORT_TITLE)
+"""The rom an Xbox 360 activate carries, with RomM's id for it."""
+_STFS = b"CON " + bytes(60)
+"""The start of an STFS package."""
+_SAVE_DEST = f"content/{_PROFILE_XUID}/{_IMPORT_TITLE}/00000001/SAVEGAME/savedata.bin"
+"""Where the placed save lands."""
+_HEADER_DEST = f"content/{_PROFILE_XUID}/{_IMPORT_TITLE}/Headers/00000001/SAVEGAME"
+"""Where the placed header lands."""
+
+
+def _preflight(
+    data_dir: Path,
+    members: dict[str, bytes],
+    *,
+    config: Optional[str] = f'logged_profile_slot_0_xuid = "{_PROFILE_XUID}"\n',
+    rom: Optional[imports.RomRef] = _ROMM,
+    rom_file: Optional[Path] = None,
+    v1: Optional[dict[str, bytes]] = None,
+) -> imports.PreflightResult:
+    """Preflight an archive of import members on a Xenia whose profile is signed in.
+
+    Args:
+        data_dir: The patched storage root.
+        members: `.import/<kind>/...` names mapped to bytes.
+        config: The config file's text, or None to leave the file out.
+        rom: The activate body's rom, or None.
+        rom_file: The bootable file, or None.
+        v1: Ordinary archive members to carry beside them, or None.
+
+    Returns:
+        What preflight decided.
+    """
+    if config is not None:
+        _config(data_dir, config)
+    return preflight_import(xenia.Xenia(), import_zip(members, v1), rom_file=rom_file, rom=rom)
+
+
+@pytest.mark.parametrize(
+    ("rel", "dest"),
+    [
+        (f"content/{_DONOR_XUID}/{_IMPORT_TITLE}/00000001/SAVEGAME/savedata.bin", _SAVE_DEST),
+        (f"Content/{_DONOR_XUID}/{_IMPORT_TITLE}/00000001/SAVEGAME/savedata.bin", _SAVE_DEST),
+        (f"{_DONOR_XUID}/{_IMPORT_TITLE}/00000001/SAVEGAME/savedata.bin", _SAVE_DEST),
+        (f"{_IMPORT_TITLE}/00000001/SAVEGAME/savedata.bin", _SAVE_DEST),
+        (f"content/{_DONOR_XUID.lower()}/{_IMPORT_TITLE.lower()}/00000001/SAVEGAME/savedata.bin", _SAVE_DEST),
+        (f"content/{_PROFILE_XUID}/{_IMPORT_TITLE}/00000001/SAVEGAME/savedata.bin", _SAVE_DEST),
+        (f"content/{_DONOR_XUID}/{_IMPORT_TITLE}/Headers/00000001/SAVEGAME", _HEADER_DEST),
+        (f"{_IMPORT_TITLE}/headers/00000001/SAVEGAME", _HEADER_DEST),
+    ],
+    ids=[
+        "content",
+        "Content",
+        "no wrapper",
+        "no xuid",
+        "lower case",
+        "already the profile's",
+        "header",
+        "lower case header",
+    ],
+)
+def test_a_save_lands_under_the_signed_in_profile(data_dir: Path, rel: str, dest: str) -> None:
+    """A save is placed under the session profile's XUID and the title's upper-case id.
+
+    The donor console's XUID names nothing on this one, so it is replaced;
+    a member with no XUID at all is placed under the profile too.
+
+    Args:
+        data_dir: The patched storage root.
+        rel: The member's path below `.import/save/`.
+        dest: Where it lands, below the storage root.
+    """
+    result = _preflight(data_dir, {f".import/save/{rel}": b"save"})
+
+    assert result.refusals == ()
+    assert [str(p.dest) for p in result.placements] == [dest]
+
+
+@pytest.mark.parametrize(
+    ("rel", "data", "reason"),
+    [
+        (f"content/{_DONOR_XUID}/FFFE07D1/00010000/{_DONOR_XUID}", b"profile", "protected_destination"),
+        (f"content/{_DONOR_XUID}/fffe07d1/00010000/{_DONOR_XUID}", b"profile", "protected_destination"),
+        ("FFFE07D1/00010000/account", b"profile", "protected_destination"),
+        (f"content/{_DONOR_XUID}/{_IMPORT_TITLE}/00000002/dlc.bin", b"dlc", "unrecognised_layout"),
+        (f"content/{_DONOR_XUID}/{_IMPORT_TITLE}/000B0000/update.bin", b"update", "unrecognised_layout"),
+        (f"content/{_DONOR_XUID}/{_IMPORT_TITLE}/Headers/00000002/x", b"x", "unrecognised_layout"),
+        (f"content/{_DONOR_XUID}/{_IMPORT_TITLE}/Headers/00000001", b"x", "unrecognised_layout"),
+        (f"content/{_DONOR_XUID}/{_OTHER_TITLE}/00000001/SAVEGAME/a", b"save", "identity_mismatch"),
+        (f"content/{_DONOR_XUID}/{_IMPORT_TITLE}/00000001/PACKAGE", _STFS, "shape_unverified"),
+        (f"content/{_DONOR_XUID}/{_IMPORT_TITLE}/00000001/PACKAGE", b"plain", "unrecognised_layout"),
+        ("PACKAGE", _STFS, "shape_unverified"),
+        ("Game.srm", b"sram", "source_incompatible"),
+        ("notes.txt", b"x", "unrecognised_layout"),
+        ("config/xenia.toml", b"x", "unrecognised_layout"),
+    ],
+    ids=[
+        "profile package",
+        "lower case profile package",
+        "profile package with no xuid",
+        "dlc",
+        "title update",
+        "header of another content type",
+        "a header with no name",
+        "another game's title",
+        "monolithic package",
+        "a file where a save folder belongs",
+        "a package at the root",
+        "a retroarch save",
+        "a loose file",
+        "a config file",
+    ],
+)
+def test_a_member_xenia_would_not_read_is_refused(data_dir: Path, rel: str, data: bytes, reason: str) -> None:
+    """Each shape the spec names is refused with its own code, and nothing is placed.
+
+    Args:
+        data_dir: The patched storage root.
+        rel: The member's path below `.import/save/`.
+        data: Its bytes.
+        reason: The refusal code.
+    """
+    result = _preflight(data_dir, {f".import/save/{rel}": data})
+
+    assert [r.reason for r in result.refusals] == [reason]
+    assert result.placements == ()
+
+
+def test_a_profile_package_is_refused_before_the_profile_is_looked_up(data_dir: Path) -> None:
+    """A profile package is not importable at all, so a missing profile does not hide that.
+
+    Args:
+        data_dir: The patched storage root.
+    """
+    result = _preflight(
+        data_dir, {f".import/save/content/{_DONOR_XUID}/FFFE07D1/00010000/a": b"x"}, config=None
+    )
+
+    assert [r.reason for r in result.refusals] == ["protected_destination"]
+
+
+@pytest.mark.parametrize(
+    "config",
+    [
+        None,
+        "",
+        'logged_profile_slot_0_xuid = ""\n',
+        f'[A]\nlogged_profile_slot_0_xuid = "{_PROFILE_XUID}"\n[B]\n'
+        f'logged_profile_slot_0_xuid = "{_DONOR_XUID}"\n',
+    ],
+    ids=["no config", "no key", "blank key", "two profiles"],
+)
+def test_a_save_needs_a_profile_to_sit_under(data_dir: Path, config: Optional[str]) -> None:
+    """With no single signed-in profile there is no folder to place a save in.
+
+    Args:
+        data_dir: The patched storage root.
+        config: The config file's text, or None for no file.
+    """
+    result = _preflight(data_dir, {f".import/save/{_IMPORT_TITLE}/00000001/SAVEGAME/a": b"x"}, config=config)
+
+    assert [(r.reason, r.detail) for r in result.refusals] == [
+        ("destination_unresolvable", "no profile is signed in: create one on the desktop first")
+    ]
+
+
+def test_a_save_needs_to_know_which_game_it_is(data_dir: Path) -> None:
+    """The title is required: with neither the rom's path nor RomM naming one, nothing is placed.
+
+    Args:
+        data_dir: The patched storage root.
+    """
+    result = _preflight(data_dir, {f".import/save/{_IMPORT_TITLE}/00000001/SAVEGAME/a": b"x"}, rom=None)
+
+    assert [r.reason for r in result.refusals] == ["identity_unknown"]
+
+
+def test_the_title_is_read_off_a_container_path_before_romm_is_asked(
+    data_dir: Path, tmp_path: Path
+) -> None:
+    """A rom laid out as `<TITLE_ID>/000D0000/<hash>` names its own title.
+
+    Args:
+        data_dir: The patched storage root.
+        tmp_path: The per-test temporary directory.
+    """
+    package = tmp_path / "roms" / _IMPORT_TITLE / "000D0000" / "0123456789AB"
+    package.parent.mkdir(parents=True)
+    package.write_bytes(_STFS)
+
+    result = _preflight(
+        data_dir, {f".import/save/{_IMPORT_TITLE}/00000001/SAVEGAME/a": b"x"}, rom=None, rom_file=package
+    )
+
+    assert [str(p.dest) for p in result.placements] == [
+        f"content/{_PROFILE_XUID}/{_IMPORT_TITLE}/00000001/SAVEGAME/a"
+    ]
+
+
+@pytest.mark.parametrize(
+    ("path", "expected"),
+    [
+        (f"/roms/{_IMPORT_TITLE}/000D0000/hash", _IMPORT_TITLE),
+        (f"/roms/{_IMPORT_TITLE.lower()}/00007000/hash", _IMPORT_TITLE.lower()),
+        (f"/roms/{_IMPORT_TITLE}/00000002/hash", None),
+        (f"/roms/{_IMPORT_TITLE}/hash", None),
+        ("/roms/not-a-title/000D0000/hash", None),
+        ("/roms/Game.iso", None),
+    ],
+)
+def test_only_a_container_layout_names_the_title(path: str, expected: Optional[str]) -> None:
+    """The title is taken from the folder above a game's content type, and from nowhere else.
+
+    Args:
+        path: The rom file's path.
+        expected: The title it names, or None.
+    """
+    assert xenia._rom_title_id(Path(path)) == expected
+
+
+def test_a_state_or_memory_card_is_not_taken(data_dir: Path) -> None:
+    """Xenia has no states and no cards, so the kind gate stops them before the hook.
+
+    Args:
+        data_dir: The patched storage root.
+    """
+    result = _preflight(
+        data_dir,
+        {f".import/state/{_IMPORT_TITLE}.sav": b"x", f".import/memcard/{_IMPORT_TITLE}.mcd": b"x"},
+    )
+
+    assert sorted(r.reason for r in result.refusals) == ["kind_not_accepted", "kind_not_accepted"]
+
+
+def test_an_imported_save_is_where_the_modules_own_lookups_find_it(data_dir: Path) -> None:
+    """The placed save and header are the trees `_title_save_dirs` reads and the stale clear takes out.
+
+    A destination Xenia's own lookups do not recognise would be written and
+    never read, and no refusal could catch that.
+
+    Args:
+        data_dir: The patched storage root.
+    """
+    emu = xenia.Xenia()
+    _config(data_dir, f'logged_profile_slot_0_xuid = "{_PROFILE_XUID}"\n')
+    body = import_zip(
+        {
+            f".import/save/content/{_DONOR_XUID}/{_IMPORT_TITLE}/00000001/SAVEGAME/savedata.bin": b"progress",
+            f".import/save/content/{_DONOR_XUID}/{_IMPORT_TITLE}/Headers/00000001/SAVEGAME": b"header",
+        }
+    )
+    result = preflight_import(emu, body, rom_file=None, rom=_ROMM)
+    restore_import(emu, body, result)
+
+    title = data_dir / "content" / _PROFILE_XUID / _IMPORT_TITLE
+    assert (title / "00000001" / "SAVEGAME" / "savedata.bin").read_bytes() == b"progress"
+    assert xenia._title_save_dirs(title) == [title / "00000001", title / "Headers" / "00000001"]
+    assert emu._stale_save_dirs() == xenia._title_save_dirs(title)
+
+    emu.clear_working_slot()
+
+    assert xenia._title_save_dirs(title) == []
+
+
+def test_an_imported_save_the_game_never_touched_still_ships_in_the_next_dump(data_dir: Path) -> None:
+    """`always_include` carries a placed save out even when the session never wrote to it.
+
+    Args:
+        data_dir: The patched storage root.
+    """
+    emu = xenia.Xenia()
+    _config(data_dir, f'logged_profile_slot_0_xuid = "{_PROFILE_XUID}"\n')
+    body = import_zip({f".import/save/{_IMPORT_TITLE}/00000001/SAVEGAME/savedata.bin": b"progress"})
+    result = preflight_import(emu, body, rom_file=None, rom=_ROMM)
+    restore_import(emu, body, result)
+
+    report = saves.build_save_archive(
+        data_dir,
+        emu.save_subtrees,
+        time.time() + 3600,
+        always_include=frozenset(p.dest.as_posix() for p in result.placements),
+    )
+
+    assert report["error"] is None
+    assert [f["path"] for f in report["files"]] == [_SAVE_DEST]
+
+
+def test_an_imported_save_beside_an_archived_one_is_refused(data_dir: Path) -> None:
+    """A save that lands on a file the archive already holds is a destination conflict.
+
+    Args:
+        data_dir: The patched storage root.
+    """
+    result = _preflight(
+        data_dir,
+        {f".import/save/{_IMPORT_TITLE}/00000001/SAVEGAME/savedata.bin": b"imported"},
+        v1={_SAVE_DEST: b"archived"},
+    )
+
+    assert [r.reason for r in result.refusals] == ["destination_conflict"]
+
+
+@pytest.mark.usefixtures("data_dir")
+def test_xenia_declares_a_save_kind_only() -> None:
+    """The spec names the save kind alone, with no state channel, and protects the profile package."""
+    spec = xenia.Xenia().import_spec()
+
+    assert [k.kind for k in spec.kinds] == ["save"]
+    assert spec.state_channel == "none"
+    assert spec.protected == ("content/*/FFFE07D1/*",)
+    assert spec.case_insensitive_dest is False

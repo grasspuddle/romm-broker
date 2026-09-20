@@ -42,9 +42,9 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 from threading import Lock
-from typing import Any, Optional
+from typing import Any, Optional, Union
 
-from .. import settings
+from .. import imports, settings
 from .base import Emulator, base_launch_env, xdg_data_dir
 
 log = logging.getLogger(__name__)
@@ -76,6 +76,17 @@ _MOUNT_MARKER_DIR = "sce_sys"
 """Per-save metadata directory shadPS4 keeps the mount marker in."""
 _MOUNT_MARKER_NAME = "corrupted"
 """File shadPS4 drops into `sce_sys` while a save is mounted read-write, removed on unmount."""
+_EXPECTED = "<serial>/<save dir>/<file>, optionally under home/<n>/savedata/ or savedata/"
+"""The shape an import member is asked to take, for refusals."""
+_SERIAL = re.compile(r"[A-Za-z]{4}[0-9]{5}", re.ASCII)
+"""A title serial such as `CUSA12345`, in either case."""
+_USER = re.compile(r"[0-9]+", re.ASCII)
+"""A PS4 user folder's name below `home`."""
+_NOT_SAVES = frozenset({"config.json", "extracted", "sys_modules"})
+"""Top-level names in shadPS4's data directory beside `home`, which a whole-directory export carries.
+
+None of them is save data, so a member under one is refused as such rather than as a save with no serial.
+"""
 
 SHADPS4_CONFIG_PATH = DATA_DIR / "config.json"
 """shadPS4's own config file, `config.json` under `DATA_DIR`.
@@ -1188,6 +1199,105 @@ def _clear_stale_save_data(savedata_root: Path) -> None:
         log.info("shadps4: cleared %d stale save entries before the restore", cleared)
 
 
+def _refuse(member: imports.ImportMember, reason: str, detail: str) -> imports.ImportRefusal:
+    """Refuse a member with the shadPS4 shape in the message.
+
+    Args:
+        member: The member.
+        reason: The refusal code.
+        detail: What is wrong with this member.
+
+    Returns:
+        The refusal.
+    """
+    return imports.ImportRefusal(reason, member.name, _EXPECTED, detail=detail)
+
+
+def _below_wrapper(parts: tuple[str, ...]) -> tuple[str, ...]:
+    """Drop a leading `home/<n>/savedata` or `savedata`, if the path starts with one.
+
+    `imports.match_anchored` only strips literal wrappers, and the user folder is a number, so
+    the hook strips this one itself.
+
+    Args:
+        parts: A member's components.
+
+    Returns:
+        The components below the wrapper, or `parts` unchanged when there is none.
+    """
+    if len(parts) >= 3 and parts[0] == "home" and _USER.fullmatch(parts[1]) and parts[2] == "savedata":
+        return parts[3:]
+    if parts and parts[0] == "savedata":
+        return parts[1:]
+    return parts
+
+
+def _unmatched(member: imports.ImportMember, below: tuple[str, ...]) -> imports.ImportRefusal:
+    """Refuse a member that does not name a serial, a save folder and a file, saying why.
+
+    Args:
+        member: The member.
+        below: Its components below any wrapper.
+
+    Returns:
+        The refusal.
+    """
+    parts = member.parts
+    if len(parts) == 1 and parts[0].lower().endswith(".srm"):
+        return _refuse(
+            member,
+            "source_incompatible",
+            "a RetroArch save; shadPS4 saves are folders keyed by the game's serial",
+        )
+    other_home = parts[0] == "home" and below == parts
+    if other_home and len(parts) >= 3 and parts[2] == "savedata":
+        return _refuse(member, "unrecognised_layout", "the user folder below home must be a number")
+    if other_home or parts[0] in _NOT_SAVES:
+        return _refuse(member, "unrecognised_layout", "not save data; only the savedata folder can be sent")
+    if below and _SERIAL.fullmatch(below[0]):
+        return _refuse(
+            member, "unrecognised_layout", "a save needs a save folder and a file below the serial"
+        )
+    if len(below) >= 2:
+        return _refuse(
+            member, "identity_unknown", "no game serial in the path to say which title this save is for"
+        )
+    return _refuse(member, "unrecognised_layout", "not a file in a save folder under a serial")
+
+
+def _place_save(
+    member: imports.ImportMember, *, max_component_bytes: int
+) -> Union[imports.Placement, imports.ImportRefusal]:
+    """File a save under the default user, whatever user it was collected from.
+
+    The serial is upper-cased, since shadPS4 names its folders that way and a hand-collected
+    save may not. Everything below it keeps the member's spelling: the filesystem is case
+    sensitive, and so is `SAVE00`.
+
+    Args:
+        member: The member.
+        max_component_bytes: The longest name the filesystem stores.
+
+    Returns:
+        The placement, or a refusal.
+    """
+    below = _below_wrapper(member.parts)
+    found = imports.match_anchored(below, wrappers=((),), levels=(_SERIAL,), min_tail=2)
+    if found is None:
+        return _unmatched(member, below)
+    dest = imports.build_dest(
+        SAVEDATA_SUBTREE,
+        (found.ids[0].upper(),),
+        found.tail,
+        member=member,
+        expected=_EXPECTED,
+        max_component_bytes=max_component_bytes,
+    )
+    if isinstance(dest, imports.ImportRefusal):
+        return dest
+    return imports.Placement(member, dest)
+
+
 class Shadps4(Emulator):
     """PlayStation 4 via shadPS4, driven over its stdin IPC protocol.
 
@@ -1276,6 +1386,37 @@ class Shadps4(Emulator):
                 no memory card subtree, so this is always empty.
         """
         _clear_stale_save_data(self.save_root / SAVEDATA_SUBTREE)
+
+    def import_spec(self) -> imports.ImportSpec:
+        """Declare what shadPS4 takes: one save folder per title, and never its mount marker.
+
+        Returns:
+            The spec.
+        """
+        shapes = (
+            "<serial>/<save dir>/<file>",
+            "savedata/<serial>/<save dir>/<file>",
+            "home/<n>/savedata/<serial>/<save dir>/<file>",
+        )
+        return imports.ImportSpec(
+            kinds=(imports.KindSpec("save", shapes),),
+            protected=(f"*/{_MOUNT_MARKER_DIR}/{_MOUNT_MARKER_NAME}",),
+        )
+
+    def place_import(
+        self, member: imports.ImportMember, spec: imports.ImportSpec, ctx: imports.ImportCtx
+    ) -> Union[imports.Placement, imports.ImportRefusal]:
+        """File one declared save file under the default user's savedata.
+
+        Args:
+            member: The member, already past the kind gate.
+            spec: This emulator's spec.
+            ctx: The launch context, which this hook does not need: the serial is in the path.
+
+        Returns:
+            The placement, or a refusal.
+        """
+        return _place_save(member, max_component_bytes=spec.max_component_bytes)
 
     def resolve_rom_file(self, path: Path) -> Optional[Path]:
         """The path shadPS4 should boot for `path`.
