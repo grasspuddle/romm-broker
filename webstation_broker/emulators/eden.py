@@ -9,6 +9,11 @@ container brings its matching profile along and the paths line up. Exit
 restamps both so the delta dump takes each save unit whole rather than the
 few files the game happened to rewrite (see `Eden.save_and_exit`).
 
+Declared imports (`import_spec`, `place_import`, `validate_import_plan`)
+take a NAND export as it sat: a save unit at `nand/user/save/<space>/<user>/<title>`
+and, for an account save, the profile store beside it. See
+docs/content/docs/api/imports.mdx for the shapes.
+
 Shutdown: Eden's Qt frontend routes SIGTERM through the event loop into a
 normal window close (graceful emulation teardown). SIGINT is `_exit(1)` in
 Eden, so the broker never sends it. The close path pops a confirmation
@@ -22,9 +27,10 @@ import re
 import shutil
 import time
 from collections.abc import Iterable
-from pathlib import Path
-from typing import Any, Optional
+from pathlib import Path, PurePosixPath
+from typing import Any, Optional, Union
 
+from .. import imports
 from .base import Emulator, base_launch_env, xdg_config_dir, xdg_data_dir
 
 log = logging.getLogger(__name__)
@@ -65,6 +71,34 @@ _SAVE_UNIT_DEPTH = 3
 """Directory levels between `SAVE_DIR` and a title id directory."""
 _TITLE_ID_RE = re.compile(r"^[0-9a-fA-F]{16}$")
 """Matches a title id: the leaf of a save unit path, 16 hex digits."""
+_SAVE_SUBTREE = "nand/user/save"
+"""The user save tree relative to `DATA_DIR`; the first of `Eden.save_subtrees`."""
+_PROFILE_SUBTREE = "nand/system/save/8000000000000010"
+"""The profile store relative to `DATA_DIR`; the second of `Eden.save_subtrees`."""
+_ZERO_USER = "0" * 32
+"""The user id of a device save, which belongs to no profile."""
+_RAW_SAVE_LIMIT = 64 * 1024 * 1024
+"""Largest `.bin` taken for a save; a bigger one is a raw hardware dump, not a save."""
+_SAVE_EXPECTED = "nand/user/save/<space>/<user>/<title id>/<tail>"
+"""The shape of a save file, for refusals."""
+_PROFILE_EXPECTED = "nand/system/save/8000000000000010/<tail>"
+"""The shape of a profile store file, for refusals."""
+_EXPECTED = f"{_SAVE_EXPECTED}, with {_PROFILE_EXPECTED} for an account save"
+"""The shapes an import member is asked to take, for refusals."""
+_SAVE_WRAPPER = ("nand", "user", "save")
+"""The verbatim NAND folders above a save space."""
+_PROFILE_WRAPPER = ("nand", "system", "save", "8000000000000010")
+"""The verbatim NAND folders down to the profile store."""
+_HEX16_LEVEL = re.compile(r"[0-9A-Fa-f]{16}", re.ASCII)
+"""A save space id or a title id, as a folder name."""
+_USER_LEVEL = re.compile(r"[0-9A-Fa-f]{32}", re.ASCII)
+"""A user id, as a folder name."""
+_LOOSE_TITLE_RE = re.compile(r"(?:0[xX])?[0-9A-Fa-f]{16}", re.ASCII)
+"""A title id at the head of a path that says nothing of the space or profile it sat in."""
+_SD_ROOTS = ("Nintendo", "sdmc")
+"""Top folders of an SD card's own layout, which Eden does not read."""
+_HOMEBREW_ROOTS = (("JKSV",), ("Checkpoint",), ("switch", "JKSV"), ("switch", "Checkpoint"))
+"""Where the homebrew save managers put a backup; none of them records the space or profile."""
 
 ROM_EXTENSIONS = (".xci", ".nsp", ".nca", ".nro")
 """Formats Eden's loader boots directly, best first; a folder holding several picks by this order."""
@@ -300,6 +334,120 @@ def _clear_stale_save_data() -> None:
         log.info("eden: cleared %d stale save entries before the restore", cleared)
 
 
+def _refuse(member: imports.ImportMember, reason: str, detail: str) -> imports.ImportRefusal:
+    """Refuse a member with the Eden shapes in the message.
+
+    Args:
+        member: The member.
+        reason: The refusal code.
+        detail: What is wrong with this member.
+
+    Returns:
+        The refusal.
+    """
+    return imports.ImportRefusal(reason, member.name, _EXPECTED, detail=detail)
+
+
+def _unmatched(member: imports.ImportMember) -> imports.ImportRefusal:
+    """Refuse a member that is not a NAND export, saying which kind of not it is.
+
+    Args:
+        member: The member.
+
+    Returns:
+        `source_incompatible` for a raw dump, `destination_unresolvable` for a
+        save that lacks the space, profile or title the destination is keyed
+        by, and `unrecognised_layout` for anything else.
+    """
+    parts = member.parts
+    if parts[-1].lower().endswith(".bin") and member.size > _RAW_SAVE_LIMIT:
+        return _refuse(member, "source_incompatible", "a raw dump, not a save; export the NAND save folder")
+    if _LOOSE_TITLE_RE.fullmatch(parts[0]) or any(parts[: len(root)] == root for root in _HOMEBREW_ROOTS):
+        return _refuse(
+            member,
+            "destination_unresolvable",
+            "the save space and profile are not in the path; send the NAND export",
+        )
+    return _refuse(member, "unrecognised_layout", "not a file of a NAND save export")
+
+
+def _place_save(
+    member: imports.ImportMember, session: imports.SessionIdentity
+) -> Union[imports.Placement, imports.ImportRefusal]:
+    """Place a file of a NAND export, or of the profile store, where it sat.
+
+    A save unit is keyed by its own title id, so it is held strictly to the
+    session's game. The profile store names no title. Ids are upper-cased, the
+    way Eden writes them.
+
+    Args:
+        member: The member.
+        session: The session's identity.
+
+    Returns:
+        The placement, or a refusal.
+    """
+    parts = member.parts
+    if parts[0] == "bis":
+        return _refuse(member, "source_incompatible", "a BIS partition dump from a console")
+    if parts[0] in _SD_ROOTS:
+        return _refuse(member, "source_incompatible", "an SD card's own layout")
+    found = imports.match_anchored(
+        parts, wrappers=(_SAVE_WRAPPER,), levels=(_HEX16_LEVEL, _USER_LEVEL, _HEX16_LEVEL)
+    )
+    if found is not None:
+        refusal = imports.check_member_identity(
+            member,
+            imports.NORMALISERS["hex16"](found.ids[2]),
+            session,
+            family="hex16",
+            policy="strict",
+            expected=_EXPECTED,
+        )
+        if refusal is not None:
+            return refusal
+        dest = imports.build_dest(
+            _SAVE_SUBTREE,
+            tuple(part.upper() for part in found.ids),
+            found.tail,
+            member=member,
+            expected=_EXPECTED,
+        )
+    else:
+        store = imports.match_anchored(parts, wrappers=(_PROFILE_WRAPPER,), levels=())
+        if store is None:
+            return _unmatched(member)
+        dest = imports.build_dest(_PROFILE_SUBTREE, (), store.tail, member=member, expected=_EXPECTED)
+    if isinstance(dest, imports.ImportRefusal):
+        return dest
+    return imports.Placement(member, dest)
+
+
+def _is_profile_dest(parts: tuple[str, ...]) -> bool:
+    """Whether a destination is a file of the profile store.
+
+    Args:
+        parts: The destination's components, relative to `DATA_DIR`.
+
+    Returns:
+        True when it sits under `nand/system/save/8000000000000010`.
+    """
+    return parts[: len(_PROFILE_WRAPPER)] == _PROFILE_WRAPPER
+
+
+def _is_account_dest(parts: tuple[str, ...]) -> bool:
+    """Whether a destination is a file of a save that belongs to a profile.
+
+    Args:
+        parts: The destination's components, relative to `DATA_DIR`.
+
+    Returns:
+        True when it sits under `nand/user/save/<space>/<user>` with a user id
+        that is not the all-zero device one.
+    """
+    return parts[: len(_SAVE_WRAPPER)] == _SAVE_WRAPPER and len(parts) > 4 and parts[4] != _ZERO_USER
+
+
 class Eden(Emulator):
     """Nintendo Switch via Eden, driven by command line flags and a graceful SIGTERM.
 
@@ -379,6 +527,85 @@ class Eden(Emulator):
                 memory card subtree, so this is always empty.
         """
         _clear_stale_save_data()
+
+    def import_spec(self) -> imports.ImportSpec:
+        """Declare what Eden takes: NAND save exports and the profile store they resolve through.
+
+        Eden has no states and no cards, so the save kind is the only one.
+
+        Returns:
+            The spec.
+        """
+        shapes = (_SAVE_EXPECTED, _PROFILE_EXPECTED)
+        return imports.ImportSpec(kinds=(imports.KindSpec("save", shapes),))
+
+    def place_import(
+        self, member: imports.ImportMember, spec: imports.ImportSpec, ctx: imports.ImportCtx
+    ) -> Union[imports.Placement, imports.ImportRefusal]:
+        """Place one declared save file, or one of the profile store's.
+
+        Args:
+            member: The member, already past the kind gate.
+            spec: This emulator's spec.
+            ctx: The launch context.
+
+        Returns:
+            The placement, or a refusal.
+        """
+        return _place_save(member, imports.identity_for(self, ctx))
+
+    def validate_import_plan(
+        self, plan: list[imports.Placement], ctx: imports.ImportCtx
+    ) -> list[imports.ImportRefusal]:
+        """Hold an account save to its profile store, and the profile store to one per archive.
+
+        Save paths embed the profile's UUID, so an account save without the
+        profile store that names that UUID would be readable by nothing. The
+        store has to come in the same import: the archive's own is another
+        player's, and is cleared with the rest before the restore. Two profile
+        stores cannot both be Eden's, so an imported one beside the archive's
+        is refused rather than merged.
+
+        A file that clashes with another member is left to the shared
+        one-member-per-destination check, which has already refused it.
+
+        Args:
+            plan: The placements that passed every per-member check.
+            ctx: The launch context; its `archive_paths` are the archive's ordinary members.
+
+        Returns:
+            One refusal per account save that lacks its profile store, or per
+            imported profile file that meets the archive's, or none.
+        """
+        stores = [p for p in plan if _is_profile_dest(p.dest.parts)]
+        if not stores:
+            held = [p for p in plan if _is_account_dest(p.dest.parts)]
+            reason = "incomplete_unit"
+            detail = "an account save needs the profile store it was exported with"
+        elif any(_is_profile_dest(PurePosixPath(rel).parts) for rel in ctx.archive_paths):
+            held = stores
+            reason = "destination_conflict"
+            detail = "the archive already carries a profile store"
+        else:
+            return []
+        if not held:
+            return []
+        skip = imports.destination_conflicts(plan, ctx.archive_paths, False)
+        return [
+            imports.ImportRefusal(reason, p.member.name, _PROFILE_EXPECTED, detail=detail)
+            for p in held
+            if p.member.name not in skip
+        ]
+
+    def identity_source(self) -> Optional[imports.IdentitySource]:
+        """Take the session's game from RomM's title id, 16 hex digits.
+
+        Eden boots a file, not a path that names an id, so there is no rom reader.
+
+        Returns:
+            A `hex16` source with no reader.
+        """
+        return imports.IdentitySource("hex16")
 
     def resolve_rom_file(self, path: Path) -> Optional[Path]:
         """The file Eden should boot for `path`.

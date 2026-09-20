@@ -75,6 +75,7 @@ from typing import Any, Callable, Optional, Union
 import httpx
 
 from .. import imports
+from . import wii_nand
 from .base import Emulator, _record_pid, base_launch_env, xdg_config_dir
 
 log = logging.getLogger(__name__)
@@ -1280,6 +1281,70 @@ _UNCONVERTED_SAVE_SUFFIXES: frozenset[str] = frozenset({".sav", ".rtc", ".nv", "
 """Other save-file suffixes cores write, not placed until each core's name for them is verified."""
 _SRM_EXPECTED = "one non-empty <name>.srm, the core's SRAM"
 """The save shape RetroArch takes, in words, for a refusal's `expected`."""
+_LAYOUT_WII = "wii"
+"""`_layout`'s answer for the Dolphin core on the Wii: an emulated NAND tree."""
+_LAYOUT_3DS = "3ds"
+"""`_layout`'s answer for the Azahar core: an emulated SD card and NAND."""
+_WII_NAND = "saves/dolphin-emu/User/Wii"
+"""Where the Dolphin core keeps its emulated Wii NAND, relative to `RA_DATA_DIR`."""
+_WII_WRAPPERS: tuple[tuple[str, ...], ...] = (("saves", "dolphin-emu", "User", "Wii"), ("Wii",))
+"""The leading folders a Wii NAND path may arrive under, longest first; a bare path has none."""
+_WII_PROTECTED = (
+    f"{_WII_NAND}/title/00000001/*",
+    f"{_WII_NAND}/title/????????/????????/content/*",
+)
+"""Wii destinations no import may write: system titles, and every title's installed content.
+
+`sys` and `ticket` need no glob, as the platform's save subtrees leave them
+out. `check_plan` matches these with `fnmatch`, whose `*` also crosses `/`.
+"""
+_N3DS_ROOT = "saves/Azahar"
+"""Where the Azahar core keeps its data, relative to `RA_DATA_DIR`."""
+_N3DS_SHAPES = (
+    "saves/Azahar/sdmc/Nintendo 3DS/<id0>/<id1>/title/<high>/<low>/...",
+    "saves/Azahar/sdmc/Nintendo 3DS/<id0>/<id1>/extdata/<high>/<low>/...",
+    "saves/Azahar/nand/data/<id0>/...",
+)
+"""The save shapes a 3DS session advertises: a member is placed exactly as it is named."""
+_N3DS_EXPECTED = "a 3DS save, " + " or ".join(_N3DS_SHAPES)
+"""What a refused 3DS save is told to look like."""
+_N3DS_UNVERIFIED = (
+    "3DS saves are placed only as they sit in Azahar's folders, and only inside "
+    "sdmc/Nintendo 3DS or nand/data; anything else is not placed until the core's layout is verified"
+)
+"""Why a 3DS member outside the two places a save lives is left unplaced."""
+_N3DS_ID = re.compile(r"[0-9A-Fa-f]{32}", re.ASCII)
+"""An id0 or id1: a 128-bit hash in hex, the name of the folders under `Nintendo 3DS` and `nand/data`."""
+_N3DS_HEX8 = re.compile(r"[0-9A-Fa-f]{8}", re.ASCII)
+"""Half of a 3DS title id: eight hex digits."""
+_N3DS_ID_GLOB = "?" * 32
+"""`_N3DS_ID` as an `fnmatch` pattern. Each `?` also matches a `/`, so a glob can match more than an id."""
+_N3DS_PROTECTED = (
+    f"{_N3DS_ROOT}/nand/data/{_N3DS_ID_GLOB}/sysdata/*",
+    f"{_N3DS_ROOT}/sdmc/Nintendo 3DS/{_N3DS_ID_GLOB}/{_N3DS_ID_GLOB}/title/????????/????????/content/*",
+)
+"""3DS destinations no import may write: the NAND's system save data, and every title's installed content."""
+
+
+def _layout(platform: Optional[str]) -> Optional[str]:
+    """Tell which folder layout, if any, the loaded platform's core keeps its saves in.
+
+    Args:
+        platform: The slug from the activate payload, or None.
+
+    Returns:
+        `_LAYOUT_WII` for the Dolphin core on the Wii, `_LAYOUT_3DS` for the
+        Azahar core, else None. GameCube runs the Dolphin core too, but keeps
+        GCI files whose layout is not verified, so it has none.
+    """
+    info = _platform_info(platform)
+    if info is None:
+        return None
+    if info["core"] == "azahar":
+        return _LAYOUT_3DS
+    if info["core"] == "dolphin" and (platform or "").lower() == "wii":
+        return _LAYOUT_WII
+    return None
 
 
 def _srm_dir(platform: Optional[str]) -> Union[str, imports.ImportRefusal]:
@@ -1288,16 +1353,16 @@ def _srm_dir(platform: Optional[str]) -> Union[str, imports.ImportRefusal]:
     The one answer both `Retroarch.import_spec` and `Retroarch.place_import`
     read, so discovery never offers a `.srm` that placement then refuses.
     Only a core with `save_ram` set in the platform table loads a `.srm`.
-    The PPSSPP core keeps SAVEDATA folders, and a scoped platform's core
-    (dolphin, azahar) keeps its saves in its own folders; each of those, and
-    an unmapped platform, gets a reason of its own.
+    The PPSSPP core keeps SAVEDATA folders, the Dolphin core a Wii NAND and
+    GameCube GCI folders, and the Azahar core its SD card and NAND folders;
+    each of those, and an unmapped platform, gets a reason of its own.
 
     Args:
         platform: The slug from the activate payload, or None.
 
     Returns:
         The core's `library_name`, which names the sorted save dir, or the
-        refusal a save member gets here, with its `member` left unset.
+        refusal a `.srm` gets here, with its `member` left unset.
     """
     info = _platform_info(platform)
     if info is None:
@@ -1312,13 +1377,28 @@ def _srm_dir(platform: Optional[str]) -> Union[str, imports.ImportRefusal]:
             detail="the PPSSPP core keeps saves as SAVEDATA folders, not a .srm",
             suggest_emulator="ppsspp",
         )
-    if "save_subtrees" in info:
+    layout = _layout(platform)
+    if layout == _LAYOUT_WII:
+        return imports.ImportRefusal(
+            "unrecognised_layout",
+            None,
+            wii_nand.NAND_EXPECTED,
+            detail="the dolphin core keeps Wii saves as NAND title folders, not a .srm",
+        )
+    if layout == _LAYOUT_3DS:
+        return imports.ImportRefusal(
+            "unrecognised_layout",
+            None,
+            _N3DS_EXPECTED,
+            detail="the azahar core keeps 3DS saves in its own SD and NAND folders, not a .srm",
+        )
+    if info["core"] == "dolphin":
         return imports.ImportRefusal(
             "shape_unverified",
             None,
             None,
             detail=(
-                f"the {info['core']} core keeps its saves in its own folders, "
+                "the dolphin core keeps GameCube saves as GCI files in its own folders, "
                 "which imports do not place yet"
             ),
         )
@@ -1333,6 +1413,79 @@ def _srm_dir(platform: Optional[str]) -> Union[str, imports.ImportRefusal]:
             ),
         )
     return info["library_name"]
+
+
+def _n3ds_kind(rest: tuple[str, ...]) -> Optional[str]:
+    """Classify a path below `saves/Azahar/` as one of the places a 3DS save lives.
+
+    Both id levels have to be a 32-digit hex hash and a title id's halves
+    eight digits each. `_N3DS_PROTECTED`'s globs cover every path this
+    accepts, and more, because an `fnmatch` `?` or `*` also matches a `/`.
+
+    Args:
+        rest: The member's components below `saves/Azahar`.
+
+    Returns:
+        `title` or `extdata` for a file under `sdmc/Nintendo 3DS/<id0>/<id1>/`,
+        `nand` for one under `nand/data/<id0>/`, or None for anything else.
+    """
+    if rest[:2] == ("sdmc", "Nintendo 3DS"):
+        if (
+            len(rest) > 7
+            and all(_N3DS_ID.fullmatch(p) for p in rest[2:4])
+            and rest[4] in ("title", "extdata")
+            and all(_N3DS_HEX8.fullmatch(p) for p in rest[5:7])
+        ):
+            return rest[4]
+        return None
+    if rest[:2] == ("nand", "data") and len(rest) > 3 and _N3DS_ID.fullmatch(rest[2]):
+        return "nand"
+    return None
+
+
+def _place_n3ds(
+    member: imports.ImportMember, session: imports.SessionIdentity
+) -> Union[imports.Placement, imports.ImportRefusal]:
+    """Place one file of a 3DS save exactly where the Azahar core keeps it.
+
+    A member has to arrive under `saves/Azahar/` and then under the SD card's
+    `title` or `extdata` folders or the NAND's `data`; the ids are copied,
+    never rewritten, so a copy from real hardware whose id0 and id1 differ
+    from this Azahar's is placed under names the core never reads. A title
+    save is held strictly to the session's title id. Extdata and NAND data
+    are shared between titles and carry no such check. System save data and
+    installed content are placed as named, for the plan check to refuse.
+
+    Args:
+        member: The member.
+        session: The session's identity.
+
+    Returns:
+        The placement, or a `shape_unverified` refusal for any other layout,
+        or an identity refusal for another title.
+    """
+    parts = member.parts
+    rest = parts[2:] if parts[:2] == tuple(_N3DS_ROOT.split("/")) else ()
+    kind = _n3ds_kind(rest)
+    if kind is None:
+        return imports.ImportRefusal(
+            "shape_unverified", member.name, _N3DS_EXPECTED, detail=_N3DS_UNVERIFIED
+        )
+    if kind == "title":
+        refusal = imports.check_member_identity(
+            member,
+            imports.NORMALISERS["hex16"](rest[5] + rest[6]),
+            session,
+            family="hex16",
+            policy="strict",
+            expected=_N3DS_EXPECTED,
+        )
+        if refusal is not None:
+            return refusal
+    dest = imports.build_dest(_N3DS_ROOT, (), rest, member=member, expected=_N3DS_EXPECTED)
+    if isinstance(dest, imports.ImportRefusal):
+        return dest
+    return imports.Placement(member, dest)
 
 
 def _place_srm(
@@ -1415,9 +1568,11 @@ class Retroarch(Emulator):
     Declared imports take one `.srm` save per archive, renamed to the booted
     content's stem and placed in `saves/<library_name>/`, where the core
     loads SRAM. Only a platform whose core loads a `.srm` (`save_ram` in
-    `PLATFORMS`) takes one; the rest, psp, dolphin and azahar among them,
-    keep their saves in other files. States are never imported; they are
-    pushed after activate.
+    `PLATFORMS`) takes one. The Wii and 3DS platforms take the files of
+    their core's own tree instead, a NAND title folder or a path in
+    Azahar's SD card and NAND, and GameCube and every other platform whose
+    core keeps its saves elsewhere take nothing. States are never imported;
+    they are pushed after activate.
 
     Attributes:
         name: Registry key, `retroarch`.
@@ -2506,35 +2661,66 @@ class Retroarch(Emulator):
         return STATE_DIR / lib / name if lib else STATE_DIR / name
 
     def import_spec(self) -> imports.ImportSpec:
-        """Take one `.srm` where the core loads SRAM from one; take states through the push routes.
+        """Take one `.srm`, NAND or SD files, or nothing; take states through the push routes.
 
-        A platform whose core loads no `.srm` (see `_srm_dir`), and an
-        unmapped platform, declare the save kind with no shapes: discovery
-        tells RomM the save is refused there, and `place_import` says why. A
-        state placed in the archive would race the resume's fingerprint
-        check, so a mapped platform whose core has states takes them through
+        A platform whose core loads no `.srm` and has no layout of its own
+        (see `_srm_dir` and `_layout`), and an unmapped platform, declare the
+        save kind with no shapes: discovery tells RomM the save is refused
+        there, and `place_import` says why. Wii and 3DS declare the shape of
+        their core's tree and the globs no import may write. A state placed in
+        the archive would race the resume's fingerprint check, so a mapped
+        platform whose core has states takes them through
         PUT /api/session/state-file after activate.
 
         Returns:
             The spec for the loaded platform.
         """
         # counts_v1 stays False: the archive's other save files belong to other
-        # content, and a .srm at this destination is already a conflict.
-        if isinstance(_srm_dir(self.platform), str):
+        # content, and a file at a placed destination is already a conflict.
+        layout = _layout(self.platform)
+        protected: tuple[str, ...] = ()
+        if layout == _LAYOUT_WII:
+            save = imports.KindSpec("save", (wii_nand.SAVE_SHAPE,))
+            protected = _WII_PROTECTED
+        elif layout == _LAYOUT_3DS:
+            save = imports.KindSpec("save", _N3DS_SHAPES)
+            protected = _N3DS_PROTECTED
+        elif isinstance(_srm_dir(self.platform), str):
             save = imports.KindSpec("save", ("<name>.srm",), max_members=1)
         else:
             save = imports.KindSpec("save", ())
         mapped = _platform_info(self.platform) is not None
         channel: imports.StateChannel = "push" if mapped and self.supports_states else "none"
-        return imports.ImportSpec(kinds=(save,), state_channel=channel)
+        return imports.ImportSpec(kinds=(save,), state_channel=channel, protected=protected)
+
+    def identity_source(self) -> Optional[imports.IdentitySource]:
+        """Name the game id a Wii or 3DS save has to match: RomM's, as neither is read off the rom.
+
+        The Dolphin module reads a disc's id in `_rom_game_id`, but RetroArch
+        may not import another emulator's module, so the session's id is
+        RomM's `title_id` alone, and a session without one places any title.
+
+        Returns:
+            A GameCube/Wii disc-id source on the Wii, a sixteen-digit title-id
+            source on the 3DS, and None on every other platform.
+        """
+        layout = _layout(self.platform)
+        if layout == _LAYOUT_WII:
+            return imports.IdentitySource("gc_wii_disc")
+        if layout == _LAYOUT_3DS:
+            return imports.IdentitySource("hex16")
+        return None
 
     def place_import(
         self, member: imports.ImportMember, spec: imports.ImportSpec, ctx: imports.ImportCtx
     ) -> Union[imports.Placement, imports.ImportRefusal]:
-        """Place one `.srm` in the core's sorted save dir, named for the booted content.
+        """Place a Wii or 3DS file in its core's tree, or one `.srm` named for the booted content.
 
         Only saves reach here: the kind gate refuses a state, which is pushed,
-        and a memory card, which is resent as the core's `.srm` save.
+        and a memory card, which is resent as the core's `.srm` save. On Wii
+        and 3DS a member that is not a `.srm` is placed by the layout; a
+        `.srm` there, and every member on any other platform, is answered by
+        `_srm_dir`.
 
         Args:
             member: The save member, already past the kind gate.
@@ -2542,8 +2728,14 @@ class Retroarch(Emulator):
             ctx: The launch context.
 
         Returns:
-            The placement, or a refusal saying why this platform takes no `.srm`.
+            The placement, or a refusal saying why this platform takes no such file.
         """
+        layout = _layout(self.platform)
+        if layout is not None and not _SRM_NAME_RE.fullmatch(member.parts[-1]):
+            session = imports.identity_for(self, ctx)
+            if layout == _LAYOUT_WII:
+                return wii_nand.place_nand(member, session, subtree=_WII_NAND, wrappers=_WII_WRAPPERS)
+            return _place_n3ds(member, session)
         lib = _srm_dir(self.platform)
         if isinstance(lib, imports.ImportRefusal):
             return dataclasses.replace(lib, member=member.name)

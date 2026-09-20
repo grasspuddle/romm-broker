@@ -1335,6 +1335,20 @@ class Emulator:
         return None
 
     @property
+    def link_roots(self) -> tuple[Path, ...]:
+        """Directories a save subtree may be a symlink to although they lie outside `save_root`.
+
+        The chain check and the write check refuse a path through a link that
+        resolves outside the save root. An emulator whose data is split
+        across two trees declares the second tree here, and a subtree link
+        that resolves exactly to it is allowed.
+
+        Returns:
+            No roots by default.
+        """
+        return ()
+
+    @property
     def restore_subtrees(self) -> tuple[str, ...]:
         """The subtrees an archive may restore into, read before the working slot is cleared.
 

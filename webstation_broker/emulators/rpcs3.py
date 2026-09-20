@@ -58,9 +58,9 @@ import zipfile
 from collections.abc import Iterable
 from pathlib import Path
 from threading import Lock, Thread
-from typing import Optional
+from typing import Optional, Union
 
-from .. import settings
+from .. import imports, settings
 from .base import Emulator, base_launch_env, xdg_config_dir
 
 log = logging.getLogger(__name__)
@@ -107,6 +107,8 @@ _LICENSE_EXTS = (".rap", ".edat")
 # GAME_DIR/SSTATE_ROOT, so anything with a separator in it is refused rather
 # than allowed to walk out of those trees.
 _TITLE_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,32}$")
+_LOCK_DIR_PREFIXES = ("$", "\uff04")
+"""Name prefixes of RPCS3's own lock folders under `game/`: an ASCII and a full-width dollar sign."""
 
 
 def _truthy(value: str) -> bool:
@@ -450,12 +452,12 @@ def _gamedata_dirs() -> list[Path]:
     """List CellGameData save dirs under game/.
 
     Everything except installed titles (which have a bootable EBOOT.BIN)
-    and RPCS3's ＄locks dir.
+    and RPCS3's lock folders.
     """
     dirs = []
     if GAME_DIR.is_dir():
         for d in sorted(GAME_DIR.iterdir()):
-            if not d.is_dir() or d.name.startswith(("$", "＄")):
+            if not d.is_dir() or d.name.startswith(_LOCK_DIR_PREFIXES):
                 continue
             if (d / "USRDIR" / "EBOOT.BIN").is_file():
                 continue
@@ -464,14 +466,14 @@ def _gamedata_dirs() -> list[Path]:
 
 
 def _installed_title_dirs() -> set[str]:
-    """Names of the title dirs under game/, minus RPCS3's own ＄locks bookkeeping."""
+    """Names of the title dirs under game/, minus RPCS3's own lock folders."""
     if not GAME_DIR.is_dir():
         return set()
     try:
         return {
             d.name
             for d in GAME_DIR.iterdir()
-            if d.is_dir() and not d.name.startswith(("$", "＄", "."))
+            if d.is_dir() and not d.name.startswith((*_LOCK_DIR_PREFIXES, "."))
         }
     except OSError as exc:
         log.warning("rpcs3: could not list installed titles in %s: %s", GAME_DIR, exc)
@@ -1609,8 +1611,278 @@ def _pine_title_id() -> Optional[str]:
     return _valid_title_id(body.split(b"\0", 1)[0].decode("ascii", "replace"))
 
 
+_SAVEDATA = "home/00000001/savedata"
+"""The one user's save data folder, relative to `dev_hdd0`."""
+
+_SAVE_EXPECTED = (
+    "a PS3 save folder, home/00000001/savedata/<SAVEDIR>/, or a game data folder, "
+    "game/<DIR>/, each holding PARAM.SFO"
+)
+"""The accepted save shapes, in words, for a refusal."""
+
+_STATE_EXPECTED = "one RPCS3 savestate, <name>.SAVESTAT (or .SAVESTAT.zst or .SAVESTAT.gz)"
+"""The accepted state shape, in words, for a refusal."""
+
+_UID_RE = re.compile(r"[0-9]{8}", re.ASCII)
+"""A PS3 user's folder name under `home/`."""
+
+_SAVE_DIR_RE = re.compile(r"[A-Za-z0-9_-]{1,32}", re.ASCII)
+"""A save or game data folder's name: the characters and length a game gives one."""
+
+_STATE_NAME_RE = re.compile(r"[^/]+\.SAVESTAT(?P<ext>\.zst|\.gz)?", re.ASCII)
+"""A state file's name, in the exact case `_state_snapshot` globs for."""
+
+_PROTECTED = ("home/*/exdata/*", "home/*/trophy/*", "game/*/USRDIR/EBOOT.*")
+"""Licences, trophies and an installed title's executable: RPCS3's own, whatever an archive says."""
+
+_UNIT_DEPTH = {"home": 4, "game": 2}
+"""Destination components that name one save unit: `home/<uid>/savedata/<SAVEDIR>` or `game/<DIR>`."""
+
+
+def _session_serial(ctx: imports.ImportCtx) -> Optional[str]:
+    """Read the boot target's title id once per preflight.
+
+    This is the id `launch` files states under, so it is the raw one
+    `_rom_title_id` answers, not a normalised form.
+
+    Args:
+        ctx: The launch context.
+
+    Returns:
+        The title id, or None when there is no boot target or it carries none.
+    """
+    key = ("rpcs3", "serial")
+    if key not in ctx.memo:
+        ctx.memo[key] = _rom_title_id(ctx.rom_file) if ctx.rom_file is not None else None
+    cached = ctx.memo[key]
+    return cached if isinstance(cached, str) else None
+
+
+def _booted_game_dir(ctx: imports.ImportCtx) -> Optional[str]:
+    """Name the `game/` folder the boot target keeps its executable in.
+
+    A boot from an installed title's `EBOOT.BIN` names it through the path,
+    and a `.pkg` installs itself into a folder named for its title id. A
+    disc image runs from wherever it is and has no such folder, so a disc
+    title may import into its own `game/<id>`. The answer is lexical: it
+    reads nothing under `save_root`.
+
+    Args:
+        ctx: The launch context.
+
+    Returns:
+        The folder's name, or None when the boot target has none.
+    """
+    rom = ctx.rom_file
+    if rom is None:
+        return None
+    if rom.suffix.lower() == ".pkg":
+        return _session_serial(ctx)
+    try:
+        return rom.relative_to(GAME_DIR).parts[0]
+    except (ValueError, IndexError):
+        return None
+
+
+def _split_save(
+    member: imports.ImportMember,
+) -> Union[tuple[str, tuple[str, ...]], imports.ImportRefusal]:
+    """Strip a save member's wrapper and say which tree it belongs to.
+
+    Args:
+        member: The member.
+
+    Returns:
+        `("savedata", rest)` or `("game", rest)` with the path below that tree, or a refusal.
+    """
+    parts = member.parts
+    if parts[:1] == ("dev_hdd0",):
+        parts = parts[1:]
+    if parts[:1] == ("savestates",):
+        return imports.ImportRefusal(
+            "unrecognised_layout",
+            member.name,
+            _SAVE_EXPECTED,
+            detail="a savestate is declared as kind state, not save",
+        )
+    if len(parts) >= 3 and parts[0] == "home" and _UID_RE.fullmatch(parts[1]):
+        if parts[2] == "savedata":
+            return "savedata", parts[3:]
+        if parts[2] in ("exdata", "trophy"):
+            return imports.ImportRefusal(
+                "protected_destination",
+                member.name,
+                _SAVE_EXPECTED,
+                detail=f"home/<user>/{parts[2]} holds RPCS3's licences and trophies",
+            )
+        return imports.ImportRefusal(
+            "unrecognised_layout",
+            member.name,
+            _SAVE_EXPECTED,
+            detail=f"home/<user>/{parts[2]} is not save data",
+        )
+    if parts[:1] == ("game",):
+        return "game", parts[1:]
+    if parts[:2] == ("PS3", "SAVEDATA"):
+        return "savedata", parts[2:]
+    if parts[:1] == ("SAVEDATA",):
+        return "savedata", parts[1:]
+    return imports.ImportRefusal(
+        "unrecognised_layout",
+        member.name,
+        _SAVE_EXPECTED,
+        detail="a bare folder is ambiguous: put it under home/00000001/savedata/ or game/",
+    )
+
+
+def _place_save(
+    member: imports.ImportMember, ctx: imports.ImportCtx, session: imports.SessionIdentity
+) -> Union[imports.Placement, imports.ImportRefusal]:
+    """Place one file of a save or game data folder.
+
+    The user id is rewritten to `00000001`, the only user the broker's
+    layout has. A folder named for another title is placed and logged, since
+    a sequel or a DLC writes its predecessor's folders.
+
+    Args:
+        member: The member.
+        ctx: The launch context.
+        session: The session's identity.
+
+    Returns:
+        The placement, or a refusal.
+    """
+    split = _split_save(member)
+    if isinstance(split, imports.ImportRefusal):
+        return split
+    area, rest = split
+    if len(rest) < 2:
+        return imports.ImportRefusal(
+            "unrecognised_layout", member.name, _SAVE_EXPECTED, detail="a save is a folder, not one file"
+        )
+    unit, tail = rest[0], rest[1:]
+    if area == "game":
+        if unit.startswith(_LOCK_DIR_PREFIXES):
+            return imports.ImportRefusal(
+                "protected_destination", member.name, _SAVE_EXPECTED, detail="RPCS3's own lock folder"
+            )
+        if unit == _booted_game_dir(ctx):
+            return imports.ImportRefusal(
+                "protected_destination",
+                member.name,
+                _SAVE_EXPECTED,
+                detail=f"{unit} is the title being booted and keeps its own folder",
+            )
+    if _SAVE_DIR_RE.fullmatch(unit) is None:
+        return imports.ImportRefusal(
+            "unrecognised_layout",
+            member.name,
+            _SAVE_EXPECTED,
+            detail=f"{unit!r} is not a PS3 save folder name",
+        )
+    prefix = unit if area == "game" else unit[:9]
+    refusal = imports.check_member_identity(
+        member,
+        imports.NORMALISERS["ps_serial_nodash"](prefix),
+        session,
+        family="ps_serial_nodash",
+        policy="advisory",
+        expected=_SAVE_EXPECTED,
+    )
+    if refusal is not None:
+        return refusal
+    dest = imports.build_dest(
+        _SAVEDATA if area == "savedata" else "game", (unit,), tail, member=member, expected=_SAVE_EXPECTED
+    )
+    if isinstance(dest, imports.ImportRefusal):
+        return dest
+    return imports.Placement(member, dest)
+
+
+def _place_state(
+    member: imports.ImportMember, ctx: imports.ImportCtx
+) -> Union[imports.Placement, imports.ImportRefusal]:
+    """Place a savestate in the boot target's own `savestates/<serial>/` folder.
+
+    `launch` resumes the newest state in that folder, and the folder is
+    named for the id `_rom_title_id` reads off the boot target, so that id
+    is the only one a state can be filed under. A folder the member came in
+    must name the same title.
+
+    Args:
+        member: The member.
+        ctx: The launch context.
+
+    Returns:
+        The placement, or a refusal.
+    """
+    parts = member.parts
+    if parts[:2] == ("dev_hdd0", "savestates"):
+        parts = parts[2:]
+    elif parts[:1] == ("savestates",):
+        parts = parts[1:]
+    if len(parts) == 1:
+        folder, leaf = None, parts[0]
+    elif len(parts) == 2:
+        folder, leaf = parts
+    else:
+        return imports.ImportRefusal(
+            "unrecognised_layout",
+            member.name,
+            _STATE_EXPECTED,
+            detail="a state is one file, alone or in its title's folder",
+        )
+    if imports.LIBRETRO_STATE_RE.fullmatch(leaf):
+        return imports.ImportRefusal(
+            "source_incompatible", member.name, _STATE_EXPECTED, detail="a RetroArch (libretro) state"
+        )
+    found = _STATE_NAME_RE.fullmatch(leaf)
+    if found is None:
+        return imports.ImportRefusal("unrecognised_layout", member.name, _STATE_EXPECTED)
+    serial = _session_serial(ctx)
+    if serial is None:
+        return imports.ImportRefusal(
+            "identity_unknown",
+            member.name,
+            _STATE_EXPECTED,
+            detail="the boot target carries no title id to file a state under",
+        )
+    normalise = imports.NORMALISERS["ps_serial_nodash"]
+    if folder is not None:
+        refusal = imports.check_member_identity(
+            member,
+            normalise(folder),
+            imports.SessionIdentity(normalise(serial) or serial, "rom"),
+            family="ps_serial_nodash",
+            policy="strict",
+            expected=_STATE_EXPECTED,
+        )
+        if refusal is not None:
+            return refusal
+    if member.size == 0:
+        return imports.ImportRefusal(
+            "incomplete_unit", member.name, _STATE_EXPECTED, detail="the file is empty"
+        )
+    dest = imports.build_dest(
+        "savestates",
+        (serial,),
+        (f"{serial}_import.SAVESTAT{found['ext'] or ''}",),
+        member=member,
+        expected=_STATE_EXPECTED,
+    )
+    if isinstance(dest, imports.ImportRefusal):
+        return dest
+    return imports.Placement(member, dest)
+
+
 class Rpcs3(Emulator):
-    """RPCS3 (PS3) launcher: exit-only savestates via PINE, plus archive boot support."""
+    """RPCS3 (PS3) launcher: exit-only savestates via PINE, plus archive boot support.
+
+    Declared imports take PS3 save folders (save data under
+    `home/00000001/savedata`, game data under `game/`) and one savestate,
+    which rides the archive and is filed under the boot target's title id.
+    See `import_spec`.
+    """
 
     name = "rpcs3"
     display_name = "RPCS3"
@@ -1736,8 +2008,8 @@ class Rpcs3(Emulator):
     def save_subtrees(self) -> tuple[str, ...]:
         """CellSaveData saves, save states, plus the cellGameData save dirs under game/.
 
-        game/ mixes save data with installed PKG titles and RPCS3's ＄locks
-        dir, so the dump enumerates only the dirs without a bootable
+        game/ mixes save data with installed PKG titles and RPCS3's lock
+        folders, so the dump enumerates only the dirs without a bootable
         EBOOT.BIN. A restore inverts the problem: the archive holds nothing
         but previously dumped save dirs, and those dirs don't exist on disk
         yet, so the whole game/ prefix is declared to let them through.
@@ -1760,6 +2032,104 @@ class Rpcs3(Emulator):
             Saves, the whole `game/` prefix, and savestates.
         """
         return ("home/00000001/savedata", "game", "savestates")
+
+    @property
+    def link_roots(self) -> tuple[Path, ...]:
+        """The savestate tree `dev_hdd0/savestates` links to.
+
+        Read at call time so a test that patches `SSTATE_ROOT` is honoured.
+
+        Returns:
+            `SSTATE_ROOT` alone.
+        """
+        return (SSTATE_ROOT,)
+
+    def import_spec(self) -> imports.ImportSpec:
+        """Declare what RPCS3 takes: PS3 save folders, and one savestate.
+
+        Save data and game data are both folders that must hold `PARAM.SFO`.
+        RPCS3 groups the units itself in `validate_import_plan`, because a
+        unit sits two or four components deep depending on the tree. The
+        state rides the archive and resumes through `save.resume_slot`.
+
+        Returns:
+            The spec.
+        """
+        return imports.ImportSpec(
+            kinds=(
+                imports.KindSpec(
+                    "save",
+                    (
+                        f"{_SAVEDATA}/<SAVEDIR>/ with PARAM.SFO",
+                        "game/<DIR>/ with PARAM.SFO",
+                    ),
+                ),
+                imports.KindSpec(
+                    "state",
+                    ("<name>.SAVESTAT, .SAVESTAT.zst or .SAVESTAT.gz",),
+                    requires_resume_slot=True,
+                    max_members=1,
+                    counts_v1=True,
+                ),
+            ),
+            state_channel="archive",
+            protected=_PROTECTED,
+        )
+
+    def place_import(
+        self, member: imports.ImportMember, spec: imports.ImportSpec, ctx: imports.ImportCtx
+    ) -> Union[imports.Placement, imports.ImportRefusal]:
+        """Place one declared member: a save folder's file, or the state.
+
+        Args:
+            member: The member, already past the kind gate.
+            spec: This emulator's spec.
+            ctx: The launch context.
+
+        Returns:
+            The placement, or a refusal.
+        """
+        if member.kind == "state":
+            return _place_state(member, ctx)
+        return _place_save(member, ctx, imports.identity_for(self, ctx))
+
+    def validate_import_plan(
+        self, plan: list[imports.Placement], ctx: imports.ImportCtx
+    ) -> list[imports.ImportRefusal]:
+        """Refuse a save folder that has no `PARAM.SFO` at its root.
+
+        Args:
+            plan: The placements that passed every per-member check.
+            ctx: The launch context.
+
+        Returns:
+            One `incomplete_unit` per member of each folder that lacks one.
+        """
+        units: dict[tuple[str, ...], list[imports.Placement]] = {}
+        for placement in plan:
+            if placement.member.kind != "save":
+                continue
+            depth = _UNIT_DEPTH[placement.dest.parts[0]]
+            units.setdefault(placement.dest.parts[:depth], []).append(placement)
+        refusals = []
+        for unit, members in units.items():
+            if any(p.dest.parts[len(unit) :] == ("PARAM.SFO",) for p in members):
+                continue
+            refusals.extend(
+                imports.ImportRefusal(
+                    "incomplete_unit", p.member.name, "PARAM.SFO", detail="missing PARAM.SFO"
+                )
+                for p in members
+            )
+        return refusals
+
+    def identity_source(self) -> Optional[imports.IdentitySource]:
+        """Read the session's title id off the boot target, and take RomM's when it has none.
+
+        Returns:
+            The source.
+        """
+        return imports.IdentitySource("ps_serial_nodash", rom_reader=_rom_title_id)
 
     def prepare_restore(self) -> None:
         """Stop any running instance and mark the session as archive-restoring."""

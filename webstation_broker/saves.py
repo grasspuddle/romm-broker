@@ -267,7 +267,7 @@ def build_save_archive(
         relative to `root`. `zip_bytes` is None when nothing changed or on
         error; `error` is set when the root is missing, the changed files exceed
         `SAVE_FILE_MAX_BYTES`, every file confirmed changed had to be skipped,
-        or every save-file candidate failed to stat — each of the latter two
+        or every save-file candidate failed to stat; each of the latter two
         would otherwise read to the caller exactly like a session that saved
         nothing.
     """
@@ -308,7 +308,7 @@ def build_save_archive(
         if candidates and report["skipped"] == candidates:
             # Every candidate failed to stat: unlike one blip on an untouched
             # file, this means nothing was actually weighed against the
-            # baseline, so there is no evidence behind "nothing changed" —
+            # baseline, so there is no evidence behind "nothing changed":
             # reporting a clean no-op here could ship a session's saves as
             # lost without anyone noticing.
             report["error"] = (
@@ -599,7 +599,46 @@ def _longest_subtree(rel: str, subtrees: tuple[str, ...]) -> Optional[str]:
     return max(hits, key=len) if hits else None
 
 
-def surviving_chain_escapes(root: Path, rel: PurePosixPath, subtrees: tuple[str, ...]) -> bool:
+def _resolved_roots(link_roots: tuple[Path, ...]) -> tuple[Path, ...]:
+    """Resolve each declared link root, dropping one that cannot be resolved.
+
+    Args:
+        link_roots: The emulator's `link_roots`.
+
+    Returns:
+        The resolved roots.
+    """
+    resolved: list[Path] = []
+    for link_root in link_roots:
+        try:
+            resolved.append(link_root.resolve())
+        except (OSError, RuntimeError):
+            continue
+    return tuple(resolved)
+
+
+def _within(path: Path, root_real: Path, link_roots: tuple[Path, ...]) -> bool:
+    """Whether `path` resolves under the save root or under a declared link root.
+
+    Args:
+        path: The path to resolve.
+        root_real: The save root, resolved.
+        link_roots: The emulator's `link_roots`.
+
+    Returns:
+        True when the resolved path sits under either. A path that cannot be
+        resolved is not inside anything.
+    """
+    try:
+        real = path.resolve()
+    except (OSError, RuntimeError):
+        return False
+    return real.is_relative_to(root_real) or any(real.is_relative_to(r) for r in _resolved_roots(link_roots))
+
+
+def surviving_chain_escapes(
+    root: Path, rel: PurePosixPath, subtrees: tuple[str, ...], link_roots: tuple[Path, ...] = ()
+) -> bool:
     """Whether a directory the clear leaves standing links `rel` out of the save root.
 
     Only the components from `root` down to and including the subtree
@@ -613,11 +652,14 @@ def surviving_chain_escapes(root: Path, rel: PurePosixPath, subtrees: tuple[str,
         root: The emulator's save data root.
         rel: The destination, relative to `root`.
         subtrees: The subtrees `rel` may sit under; the longest match is used.
+        link_roots: Directories a component may link to although they lie
+            outside `root`. A component passes only when it resolves exactly to
+            one; a link into a subdirectory of one is still an escape.
 
     Returns:
         True when a surviving component is a symlink that resolves outside
-        `root`, or when a component cannot be inspected. Refusing is the
-        choice that cannot write outside the save root.
+        `root` and is not a declared link root, or when a component cannot be
+        inspected. Refusing is the choice that cannot write outside the save root.
     """
     sub = _longest_subtree(rel.as_posix(), subtrees)
     if sub is None:
@@ -626,6 +668,7 @@ def surviving_chain_escapes(root: Path, rel: PurePosixPath, subtrees: tuple[str,
         root_real = root.resolve()
     except (OSError, RuntimeError):
         return True
+    link_real = _resolved_roots(link_roots)
     path = root
     for part in PurePosixPath(sub).parts:
         path = path / part
@@ -640,7 +683,7 @@ def surviving_chain_escapes(root: Path, rel: PurePosixPath, subtrees: tuple[str,
                 target = path.resolve()
             except (OSError, RuntimeError):
                 return True
-            if not target.is_relative_to(root_real):
+            if not target.is_relative_to(root_real) and target not in link_real:
                 return True
     return False
 
@@ -652,6 +695,7 @@ def plan_v1(
     excluded: tuple[str, ...],
     *,
     include_imports: bool = False,
+    link_roots: tuple[Path, ...] = (),
 ) -> V1Plan:
     """Run every per-member restore check on the v1 members, writing nothing.
 
@@ -669,6 +713,7 @@ def plan_v1(
         include_imports: Also check `.import/` members as if they were v1,
             merged back in zip order, which is how the legacy
             `extract_save_archive` path refuses them.
+        link_roots: The emulator's `link_roots`, passed to the chain check.
 
     Returns:
         The plan, with every problem collected.
@@ -702,7 +747,7 @@ def plan_v1(
             continue
         sub = _longest_subtree(rel, subtrees)
         if sub not in escapes_by_subtree:
-            escapes_by_subtree[sub] = surviving_chain_escapes(root, member, subtrees)
+            escapes_by_subtree[sub] = surviving_chain_escapes(root, member, subtrees, link_roots)
         if escapes_by_subtree[sub]:
             problems.append((name, f"archive member resolves outside save dir: {name}", "symlink"))
             continue
@@ -749,12 +794,14 @@ class ArchivePlan:
         excluded_count: v1 members dropped for sitting under an excluded subtree.
         placed: `(member name, destination)` pairs for declared imports.
         sidecars: `(destination, bytes)` pairs the broker writes beside placed members.
+        link_roots: Directories a write may resolve into although they lie outside the root.
     """
 
     v1: tuple[str, ...]
     excluded_count: int
     placed: tuple[tuple[str, PurePosixPath], ...] = ()
     sidecars: tuple[tuple[PurePosixPath, bytes], ...] = ()
+    link_roots: tuple[Path, ...] = ()
 
 
 def _write_member(
@@ -766,6 +813,7 @@ def _write_member(
     *,
     guard: bool,
     label: str,
+    link_roots: tuple[Path, ...] = (),
 ) -> Literal["written", "skipped", "failed"]:
     """Write one file into the save tree through a staging file.
 
@@ -777,6 +825,7 @@ def _write_member(
         mtime: The mtime to stamp on the written file.
         guard: Whether a newer file already on disk is kept.
         label: The name to log the file under.
+        link_roots: Directories the resolved parent may sit under besides `root_real`.
 
     Returns:
         How the write went.
@@ -787,7 +836,7 @@ def _write_member(
         # Belt-and-suspenders on top of the member-path checks: confirms the
         # resolved write location is still under root even if some ancestor
         # directory turned out to be a symlink.
-        if not target.parent.resolve().is_relative_to(root_real):
+        if not _within(target.parent, root_real, link_roots):
             log.warning("saves: %s resolves outside save dir, skipped", label)
             return "failed"
         if guard and target.exists() and target.stat().st_mtime > mtime + _SAVE_MTIME_SLACK:
@@ -883,11 +932,19 @@ def write_save_archive(
                 mtime,
                 guard=not _guard_exempt(always_restore, name),
                 label=name,
+                link_roots=plan.link_roots,
             )
             result[outcome] += 1
         for name, dest in plan.placed:
             outcome = _write_member(
-                root, root_real, dest, lambda name=name: zf.read(name), when, guard=False, label=name
+                root,
+                root_real,
+                dest,
+                lambda name=name: zf.read(name),
+                when,
+                guard=False,
+                label=name,
+                link_roots=plan.link_roots,
             )
             if outcome == "written":
                 result["imported"] += 1
@@ -895,7 +952,14 @@ def write_save_archive(
                 result["failed"] += 1
         for dest, data in plan.sidecars:
             outcome = _write_member(
-                root, root_real, dest, lambda data=data: data, when, guard=False, label=dest.as_posix()
+                root,
+                root_real,
+                dest,
+                lambda data=data: data,
+                when,
+                guard=False,
+                label=dest.as_posix(),
+                link_roots=plan.link_roots,
             )
             if outcome == "failed":
                 result["failed"] += 1

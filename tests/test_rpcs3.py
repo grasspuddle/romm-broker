@@ -4,6 +4,7 @@ Covers config/ipc patching, the savestates symlink, save_subtrees, resume
 target selection, save-and-exit, and boot verification.
 """
 
+import io
 import logging
 import os
 import shlex
@@ -14,14 +15,16 @@ import subprocess
 import threading
 import time
 import zipfile
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from types import SimpleNamespace
 from typing import Callable, NoReturn, Optional
 
 import pytest
 
-from webstation_broker import settings
+from webstation_broker import imports, saves, settings
 from webstation_broker.emulators import rpcs3
+
+from .conftest import import_zip, preflight_import, restore_import
 
 
 @pytest.fixture
@@ -85,7 +88,7 @@ def _write_pkg(path: Path, title_id: str) -> Path:
     return path
 
 
-# ── config.yml / ipc.yml patching ───────────────────────────────────────
+# -- config.yml / ipc.yml patching --
 
 
 def test_patch_config_seeds_a_missing_file_with_every_forced_key(rpcs3_dirs: dict[str, Path]) -> None:
@@ -132,7 +135,7 @@ def test_patch_ipc_overwrites_an_existing_flat_key(rpcs3_dirs: dict[str, Path]) 
     assert "IPC Port: 28080" in text
 
 
-# ── savestates symlink ──────────────────────────────────────────────────
+# -- savestates symlink --
 
 
 def test_ensure_sstate_link_creates_a_fresh_symlink(rpcs3_dirs: dict[str, Path]) -> None:
@@ -305,7 +308,7 @@ def test_clearing_the_working_slot_enters_restoring_mode(rpcs3_dirs: dict[str, P
     assert emu.save_subtrees == ("home/00000001/savedata", "game", "savestates")
 
 
-# ── stale save data ─────────────────────────────────────────────────────
+# -- stale save data --
 
 
 def test_clearing_the_working_slot_drops_the_last_players_save_data(
@@ -431,7 +434,7 @@ def test_exit_cannot_ship_a_previous_players_leftover_saves(
     assert mine.stat().st_mtime > emu._session_start
 
 
-# ── save_subtrees ───────────────────────────────────────────────────────
+# -- save_subtrees --
 
 
 def test_save_subtrees_includes_savestates_when_dumping(rpcs3_dirs: dict[str, Path]) -> None:
@@ -450,7 +453,7 @@ def test_save_subtrees_includes_savestates_when_restoring(rpcs3_dirs: dict[str, 
     assert emu.save_subtrees == ("home/00000001/savedata", "game", "savestates")
 
 
-# ── state snapshot / diff ───────────────────────────────────────────────
+# -- state snapshot / diff --
 
 
 def test_newest_state_reads_the_newest_file_for_the_title(rpcs3_dirs: dict[str, Path]) -> None:
@@ -570,7 +573,7 @@ def test_all_state_files_reports_a_root_it_cannot_list(
     assert "could not list" in caplog.text
 
 
-# ── deferred leftover-savestate clear ───────────────────────────────────
+# -- deferred leftover-savestate clear --
 
 
 def test_clear_leftover_states_drops_files_unchanged_since_the_snapshot(
@@ -645,7 +648,7 @@ def test_clear_leftover_states_logs_a_file_it_cannot_remove(
     assert stale.exists()
 
 
-# ── launch process group / open descriptors ─────────────────────────────
+# -- launch process group / open descriptors --
 
 needs_procfs = pytest.mark.skipif(
     not Path("/proc/self/fd").is_dir(), reason="requires a Linux procfs"
@@ -815,7 +818,7 @@ def test_holds_open_is_false_when_the_descriptor_list_cannot_be_read(
     assert "could not read the open files" in caplog.text
 
 
-# ── save state write confirmation ───────────────────────────────────────
+# -- save state write confirmation --
 
 
 class _SleepClock:
@@ -965,7 +968,7 @@ def test_wait_for_state_write_falls_back_to_size_alone_without_a_pid(
     assert result == target
 
 
-# ── launch() resume selection ───────────────────────────────────────────
+# -- launch() resume selection --
 
 
 @pytest.fixture
@@ -1233,7 +1236,7 @@ def test_verify_boot_target_accepts_an_extraction(
     rpcs3._verify_boot_target(boot)  # must not raise
 
 
-# ── save_and_exit ───────────────────────────────────────────────────────
+# -- save_and_exit --
 
 
 def test_exit_without_a_slot_saves_nothing(
@@ -1392,7 +1395,7 @@ def test_exit_passes_no_pid_when_the_broker_holds_no_handle(
     assert seen["pid"] is None
 
 
-# ── state_path: the exit state RomM files in its library ────────────────
+# -- state_path: the exit state RomM files in its library --
 
 
 def _exit_confirming(monkeypatch: pytest.MonkeyPatch, state: Optional[Path]) -> rpcs3.Rpcs3:
@@ -1477,7 +1480,7 @@ def test_a_launch_forgets_the_last_exits_state(
     assert emu.state_path() is None
 
 
-# ── PINE wire protocol ────────────────────────────────────────────────────
+# -- PINE wire protocol --
 
 
 @pytest.fixture
@@ -1630,7 +1633,7 @@ def test_pine_request_refuses_a_reply_larger_than_the_cap(pine_socket: Path) -> 
     assert result is None
 
 
-# ── boot watchdog ───────────────────────────────────────────────────────
+# -- boot watchdog --
 
 
 class _FakeClock:
@@ -1817,7 +1820,7 @@ def test_stop_invalidates_an_in_flight_boot_watchdog(rpcs3_dirs: dict[str, Path]
     assert emu._launch_seq != seq_before
 
 
-# ── xdotool window targeting ────────────────────────────────────────────
+# -- xdotool window targeting --
 
 
 def _fake_xdotool(
@@ -1930,7 +1933,7 @@ def test_game_window_prefers_the_launch_pid_over_a_window_with_no_pid(
     assert emu._game_window() == "222"
 
 
-# ── archive extraction / extraction cache ─────────────────────────────
+# -- archive extraction / extraction cache --
 
 
 @pytest.mark.parametrize("setting,expected", [
@@ -2742,7 +2745,7 @@ def test_the_cache_is_disabled_by_default(monkeypatch: pytest.MonkeyPatch) -> No
     assert rpcs3._truthy(os.environ.get("RPCS3_CACHE_ENABLED", "false")) is False
 
 
-# ── CACHE_ENABLED gating of archive ROMs ────────────────────────────────
+# -- CACHE_ENABLED gating of archive ROMs --
 
 
 @pytest.mark.parametrize("ext", [".7z", ".zip", ".rar"])
@@ -2837,8 +2840,712 @@ def test_session_save_dirs_is_empty_without_a_launch(
     assert "no launch" in caplog.text
 
 
+# -- link_roots --
+
+
+def _state_zip(name: str) -> bytes:
+    """Build a one-member v1 archive holding a savestate.
+
+    Args:
+        name: The member's name.
+
+    Returns:
+        The zip file contents.
+    """
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr(zipfile.ZipInfo(name, date_time=(2020, 1, 1, 0, 0, 0)), b"state")
+    return buf.getvalue()
+
+
+def test_link_roots_names_the_savestate_root(rpcs3_dirs: dict[str, Path]) -> None:
+    """The one directory a subtree may link to is where RPCS3 writes its states.
+
+    Args:
+        rpcs3_dirs: The patched RPCS3 layout.
+    """
+    assert rpcs3.Rpcs3().link_roots == (rpcs3_dirs["sstate_root"],)
+
+
+def test_a_v1_state_restores_through_the_link_on_a_later_activate(rpcs3_dirs: dict[str, Path]) -> None:
+    """With the link already there, the plan takes a v1 state and the write lands beside RPCS3's.
+
+    Args:
+        rpcs3_dirs: The patched RPCS3 layout.
+    """
+    emu = rpcs3.Rpcs3()
+    rpcs3._ensure_sstate_link()
+    body = _state_zip("savestates/BLUS30443/BLUS30443.SAVESTAT")
+    view = saves.read_archive(body)
+
+    control = saves.plan_v1(view, emu.save_root, emu.restore_subtrees, ())
+    plan = saves.plan_v1(view, emu.save_root, emu.restore_subtrees, (), link_roots=emu.link_roots)
+    result = saves.write_save_archive(
+        body, emu.save_root, saves.ArchivePlan(plan.names, 0, link_roots=emu.link_roots)
+    )
+
+    assert [p[2] for p in control.problems] == ["symlink"]
+    assert plan.problems == ()
+    assert (result["written"], result["failed"]) == (1, 0)
+    assert (rpcs3_dirs["sstate_root"] / "BLUS30443" / "BLUS30443.SAVESTAT").read_bytes() == b"state"
+
+
+def test_a_v1_state_restores_when_the_link_is_made_after_the_plan(rpcs3_dirs: dict[str, Path]) -> None:
+    """On a first activate the link appears between the plan and the write, and the write still lands.
+
+    Args:
+        rpcs3_dirs: The patched RPCS3 layout.
+    """
+    emu = rpcs3.Rpcs3()
+    body = _state_zip("savestates/BLUS30443/BLUS30443.SAVESTAT")
+    plan = saves.plan_v1(saves.read_archive(body), emu.save_root, emu.restore_subtrees, ())
+    assert plan.problems == ()
+
+    rpcs3._ensure_sstate_link()
+    result = saves.write_save_archive(
+        body, emu.save_root, saves.ArchivePlan(plan.names, 0, link_roots=emu.link_roots)
+    )
+
+    assert (result["written"], result["failed"]) == (1, 0)
+    assert (rpcs3_dirs["sstate_root"] / "BLUS30443" / "BLUS30443.SAVESTAT").exists()
+
+
 def test_restore_subtrees_is_the_whole_restore_set_before_the_clear() -> None:
     """Preflight runs before the clear flips `_restoring`, so it must not depend on it."""
     emu = rpcs3.Rpcs3()
 
     assert emu.restore_subtrees == ("home/00000001/savedata", "game", "savestates")
+
+
+# -- declared imports --
+
+_SERIAL = "BLUS30443"
+"""The title the import tests boot as."""
+
+_SAVEDIR = "BLUS30443-AUTOSAVE"
+"""A save folder named for that title, the way a game names its own."""
+
+_SAVE_DEST = f"home/00000001/savedata/{_SAVEDIR}/PARAM.SFO"
+"""Where a save folder's `PARAM.SFO` lands, whichever wrapper it was packed in."""
+
+_SAVE_MEMBER = f".import/save/{_SAVE_DEST}"
+"""A complete save folder's only file, as an import member."""
+
+_STATE_DEST = f"savestates/{_SERIAL}/{_SERIAL}_import.SAVESTAT"
+"""Where an imported state lands for `_SERIAL`."""
+
+
+def _boot_as(monkeypatch: pytest.MonkeyPatch, serial: Optional[str]) -> None:
+    """Make every boot target the test hands preflight read as `serial`, or as carrying none.
+
+    Args:
+        monkeypatch: Pytest's attribute patcher.
+        serial: The title id `_rom_title_id` answers, or None for a target that carries none.
+    """
+
+    def read(rom: Path) -> Optional[str]:
+        """Answer the fixed id.
+
+        Args:
+            rom: The boot target, ignored.
+
+        Returns:
+            `serial`.
+        """
+        return serial
+
+    monkeypatch.setattr(rpcs3, "_rom_title_id", read)
+
+
+@pytest.fixture
+def booted(monkeypatch: pytest.MonkeyPatch, rpcs3_dirs: dict[str, Path]) -> dict[str, Path]:
+    """Boot every target as `_SERIAL` on the patched RPCS3 layout.
+
+    Args:
+        monkeypatch: Pytest's attribute patcher.
+        rpcs3_dirs: The patched RPCS3 layout.
+
+    Returns:
+        The layout.
+    """
+    _boot_as(monkeypatch, _SERIAL)
+    return rpcs3_dirs
+
+
+def _preflight(
+    dirs: dict[str, Path],
+    members: dict[str, bytes],
+    *,
+    rom_file: Optional[Path] = None,
+    v1: Optional[dict[str, bytes]] = None,
+    resume_slot: Optional[int] = 0,
+    rom: Optional[imports.RomRef] = None,
+) -> imports.PreflightResult:
+    """Preflight an archive of import members on a fresh RPCS3.
+
+    Args:
+        dirs: The patched RPCS3 layout.
+        members: `.import/<kind>/...` names mapped to bytes.
+        rom_file: The boot target; a disc image under the ROM root when None.
+        v1: Ordinary archive members to carry beside them, or None.
+        resume_slot: The activate's `save.resume_slot`.
+        rom: The activate body's rom, or None.
+
+    Returns:
+        What preflight decided.
+    """
+    if rom_file is None:
+        rom_file = dirs["rom_root"] / "Game.iso"
+    return preflight_import(
+        rpcs3.Rpcs3(), import_zip(members, v1), rom_file=rom_file, resume_slot=resume_slot, rom=rom
+    )
+
+
+def _refused(result: imports.PreflightResult) -> list[tuple[str, Optional[str]]]:
+    """Summarise a preflight's refusals.
+
+    Args:
+        result: What preflight decided.
+
+    Returns:
+        Each refusal's reason and member.
+    """
+    return [(r.reason, r.member) for r in result.refusals]
+
+
+def test_the_import_spec_takes_saves_and_one_archived_state() -> None:
+    """RPCS3 takes save folders and one state, which rides the archive and waits for a resume slot."""
+    spec = rpcs3.Rpcs3().import_spec()
+    state = spec.kind("state")
+
+    assert [k.kind for k in spec.kinds] == ["save", "state"]
+    assert spec.state_channel == "archive"
+    assert state is not None
+    assert (state.requires_resume_slot, state.max_members, state.counts_v1) == (True, 1, True)
+    assert spec.protected == ("home/*/exdata/*", "home/*/trophy/*", "game/*/USRDIR/EBOOT.*")
+    assert (spec.unit_depth, spec.card_subtree) == (0, None)
+
+
+@pytest.mark.parametrize(
+    "member",
+    [
+        f"home/00000001/savedata/{_SAVEDIR}/PARAM.SFO",
+        f"dev_hdd0/home/00000001/savedata/{_SAVEDIR}/PARAM.SFO",
+        f"home/00000002/savedata/{_SAVEDIR}/PARAM.SFO",
+        f"dev_hdd0/home/00000042/savedata/{_SAVEDIR}/PARAM.SFO",
+        f"PS3/SAVEDATA/{_SAVEDIR}/PARAM.SFO",
+        f"SAVEDATA/{_SAVEDIR}/PARAM.SFO",
+    ],
+)
+def test_a_save_folder_lands_under_savedata_whichever_wrapper_it_came_in(
+    booted: dict[str, Path], member: str
+) -> None:
+    """A save folder is found under any wrapper a copy leaves, and any user id becomes 00000001.
+
+    Args:
+        booted: The patched RPCS3 layout.
+        member: The member's path below `.import/save/`.
+    """
+    result = _preflight(booted, {f".import/save/{member}": b"sfo"})
+
+    assert result.refusals == ()
+    assert [p.dest for p in result.placements] == [PurePosixPath(_SAVE_DEST)]
+
+
+def test_a_save_folder_keeps_its_own_subfolders(booted: dict[str, Path]) -> None:
+    """Everything below the folder's name is kept as it was.
+
+    Args:
+        booted: The patched RPCS3 layout.
+    """
+    result = _preflight(
+        booted,
+        {
+            _SAVE_MEMBER: b"sfo",
+            f".import/save/PS3/SAVEDATA/{_SAVEDIR}/USRDIR/SLOT1/DATA.BIN": b"data",
+        },
+    )
+
+    assert result.refusals == ()
+    assert sorted(p.dest.as_posix() for p in result.placements) == [
+        f"home/00000001/savedata/{_SAVEDIR}/PARAM.SFO",
+        f"home/00000001/savedata/{_SAVEDIR}/USRDIR/SLOT1/DATA.BIN",
+    ]
+
+
+@pytest.mark.parametrize("member", [f"game/{_SERIAL}/PARAM.SFO", f"dev_hdd0/game/{_SERIAL}/PARAM.SFO"])
+def test_a_game_data_folder_lands_under_game(booted: dict[str, Path], member: str) -> None:
+    """A cellGameData folder lands under `game/`, even for the title being booted from a disc image.
+
+    Args:
+        booted: The patched RPCS3 layout.
+        member: The member's path below `.import/save/`.
+    """
+    result = _preflight(booted, {f".import/save/{member}": b"sfo"})
+
+    assert result.refusals == ()
+    assert [p.dest for p in result.placements] == [PurePosixPath(f"game/{_SERIAL}/PARAM.SFO")]
+
+
+def test_two_users_saves_for_one_folder_collide(booted: dict[str, Path]) -> None:
+    """Both user ids become 00000001, so two copies of one folder name the same file.
+
+    Args:
+        booted: The patched RPCS3 layout.
+    """
+    first = f".import/save/home/00000001/savedata/{_SAVEDIR}/PARAM.SFO"
+    second = f".import/save/home/00000002/savedata/{_SAVEDIR}/PARAM.SFO"
+
+    result = _preflight(booted, {first: b"one", second: b"two"})
+
+    assert sorted(_refused(result)) == [("destination_conflict", first), ("destination_conflict", second)]
+
+
+def test_a_bare_folder_is_refused_as_ambiguous(booted: dict[str, Path]) -> None:
+    """RPCS3 keeps save data and game data apart, and a bare folder does not say which it is.
+
+    Args:
+        booted: The patched RPCS3 layout.
+    """
+    result = _preflight(booted, {f".import/save/{_SAVEDIR}/PARAM.SFO": b"sfo"})
+
+    assert [r.reason for r in result.refusals] == ["unrecognised_layout"]
+    assert "home/00000001/savedata/" in (result.refusals[0].detail or "")
+
+
+@pytest.mark.parametrize(
+    "member",
+    [
+        "home/00000001/savedata/PARAM.SFO",
+        "game/PARAM.SFO",
+        "home/00000001/localusername",
+        "home/00000001/settings/setting.dat",
+        "home/notauser/savedata/X/PARAM.SFO",
+        "dev_hdd0/PARAM.SFO",
+    ],
+)
+def test_a_path_that_is_no_save_folder_is_unrecognised(booted: dict[str, Path], member: str) -> None:
+    """A single file, a home folder that is not save data and a malformed user id are all refused.
+
+    Args:
+        booted: The patched RPCS3 layout.
+        member: The member's path below `.import/save/`.
+    """
+    result = _preflight(booted, {f".import/save/{member}": b"sfo"})
+
+    assert _refused(result) == [("unrecognised_layout", f".import/save/{member}")]
+
+
+@pytest.mark.parametrize("name", ["Bad Name", "$LOCK", "A" * 33, "BLUS30443.SAVE"])
+def test_a_folder_name_a_game_could_not_have_written_is_refused(
+    booted: dict[str, Path], name: str
+) -> None:
+    """A save folder is at most 32 characters of letters, digits, `_` and `-`.
+
+    Args:
+        booted: The patched RPCS3 layout.
+        name: The folder's name.
+    """
+    member = f".import/save/home/00000001/savedata/{name}/PARAM.SFO"
+
+    result = _preflight(booted, {member: b"sfo"})
+
+    assert _refused(result) == [("unrecognised_layout", member)]
+
+
+def test_a_savestate_declared_as_a_save_is_pointed_at_the_state_kind(booted: dict[str, Path]) -> None:
+    """A `savestates/` path under kind save is refused with a pointer to kind state.
+
+    Args:
+        booted: The patched RPCS3 layout.
+    """
+    member = f".import/save/dev_hdd0/savestates/{_SERIAL}/{_SERIAL}_1.SAVESTAT"
+
+    result = _preflight(booted, {member: b"state"})
+
+    assert _refused(result) == [("unrecognised_layout", member)]
+    assert "kind state" in (result.refusals[0].detail or "")
+
+
+@pytest.mark.parametrize(
+    "member",
+    [
+        "home/00000001/exdata/UP0001-BLUS30443_00-0000000000000000.rap",
+        "dev_hdd0/home/00000001/exdata/game.edat",
+        "home/00000001/trophy/NPWR00001_00/TROPHY.TRP",
+        "game/$locks/BLUS30443",
+        "game/\uff04locks/BLUS30443",
+    ],
+)
+def test_licences_trophies_and_lock_folders_are_protected(booted: dict[str, Path], member: str) -> None:
+    """RPCS3's licences, trophies and lock folders are its own, whatever the archive says.
+
+    Args:
+        booted: The patched RPCS3 layout.
+        member: The member's path below `.import/save/`.
+    """
+    result = _preflight(booted, {f".import/save/{member}": b"data"})
+
+    assert _refused(result) == [("protected_destination", f".import/save/{member}")]
+
+
+@pytest.mark.parametrize("leaf", ["EBOOT.BIN", "EBOOT.elf", "EBOOT.BIN.bak"])
+def test_a_games_eboot_is_protected_in_a_game_data_folder(booted: dict[str, Path], leaf: str) -> None:
+    """An `EBOOT.*` under `USRDIR` would replace a game's own executable, so it is refused.
+
+    Args:
+        booted: The patched RPCS3 layout.
+        leaf: The executable's name.
+    """
+    eboot = f".import/save/game/BLES00001/USRDIR/{leaf}"
+
+    result = _preflight(
+        booted,
+        {
+            ".import/save/game/BLES00001/PARAM.SFO": b"sfo",
+            ".import/save/game/BLES00001/USRDIR/DATA.BIN": b"data",
+            eboot: b"code",
+        },
+    )
+
+    assert _refused(result) == [("protected_destination", eboot)]
+
+
+@pytest.mark.parametrize("target", ["installed", "pkg"])
+def test_the_installed_title_being_booted_keeps_its_game_folder(
+    rpcs3_dirs: dict[str, Path], target: str
+) -> None:
+    """An installed title's own `game/` folder holds its executable, so the import stays out of it.
+
+    Every other folder under `game/` is still taken.
+
+    Args:
+        rpcs3_dirs: The patched RPCS3 layout.
+        target: How the title is booted: from its installed `EBOOT.BIN`, or from its `.pkg`.
+    """
+    if target == "installed":
+        rom = rpcs3_dirs["game_dir"] / _SERIAL / "USRDIR" / "EBOOT.BIN"
+    else:
+        rom = _write_pkg(rpcs3_dirs["rom_root"] / "Game.pkg", _SERIAL)
+    own = f".import/save/game/{_SERIAL}/PARAM.SFO"
+    other = ".import/save/game/BLES00001/PARAM.SFO"
+
+    result = _preflight(rpcs3_dirs, {own: b"sfo", other: b"sfo"}, rom_file=rom)
+
+    assert _refused(result) == [("protected_destination", own)]
+    assert [p.dest.as_posix() for p in result.placements] == []
+
+
+def test_a_save_folder_without_param_sfo_is_incomplete(booted: dict[str, Path]) -> None:
+    """RPCS3 lists a save by its `PARAM.SFO`; without one the folder is not a save.
+
+    Args:
+        booted: The patched RPCS3 layout.
+    """
+    member = f".import/save/home/00000001/savedata/{_SAVEDIR}/DATA.BIN"
+
+    result = _preflight(booted, {member: b"data"})
+
+    assert [(r.reason, r.member, r.detail) for r in result.refusals] == [
+        ("incomplete_unit", member, "missing PARAM.SFO")
+    ]
+
+
+def test_each_folder_is_a_unit_of_its_own(booted: dict[str, Path]) -> None:
+    """A folder with its `PARAM.SFO` is taken even beside one without, in either tree.
+
+    Args:
+        booted: The patched RPCS3 layout.
+    """
+    lone = ".import/save/game/BLES00002/USRDIR/DATA.BIN"
+
+    result = _preflight(
+        booted,
+        {
+            _SAVE_MEMBER: b"sfo",
+            ".import/save/game/BLES00001/PARAM.SFO": b"sfo",
+            lone: b"data",
+        },
+    )
+
+    assert _refused(result) == [("incomplete_unit", lone)]
+
+
+def test_param_sfo_below_the_folders_root_does_not_count(booted: dict[str, Path]) -> None:
+    """The file that makes a folder a save is the one at its root.
+
+    Args:
+        booted: The patched RPCS3 layout.
+    """
+    member = f".import/save/home/00000001/savedata/{_SAVEDIR}/BACKUP/PARAM.SFO"
+
+    result = _preflight(booted, {member: b"sfo"})
+
+    assert _refused(result) == [("incomplete_unit", member)]
+
+
+def test_a_save_named_for_another_title_is_placed_and_noted(
+    booted: dict[str, Path], caplog: pytest.LogCaptureFixture
+) -> None:
+    """A sequel reads its predecessor's folders, so another title's prefix is logged and not refused.
+
+    Args:
+        booted: The patched RPCS3 layout.
+        caplog: Pytest's log capture.
+    """
+    caplog.set_level(logging.INFO, logger="webstation_broker.imports")
+    member = ".import/save/home/00000001/savedata/BLES00001-SAVE/PARAM.SFO"
+
+    result = _preflight(booted, {member: b"sfo"})
+
+    assert result.refusals == ()
+    assert [p.dest.as_posix() for p in result.placements] == [
+        "home/00000001/savedata/BLES00001-SAVE/PARAM.SFO"
+    ]
+    assert any("id mismatch, allowed" in record.getMessage() for record in caplog.records)
+
+
+def test_the_session_id_is_the_boot_targets_before_romms(
+    monkeypatch: pytest.MonkeyPatch, rpcs3_dirs: dict[str, Path]
+) -> None:
+    """The id read off the boot target wins, and RomM's stands in only when the target has none.
+
+    Args:
+        monkeypatch: Pytest's attribute patcher.
+        rpcs3_dirs: The patched RPCS3 layout.
+    """
+    romm = imports.RomRef(1, "Game", "ps3", title_id="BLES-00001")
+
+    _boot_as(monkeypatch, _SERIAL)
+    from_rom = _preflight(rpcs3_dirs, {_SAVE_MEMBER: b"sfo"}, rom=romm)
+    _boot_as(monkeypatch, None)
+    from_romm = _preflight(rpcs3_dirs, {_SAVE_MEMBER: b"sfo"}, rom=romm)
+
+    assert from_rom.identity == imports.SessionIdentity(_SERIAL, "rom")
+    assert from_romm.identity == imports.SessionIdentity("BLES00001", "romm")
+
+
+def test_the_identity_source_reads_the_boot_target_in_the_ps_serial_family() -> None:
+    """RPCS3 asks the boot target for its id and normalises it as a PS serial."""
+    source = rpcs3.Rpcs3().identity_source()
+
+    assert source == imports.IdentitySource("ps_serial_nodash", rom_reader=rpcs3._rom_title_id)
+
+
+@pytest.mark.parametrize(
+    "member",
+    [
+        f"{_SERIAL}_1.SAVESTAT",
+        f"savestates/{_SERIAL}/{_SERIAL}_1.SAVESTAT",
+        f"dev_hdd0/savestates/{_SERIAL}/{_SERIAL}_1.SAVESTAT",
+        f"{_SERIAL}/{_SERIAL}_1.SAVESTAT",
+        "Some Name.SAVESTAT",
+    ],
+)
+def test_a_state_lands_in_the_titles_own_savestates_folder(booted: dict[str, Path], member: str) -> None:
+    """A state is renamed for the title and filed where `launch` looks for the newest one.
+
+    Args:
+        booted: The patched RPCS3 layout.
+        member: The member's path below `.import/state/`.
+    """
+    result = _preflight(booted, {f".import/state/{member}": b"progress"})
+
+    assert result.refusals == ()
+    assert [p.dest for p in result.placements] == [PurePosixPath(_STATE_DEST)]
+
+
+@pytest.mark.parametrize("suffix", [".zst", ".gz"])
+def test_a_state_keeps_its_compression_suffix(booted: dict[str, Path], suffix: str) -> None:
+    """RPCS3 reads a compressed state by its suffix, so the suffix is kept.
+
+    Args:
+        booted: The patched RPCS3 layout.
+        suffix: The compression suffix.
+    """
+    result = _preflight(booted, {f".import/state/{_SERIAL}_1.SAVESTAT{suffix}": b"progress"})
+
+    assert result.refusals == ()
+    assert [p.dest for p in result.placements] == [PurePosixPath(f"{_STATE_DEST}{suffix}")]
+
+
+def test_a_state_in_another_titles_folder_is_refused(booted: dict[str, Path]) -> None:
+    """A state that arrives in a folder named for another title is that title's.
+
+    Args:
+        booted: The patched RPCS3 layout.
+    """
+    member = ".import/state/savestates/BLES00001/BLES00001_1.SAVESTAT"
+
+    result = _preflight(booted, {member: b"progress"})
+
+    assert [(r.reason, r.member, r.detail) for r in result.refusals] == [
+        (
+            "identity_mismatch",
+            member,
+            f"member BLES00001, session {_SERIAL} (from rom)",
+        )
+    ]
+
+
+def test_a_state_needs_the_id_the_boot_target_carries(rpcs3_dirs: dict[str, Path]) -> None:
+    """A bare disc image or an archive gives no id, and no folder to file a state under.
+
+    Args:
+        rpcs3_dirs: The patched RPCS3 layout.
+    """
+    member = f".import/state/{_SERIAL}_1.SAVESTAT"
+    iso = rpcs3_dirs["rom_root"] / "Game.iso"
+    iso.write_bytes(b"iso")
+
+    from_iso = _preflight(rpcs3_dirs, {member: b"progress"}, rom_file=iso)
+    without_rom = preflight_import(
+        rpcs3.Rpcs3(), import_zip({member: b"progress"}), rom_file=None, resume_slot=0
+    )
+
+    assert _refused(from_iso) == [("identity_unknown", member)]
+    assert _refused(without_rom) == [("identity_unknown", member)]
+
+
+def test_romms_id_does_not_stand_in_for_a_state_the_target_lacks(
+    monkeypatch: pytest.MonkeyPatch, rpcs3_dirs: dict[str, Path]
+) -> None:
+    """A folder named for RomM's id is not the one `launch` reads, so RomM's id files no state.
+
+    Args:
+        monkeypatch: Pytest's attribute patcher.
+        rpcs3_dirs: The patched RPCS3 layout.
+    """
+    _boot_as(monkeypatch, None)
+    member = f".import/state/{_SERIAL}_1.SAVESTAT"
+    romm = imports.RomRef(1, "Game", "ps3", title_id=_SERIAL)
+
+    result = _preflight(rpcs3_dirs, {member: b"progress"}, rom=romm)
+
+    assert _refused(result) == [("identity_unknown", member)]
+
+
+@pytest.mark.parametrize(
+    "name", ["state.savestat", "state.SAVESTAT.7z", "state.SAVESTAT.zst.bak", "state", "state.zst"]
+)
+def test_a_state_name_the_launch_would_not_find_is_refused(booted: dict[str, Path], name: str) -> None:
+    """The launch looks for `*.SAVESTAT`, `.zst` and `.gz` by exact case, so nothing else is taken.
+
+    Args:
+        booted: The patched RPCS3 layout.
+        name: The member's file name.
+    """
+    member = f".import/state/{name}"
+
+    result = _preflight(booted, {member: b"progress"})
+
+    assert _refused(result) == [("unrecognised_layout", member)]
+
+
+def test_a_libretro_state_is_source_incompatible(booted: dict[str, Path]) -> None:
+    """A RetroArch state is another emulator's, so it is named as such.
+
+    Args:
+        booted: The patched RPCS3 layout.
+    """
+    member = ".import/state/Game.state1"
+
+    result = _preflight(booted, {member: b"progress"})
+
+    assert _refused(result) == [("source_incompatible", member)]
+
+
+def test_an_empty_state_is_incomplete(booted: dict[str, Path]) -> None:
+    """An empty file cannot resume anything.
+
+    Args:
+        booted: The patched RPCS3 layout.
+    """
+    member = f".import/state/{_SERIAL}_1.SAVESTAT"
+
+    result = _preflight(booted, {member: b""})
+
+    assert _refused(result) == [("incomplete_unit", member)]
+
+
+def test_a_state_below_a_deeper_folder_is_refused(booted: dict[str, Path]) -> None:
+    """A state is one file, alone or in its title's folder.
+
+    Args:
+        booted: The patched RPCS3 layout.
+    """
+    member = f".import/state/savestates/{_SERIAL}/older/{_SERIAL}_1.SAVESTAT"
+
+    result = _preflight(booted, {member: b"progress"})
+
+    assert _refused(result) == [("unrecognised_layout", member)]
+
+
+def test_a_state_waits_for_a_resume_slot(booted: dict[str, Path]) -> None:
+    """A state only boots with `save.resume_slot` set, so it is refused without one.
+
+    Args:
+        booted: The patched RPCS3 layout.
+    """
+    member = f".import/state/{_SERIAL}_1.SAVESTAT"
+
+    result = _preflight(booted, {member: b"progress"}, resume_slot=None)
+
+    assert _refused(result) == [("resume_slot_required", member)]
+
+
+def test_an_archived_state_leaves_no_room_for_an_imported_one(booted: dict[str, Path]) -> None:
+    """The broker resumes one state; an archive that already carries one takes no second.
+
+    Args:
+        booted: The patched RPCS3 layout.
+    """
+    member = f".import/state/{_SERIAL}_1.SAVESTAT"
+
+    result = _preflight(
+        booted, {member: b"progress"}, v1={f"savestates/{_SERIAL}/{_SERIAL}_5.SAVESTAT": b"older"}
+    )
+
+    assert _refused(result) == [("destination_conflict", member)]
+
+
+def test_an_imported_state_and_saves_restore_where_a_launch_finds_them(rpcs3_dirs: dict[str, Path]) -> None:
+    """Restored, the state is the newest one `launch` picks, and a game data folder is one the dump ships.
+
+    Args:
+        rpcs3_dirs: The patched RPCS3 layout.
+    """
+    rom = rpcs3_dirs["game_dir"] / _SERIAL / "USRDIR" / "EBOOT.BIN"
+    emu = rpcs3.Rpcs3()
+    body = import_zip(
+        {
+            _SAVE_MEMBER: b"sfo",
+            ".import/save/game/BLES00001/PARAM.SFO": b"sfo",
+            f".import/state/{_SERIAL}_1.SAVESTAT": b"progress",
+        }
+    )
+    result = preflight_import(emu, body, rom_file=rom, resume_slot=0)
+    rpcs3._ensure_sstate_link()
+
+    report = restore_import(emu, body, result)
+
+    state = rpcs3_dirs["sstate_root"] / _SERIAL / f"{_SERIAL}_import.SAVESTAT"
+    assert (report["imported"], report["failed"]) == (3, 0)
+    assert state.read_bytes() == b"progress"
+    assert rpcs3._newest_state(_SERIAL) == state
+    assert (rpcs3_dirs["user_home"] / "savedata" / _SAVEDIR / "PARAM.SFO").read_bytes() == b"sfo"
+    assert [d.name for d in rpcs3._gamedata_dirs()] == ["BLES00001"]
+
+
+def test_lock_folders_are_told_apart_by_prefix(rpcs3_dirs: dict[str, Path]) -> None:
+    """RPCS3's lock folders start with a dollar sign, ASCII or full-width, and are never save data.
+
+    Args:
+        rpcs3_dirs: The patched RPCS3 layout.
+    """
+    for name in ("$locks", "\uff04locks", "BLES00001"):
+        (rpcs3_dirs["game_dir"] / name).mkdir()
+
+    assert rpcs3._LOCK_DIR_PREFIXES == ("$", "\uff04")
+    assert [d.name for d in rpcs3._gamedata_dirs()] == ["BLES00001"]
+    assert rpcs3._installed_title_dirs() == {"BLES00001"}

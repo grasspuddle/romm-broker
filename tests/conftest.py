@@ -26,7 +26,7 @@ from fastapi.testclient import TestClient
 
 from webstation_broker import imports, saves, screenshot, selkies, session, settings
 from webstation_broker.app import create_app
-from webstation_broker.emulators import base
+from webstation_broker.emulators import base, xemu
 from webstation_broker.emulators.base import Emulator
 
 PREFIX = settings.PREFIX
@@ -36,6 +36,57 @@ SLEEPER_CMD = ["/usr/bin/sleep", "60"]
 
 DETACHED_CMD = ["/usr/bin/sleep", "61"]
 """Argv the stand-in detached app runs, distinct from `SLEEPER_CMD` so the two are told apart."""
+
+SECTOR = 2048
+"""The sector an XISO addresses its volume descriptor and directory table in."""
+
+
+def xiso(
+    path: Path, title_id: int = 0x4D530064, *, partition_at: int = 0, xbe_name: bytes = b"default.xbe"
+) -> Path:
+    """Write a minimal XISO image and return its path.
+
+    The image holds a volume descriptor, a one-entry root directory table, and
+    an XBE whose certificate carries `title_id`.
+
+    Args:
+        path: Where the image is written.
+        title_id: Title id stamped into the XBE certificate.
+        partition_at: Byte offset of the game partition, mimicking a disc that
+            carries a video partition up front.
+        xbe_name: Name of the single root directory entry.
+
+    Returns:
+        The path the image was written to.
+    """
+    root_sector, xbe_sector, xbe_size = 33, 34, 0x200
+    image = bytearray((partition_at + (xbe_sector + 1) * SECTOR))
+
+    vd = bytearray(SECTOR)
+    vd[: len(xemu._XISO_MAGIC)] = xemu._XISO_MAGIC
+    vd[20:24] = struct.pack("<I", root_sector)
+    vd[24:28] = struct.pack("<I", SECTOR)
+    image[partition_at + 32 * SECTOR : partition_at + 33 * SECTOR] = vd
+
+    entry = bytearray(SECTOR)
+    entry[0:2] = struct.pack("<H", 0)  # left
+    entry[2:4] = struct.pack("<H", 0)  # right
+    entry[4:8] = struct.pack("<I", xbe_sector)
+    entry[8:12] = struct.pack("<I", xbe_size)
+    entry[13] = len(xbe_name)
+    entry[14 : 14 + len(xbe_name)] = xbe_name
+    image[partition_at + root_sector * SECTOR : partition_at + (root_sector + 1) * SECTOR] = entry
+
+    xbe = bytearray(xbe_size)
+    xbe[0:4] = b"XBEH"
+    xbe[0x104:0x108] = struct.pack("<I", 0x10000)
+    xbe[0x118:0x11C] = struct.pack("<I", 0x10100)
+    xbe[0x108:0x10C] = struct.pack("<I", title_id)  # certificate title id
+    off = partition_at + xbe_sector * SECTOR
+    image[off : off + xbe_size] = xbe
+
+    path.write_bytes(bytes(image))
+    return path
 
 
 def mangle_zip_member(
@@ -190,6 +241,7 @@ def restore_import(emulator: Emulator, body: bytes, result: imports.PreflightRes
             0,
             tuple((p.member.name, p.dest) for p in placements),
             tuple(sidecar for p in placements for sidecar in p.sidecars),
+            emulator.link_roots,
         ),
     )
 

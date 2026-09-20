@@ -1,14 +1,20 @@
 """Azahar (3DS) ROM resolution, qt-config.ini patching, launch, and save-dump mtime restamping."""
 
 import configparser
+import fnmatch
 import os
 import time
-from pathlib import Path
-from typing import NoReturn, Tuple
+import zipfile
+from collections.abc import Sequence
+from pathlib import Path, PurePosixPath
+from typing import Any, NoReturn, Optional, Tuple
 
 import pytest
 
+from webstation_broker import imports
 from webstation_broker.emulators import azahar
+
+from .conftest import import_zip, preflight_import, restore_import
 
 
 @pytest.fixture
@@ -834,3 +840,500 @@ def test_save_and_exit_logs_and_continues_when_the_walk_itself_raises(
 
     assert "could not walk" in caplog.text
     assert result == {"state_saved": None, "state_slot": None, "state_file": None}
+
+
+# -- declared imports --
+
+_ROMM = imports.RomRef(1, "Game", "3ds", title_id="0004000000033500", save_target="00040000/00033500")
+"""The rom a 3DS activate carries, with RomM's title id and its save target."""
+_ROMM_NO_TARGET = imports.RomRef(1, "Game", "3ds", title_id="0004000000033500")
+"""A rom whose RomM entry has a title id and no save target."""
+_ID = "0" * 32
+"""The console and SD card ids Azahar files saves under."""
+_HW0 = "a1b2c3d4" * 4
+"""A hardware console id, which is not all zeros."""
+_HW1 = "e5f6a7b8" * 4
+"""A hardware SD card id."""
+_SD = f"sdmc/Nintendo 3DS/{_ID}/{_ID}"
+"""An SD card's per-console folder as Azahar names it."""
+_DEST_SD = f"sdmc/Nintendo 3DS/{azahar.SYSTEM_ID}/{azahar.SDCARD_ID}"
+"""Where the SD card's per-console folder is, below the data root."""
+_TITLE = "title/00040000/00033500"
+"""The session's title folder under an SD card."""
+_SAVE_FILE = f"{_TITLE}/data/00000001.sav"
+"""The save file a title folder holds."""
+
+
+@pytest.fixture
+def user_dir(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
+    """Point Azahar's save root, and the save-group roots the exit restamp walks, into tmp_path.
+
+    A restore lands under `save_root`, which the class resolves once at
+    import, and the exit route reads the module's group roots, so a round
+    trip would reach outside tmp_path without both.
+
+    Args:
+        monkeypatch: The pytest monkeypatch fixture.
+        tmp_path: The per-test temporary directory.
+
+    Returns:
+        The patched data root.
+    """
+    root = tmp_path / "azahar-emu"
+    sdmc = root / "sdmc" / "Nintendo 3DS" / azahar.SYSTEM_ID / azahar.SDCARD_ID
+    nand = root / "nand" / "data" / azahar.SYSTEM_ID
+    monkeypatch.setattr(azahar.Azahar, "save_root", root)
+    monkeypatch.setattr(
+        azahar,
+        "_SAVE_GROUP_ROOTS",
+        (sdmc / "title", sdmc / "extdata", nand / "extdata", nand / "sysdata"),
+    )
+    return root
+
+
+def _preflight(
+    members: dict[str, bytes],
+    *,
+    rom: Optional[imports.RomRef] = _ROMM,
+) -> imports.PreflightResult:
+    """Preflight an archive of import members against Azahar.
+
+    Args:
+        members: `.import/<kind>/...` names mapped to bytes.
+        rom: The activate body's rom, or None.
+
+    Returns:
+        What preflight decided.
+    """
+    return preflight_import(azahar.Azahar(), import_zip(members), rom_file=None, rom=rom)
+
+
+def _save(rel: str) -> dict[str, bytes]:
+    """One save member's archive, named by its path below `.import/save/`.
+
+    Args:
+        rel: The path below `.import/save/`.
+
+    Returns:
+        The members mapping `_preflight` takes.
+    """
+    return {f".import/save/{rel}": b"x"}
+
+
+@pytest.mark.parametrize(
+    ("rel", "dest"),
+    [
+        (f"{_SD}/{_SAVE_FILE}", f"{_DEST_SD}/{_SAVE_FILE}"),
+        (f"saves/Azahar/{_SD}/{_SAVE_FILE}", f"{_DEST_SD}/{_SAVE_FILE}"),
+        (f"saves/Azahar/{_ID}/{_ID}/{_SAVE_FILE}", f"{_DEST_SD}/{_SAVE_FILE}"),
+        (f"saves/Azahar/sdmc/Nintendo 3DS/{_ID}/{_ID}/{_SAVE_FILE}", f"{_DEST_SD}/{_SAVE_FILE}"),
+        (f"Nintendo 3DS/{_ID}/{_ID}/{_SAVE_FILE}", f"{_DEST_SD}/{_SAVE_FILE}"),
+        (f"{_ID}/{_ID}/{_SAVE_FILE}", f"{_DEST_SD}/{_SAVE_FILE}"),
+        (f"sdmc/Nintendo 3DS/{_HW0}/{_HW1}/{_SAVE_FILE}", f"{_DEST_SD}/{_SAVE_FILE}"),
+        (f"{_SD}/extdata/00048000/00001234/00000001", f"{_DEST_SD}/extdata/00048000/00001234/00000001"),
+        (f"{_SD}/extdata/00048000/0000ABCD/x", f"{_DEST_SD}/extdata/00048000/0000abcd/x"),
+        (
+            f"nand/data/{_ID}/extdata/00048000/00001234/00000001",
+            f"nand/data/{azahar.SYSTEM_ID}/extdata/00048000/00001234/00000001",
+        ),
+        (
+            f"saves/Azahar/nand/data/{_HW0}/extdata/00048000/0000ABCD/x",
+            f"nand/data/{azahar.SYSTEM_ID}/extdata/00048000/0000abcd/x",
+        ),
+    ],
+    ids=[
+        "verbatim",
+        "saves/Azahar",
+        "saves/Azahar with no SD folders",
+        "saves/Azahar with sdmc",
+        "Nintendo 3DS",
+        "bare ids",
+        "hardware ids are rewritten",
+        "sd extdata",
+        "sd extdata, hex lower-cased",
+        "nand extdata",
+        "nand extdata, wrapped, hex lower-cased",
+    ],
+)
+@pytest.mark.usefixtures("user_dir")
+def test_a_save_lands_under_the_ids_azahar_uses(rel: str, dest: str) -> None:
+    """Every accepted spelling lands under the fixed console and SD card ids, in lower case.
+
+    Args:
+        rel: The member's path below `.import/save/`.
+        dest: Where it lands, below the data root.
+    """
+    result = _preflight(_save(rel))
+
+    assert result.refusals == ()
+    assert [str(p.dest) for p in result.placements] == [dest]
+
+
+@pytest.mark.usefixtures("user_dir")
+def test_an_extdata_folder_is_not_held_to_the_sessions_title() -> None:
+    """Extdata is keyed by its own id, not the title's, so no identity check applies."""
+    result = _preflight(_save(f"{_SD}/extdata/00048000/00009999/00000001"))
+
+    assert result.refusals == ()
+
+
+@pytest.mark.usefixtures("user_dir")
+def test_a_title_folder_for_another_game_is_refused() -> None:
+    """A title save is held strictly to the game the session runs."""
+    result = _preflight(_save(f"{_SD}/title/00040000/00099999/data/00000001.sav"))
+
+    assert [r.reason for r in result.refusals] == ["identity_mismatch"]
+    assert result.placements == ()
+
+
+@pytest.mark.usefixtures("user_dir")
+def test_a_title_id_alone_still_names_the_title_a_save_must_match() -> None:
+    """RomM's title id is the save target's two halves run together, so it keys the title too."""
+    result = _preflight(_save(_SD + "/" + _SAVE_FILE), rom=_ROMM_NO_TARGET)
+
+    assert result.refusals == ()
+    assert [str(p.dest) for p in result.placements] == [f"{_DEST_SD}/{_SAVE_FILE}"]
+
+
+@pytest.mark.usefixtures("user_dir")
+def test_another_titles_save_is_refused_against_a_title_id_alone() -> None:
+    """With no save target the title id is read in its place, so a foreign title still mismatches."""
+    result = _preflight(
+        _save(f"{_SD}/title/00040000/00099999/data/00000001.sav"), rom=_ROMM_NO_TARGET
+    )
+
+    assert [r.reason for r in result.refusals] == ["identity_mismatch"]
+    assert result.placements == ()
+
+
+@pytest.mark.usefixtures("user_dir")
+def test_a_save_target_outranks_a_title_id_that_disagrees() -> None:
+    """The save target is read first, so a title id naming another game is never consulted."""
+    rom = imports.RomRef(1, "Game", "3ds", title_id="0004000000099999", save_target="00040000/00033500")
+
+    result = _preflight(_save(_SD + "/" + _SAVE_FILE), rom=rom)
+
+    assert result.refusals == ()
+    assert [str(p.dest) for p in result.placements] == [f"{_DEST_SD}/{_SAVE_FILE}"]
+
+
+@pytest.mark.usefixtures("user_dir")
+def test_a_title_save_is_taken_on_trust_without_a_rom() -> None:
+    """A route that carries no rom names no title, so there is nothing to compare a save with."""
+    result = _preflight(_save(f"{_SD}/title/00040000/00099999/data/00000001.sav"), rom=None)
+
+    assert result.refusals == ()
+
+
+@pytest.mark.usefixtures("user_dir")
+def test_a_save_target_in_another_case_still_matches() -> None:
+    """The comparison is on the normalised id, so RomM's spelling does not matter."""
+    rom = imports.RomRef(1, "Game", "3ds", save_target="00040000/0003350A")
+
+    result = _preflight(_save(f"{_SD}/title/00040000/0003350a/data/00000001.sav"), rom=rom)
+
+    assert result.refusals == ()
+
+
+@pytest.mark.parametrize(
+    ("rel", "reason"),
+    [
+        (f"nand/data/{_ID}/sysdata/00010026/00000000/x", "protected_destination"),
+        (f"saves/Azahar/nand/data/{_ID}/sysdata/x", "protected_destination"),
+        ("3ds/JKSM/Saves/Game/00000001.sav", "shape_unverified"),
+        ("JKSM/Saves/Game/00000001.sav", "shape_unverified"),
+        ("3ds/Checkpoint/saves/0x00033500 Game/00000001.sav", "shape_unverified"),
+        ("Checkpoint/extdata/0x00001234 Game/x", "shape_unverified"),
+        ("00000001.sav", "destination_unresolvable"),
+        ("data/00000001.sav", "destination_unresolvable"),
+        ("title/00040000/00033500/data/00000001.sav", "unrecognised_layout"),
+        ("extdata/00048000/00001234/x", "unrecognised_layout"),
+        (f"{_SD}/Nintendo DSiWare/x", "unrecognised_layout"),
+        (f"{_SD}/dbs/title.db", "unrecognised_layout"),
+        ("sdmc/Nintendo 3DS/Private/x", "unrecognised_layout"),
+        ("nand/rw/x", "unrecognised_layout"),
+        (f"nand/data/{_ID}/x", "unrecognised_layout"),
+        ("readme/notes.txt", "unrecognised_layout"),
+        (f"{_SD}/title/00040000/00033500", "unrecognised_layout"),
+        (f"{_SD}/title/00040000/data.bin", "unrecognised_layout"),
+        (f"{_SD}/title/notes/x/y", "unrecognised_layout"),
+        (f"{_SD}/extdata/00048000/00001234", "unrecognised_layout"),
+        (f"nand/data/{_ID}/extdata/00048000/00001234", "unrecognised_layout"),
+        (f"nand/data/{_ID}/sysdata", "unrecognised_layout"),
+    ],
+    ids=[
+        "sysdata",
+        "wrapped sysdata",
+        "JKSM in 3ds",
+        "JKSM at the top",
+        "Checkpoint saves",
+        "Checkpoint extdata",
+        "loose file",
+        "loose data folder",
+        "bare title tree",
+        "bare extdata tree",
+        "DSiWare sibling",
+        "dbs sibling on a zero-id card",
+        "Private sibling",
+        "nand rw sibling",
+        "nand data with no group",
+        "unrelated file",
+        "title folder with no file",
+        "title low is not hex",
+        "title high is not hex",
+        "extdata folder with no file",
+        "nand extdata folder with no file",
+        "a sysdata folder with no file",
+    ],
+)
+@pytest.mark.usefixtures("user_dir")
+def test_a_member_azahar_would_not_read_is_refused(rel: str, reason: str) -> None:
+    """Each shape the spec names is refused with its own code, and nothing is placed.
+
+    Args:
+        rel: The member's path below `.import/save/`.
+        reason: The refusal code.
+    """
+    result = _preflight(_save(rel))
+
+    assert [r.reason for r in result.refusals] == [reason]
+    assert result.placements == ()
+
+
+@pytest.mark.parametrize(
+    ("rom", "reason"),
+    [
+        (_ROMM, "destination_unresolvable"),
+        (_ROMM_NO_TARGET, "destination_unresolvable"),
+        (None, "unrecognised_layout"),
+    ],
+    ids=["save target", "title id only", "neither"],
+)
+@pytest.mark.usefixtures("user_dir")
+def test_a_loose_file_is_unresolvable_only_when_romm_knows_the_game(
+    rom: Optional[imports.RomRef], reason: str
+) -> None:
+    """A file with no title in its path is not placed from RomM's id, but RomM knowing the game is said.
+
+    Args:
+        rom: The activate body's rom.
+        reason: The refusal code.
+    """
+    result = _preflight(_save("00000001.sav"), rom=rom)
+
+    assert [r.reason for r in result.refusals] == [reason]
+
+
+@pytest.mark.parametrize("marker", ["dbs/title.db", "backups/movable.sed"])
+@pytest.mark.usefixtures("user_dir")
+def test_a_hardware_sd_card_is_refused_whole(marker: str) -> None:
+    """Non-zero ids beside a `dbs` or `backups` folder are an encrypted SD card, all refused.
+
+    Args:
+        marker: The sibling folder's file, below the SD card's ids.
+    """
+    members = {
+        **_save(f"sdmc/Nintendo 3DS/{_HW0}/{_HW1}/{_SAVE_FILE}"),
+        **_save(f"sdmc/Nintendo 3DS/{_HW0}/{_HW1}/{marker}"),
+    }
+
+    result = _preflight(members)
+
+    assert [r.reason for r in result.refusals] == ["source_incompatible", "source_incompatible"]
+    assert result.placements == ()
+
+
+@pytest.mark.usefixtures("user_dir")
+def test_a_second_hardware_card_without_the_marker_is_not_refused() -> None:
+    """The marker names one pair of ids; a decrypted export of another pair is still taken.
+
+    Preflight places nothing while any member is refused, so the second
+    card's file shows as taken by not being among the refusals.
+    """
+    marker = f".import/save/sdmc/Nintendo 3DS/{_HW0}/{_HW1}/dbs/title.db"
+    members = {
+        marker: b"x",
+        **_save(f"sdmc/Nintendo 3DS/{_HW1}/{_HW0}/{_SAVE_FILE}"),
+    }
+
+    result = _preflight(members)
+
+    assert [(r.member, r.reason) for r in result.refusals] == [(marker, "source_incompatible")]
+
+
+@pytest.mark.usefixtures("user_dir")
+def test_two_cards_for_one_title_are_a_destination_conflict() -> None:
+    """Two cards' ids rewritten to one pair put two members on one file; the shared check refuses it."""
+    members = {
+        **_save(f"sdmc/Nintendo 3DS/{_HW0}/{_HW1}/{_SAVE_FILE}"),
+        **_save(f"{_SD}/{_SAVE_FILE}"),
+    }
+
+    result = _preflight(members)
+
+    assert {r.reason for r in result.refusals} == {"destination_conflict"}
+
+
+@pytest.mark.usefixtures("user_dir")
+def test_a_state_or_memory_card_is_not_taken() -> None:
+    """Azahar has no states and no cards, so the kind gate stops them before the hook."""
+    result = _preflight({".import/state/game.sav": b"x", ".import/memcard/card.bin": b"x"})
+
+    assert sorted(r.reason for r in result.refusals) == ["kind_not_accepted", "kind_not_accepted"]
+
+
+def test_an_imported_save_is_where_azahars_own_lookups_find_it(user_dir: Path) -> None:
+    """A placed title and extdata folder are the ones the exit restamp walks, and the clear empties them.
+
+    The read-back is by literal lower-case path: on a case-sensitive
+    filesystem, a destination Azahar never opens would be written and no
+    refusal could catch it.
+
+    Args:
+        user_dir: The patched data root.
+    """
+    emu = azahar.Azahar()
+    body = import_zip(
+        {
+            f".import/save/{_SD}/{_SAVE_FILE}": b"progress",
+            f".import/save/{_SD}/extdata/00048000/00001234/00000001": b"photos",
+        }
+    )
+    result = preflight_import(emu, body, rom_file=None, rom=_ROMM)
+    restore_import(emu, body, result)
+
+    sdmc = user_dir / _DEST_SD
+    assert (sdmc / _SAVE_FILE).read_bytes() == b"progress"
+    assert (sdmc / "extdata/00048000/00001234/00000001").read_bytes() == b"photos"
+    emu._session_start = time.time() - 100
+    assert emu._modified_title_saves() == [
+        sdmc / "title/00040000/00033500",
+        sdmc / "extdata/00048000/00001234",
+    ]
+
+    emu.clear_working_slot()
+
+    assert not any(p.is_file() for p in user_dir.rglob("*"))
+
+
+def test_azahar_declares_a_save_kind_only() -> None:
+    """The spec names the save kind alone, with no state channel, and sysdata as protected."""
+    spec = azahar.Azahar().import_spec()
+
+    assert [k.kind for k in spec.kinds] == ["save"]
+    assert spec.state_channel == "none"
+    assert spec.protected == ("nand/data/*/sysdata/*",)
+    assert spec.case_insensitive_dest is False
+
+
+def test_azahars_session_id_is_romms_save_target_then_its_title_id() -> None:
+    """A 3DS title is keyed by the `high/low` pair, which RomM carries in either field."""
+    source = azahar.Azahar().identity_source()
+
+    assert source == imports.IdentitySource("hex16", use_save_target=True, fall_back_to_title_id=True)
+
+
+@pytest.mark.usefixtures("user_dir")
+def test_two_spellings_of_one_folder_are_a_destination_conflict() -> None:
+    """A title folder's hex is lower-cased, so two cases of one id are one destination."""
+    members = {
+        **_save(f"{_SD}/extdata/00048000/0000ABCD/x"),
+        **_save(f"{_SD}/extdata/00048000/0000abcd/x"),
+    }
+
+    result = _preflight(members)
+
+    assert {r.reason for r in result.refusals} == {"destination_conflict"}
+
+
+def _member(rel: str) -> imports.ImportMember:
+    """One save member, built without an archive, for a hook that reads only its path.
+
+    Args:
+        rel: The path below `.import/save/`.
+
+    Returns:
+        The member.
+    """
+    name = f".import/save/{rel}"
+    return imports.ImportMember(
+        name, "save", "unknown", PurePosixPath(rel), tuple(rel.split("/")), 1, zipfile.ZipInfo(name)
+    )
+
+
+def _ctx(*rels: str) -> imports.ImportCtx:
+    """A launch context holding the given save members.
+
+    Args:
+        *rels: The members' paths below `.import/save/`.
+
+    Returns:
+        The context.
+    """
+    return imports.ImportCtx(
+        rom_file=None,
+        rom=None,
+        memory_card_synced=False,
+        excluded=(),
+        resume_slot=None,
+        members=tuple(_member(rel) for rel in rels),
+    )
+
+
+def test_the_hardware_cards_are_the_lower_cased_pairs_with_a_marker() -> None:
+    """Only a non-zero pair with a `dbs` or `backups` folder counts, and it is compared in lower case."""
+    ctx = _ctx(
+        f"sdmc/Nintendo 3DS/{_HW0.upper()}/{_HW1.upper()}/dbs/title.db",
+        f"sdmc/Nintendo 3DS/{_HW1}/{_HW0}/{_SAVE_FILE}",
+        f"{_SD}/dbs/title.db",
+    )
+
+    assert azahar._hardware_sd_ids(ctx) == frozenset({(_HW0, _HW1)})
+
+
+def test_the_hardware_cards_are_found_once_per_preflight(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The scan reads every member once, however many members ask, and the answer is kept in the memo.
+
+    Args:
+        monkeypatch: The pytest monkeypatch fixture.
+    """
+    ctx = _ctx(
+        f"sdmc/Nintendo 3DS/{_HW0}/{_HW1}/dbs/title.db",
+        f"sdmc/Nintendo 3DS/{_HW0}/{_HW1}/{_SAVE_FILE}",
+        f"{_SD}/{_SAVE_FILE}",
+    )
+    seen: list[tuple[str, ...]] = []
+    real = imports.match_anchored
+
+    def spy(parts: Sequence[str], **kwargs: Any) -> Optional[imports.AnchoredMatch]:
+        """Record which member the scan matched, then match it.
+
+        Args:
+            parts: The member's components.
+            **kwargs: The keyword arguments `match_anchored` takes.
+
+        Returns:
+            What `match_anchored` returns.
+        """
+        seen.append(tuple(parts))
+        return real(parts, **kwargs)
+
+    monkeypatch.setattr(imports, "match_anchored", spy)
+
+    first = azahar._hardware_sd_ids(ctx)
+    scanned = len(seen)
+    second = azahar._hardware_sd_ids(ctx)
+
+    assert scanned == len(ctx.members)
+    assert len(seen) == scanned
+    assert second is first
+
+
+def test_the_import_paths_are_the_save_subtrees_azahar_dumps_and_restores() -> None:
+    """The hook's destinations sit in the trees the dump, the restore and the clear walk."""
+    subtrees = azahar.Azahar.save_subtrees
+
+    assert f"{azahar._SD_ROOT}/title" == subtrees[0]
+    assert f"{azahar._SD_ROOT}/extdata" == subtrees[1]
+    assert azahar._NAND_EXTDATA == subtrees[2]
+    assert fnmatch.fnmatchcase(f"{subtrees[3]}/00010026/00000000/x", azahar._PROTECTED[0])

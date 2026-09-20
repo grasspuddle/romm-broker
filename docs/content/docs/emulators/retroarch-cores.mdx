@@ -119,7 +119,8 @@ that platform," not as settled fact.
 
 RetroArch sorts each core's files into a folder named for the core. The
 folder takes the name the core reports about itself, which isn't always the
-core's file name: the `dolphin` core reports `dolphin-emu`.
+core's file name: the `dolphin` core reports `dolphin-emu` and the `azahar`
+core reports `Azahar`.
 
 - In-game saves (SRAM) go in `saves/<core name>/<game>.srm`.
 - Save states go in `states/<core name>/`.
@@ -148,8 +149,14 @@ The other platforms refuse a `.srm`:
 
 - **PSP**: the PPSSPP core keeps saves as SAVEDATA folders, not a `.srm`.
   The refusal names the standalone PPSSPP module instead.
-- **GameCube, Wii and 3DS**: these cores keep saves in their own folder
-  layouts, which imports don't place yet.
+- **Wii and 3DS**: these cores keep saves in folders, not a `.srm`, and a
+  `.srm` is refused as `unrecognised_layout`. Imports place folders here
+  instead: Wii title folders in `saves/dolphin-emu/User/Wii/title/`, and
+  Azahar's SD card and NAND folders as they already sit in `saves/Azahar/`.
+  [What each emulator takes](/docs/api/imports#what-each-emulator-takes)
+  lists the shapes.
+- **GameCube**: the core keeps saves as GCI files in its own folders, which
+  imports don't place yet. The refusal is `shape_unverified`.
 - **The rest**: the core keeps its save in a file of its own, or has none,
   so it would never read a `.srm`. The paths below are inside the core's
   `saves/` folder unless noted.

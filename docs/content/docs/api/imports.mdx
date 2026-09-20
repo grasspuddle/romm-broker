@@ -51,8 +51,9 @@ checking imports answers 500 with
 `{"detail": {"error": "import_preflight_failed"}}`, still before anything is
 cleared.
 
-**Six emulators accept imports so far.** RetroArch, Flycast, DuckStation,
-PPSSPP, Dolphin and PCSX2 take the kinds listed under
+**Fourteen emulators accept imports so far.** RetroArch, Flycast, DuckStation,
+PPSSPP, Dolphin, PCSX2, RPCS3, ScummVM, Cemu, Azahar, Eden, shadPS4, xemu and
+Xenia take the kinds listed under
 [What each emulator takes](#what-each-emulator-takes), and every other
 emulator refuses each import member with `kind_not_accepted`. The structural
 checks run first either way: a bad manifest answers `manifest_invalid` and a
@@ -129,30 +130,40 @@ through a symlink, or the member is refused.
 
 | `emulator` | `save` | `memcard` | `state` |
 | --- | --- | --- | --- |
-| `retroarch` | one `.srm`, on a platform whose core loads one | not taken; `expected` names `save` | `PUT /api/session/state-file` after activate |
+| `retroarch` | one `.srm`, on a platform whose core loads one; on `wii`, title folders, `title/<type>/<title id>/data/`; on `3ds`, folders inside Azahar's `sdmc/Nintendo 3DS/` or `nand/data/` | not taken; `expected` names `save` | `PUT /api/session/state-file` after activate |
 | `flycast` | raw 131072-byte `vmu_save_<A-D><1-2>.bin` images, and `dc_nvmem.bin` | a raw 131072-byte VMU image | one `.state`; needs `save.resume_slot` |
 | `duckstation` | a raw 131072-byte `.mcd`, `.mcr`, `.mc` or `.srm` card | the same as `save` | one `<serial>_resume.sav` or `<serial>_<n>.sav`; needs `save.resume_slot` |
 | `ppsspp` | PSP save folders, `SAVEDATA/<product code><suffix>/`, each holding `PARAM.SFO` | not taken | one `<game id>_<version>_<n>.ppst`, with its `.jpg` screenshot if sent; needs `save.resume_slot` |
 | `dolphin` on `ngc` | GameCube `.gci` saves, each in `<region>/Card A/` | the same as `save` | one `<game id>.sNN` that opens with the game's id; needs `save.resume_slot` |
 | `dolphin` on `wii` | Wii title saves, `title/<type>/<title id>/data/` | not taken | one `<game id>.sNN` that opens with the game's id; needs `save.resume_slot` |
 | `pcsx2` | one folder memory card: `<card>/_pcsx2_superblock` and its game folders | the same as `save` | `PUT /api/session/state-file` after activate |
+| `rpcs3` | PS3 save folders, `home/00000001/savedata/<SAVEDIR>/` and `game/<DIR>/`, each holding `PARAM.SFO` | not taken | one `.SAVESTAT`, `.SAVESTAT.zst` or `.SAVESTAT.gz`; needs `save.resume_slot` |
+| `scummvm` | `<game>.NNN` and `<game>.sNN` save files | not taken | one `<game>.sNN` or `<game>.NNN` file; needs `save.resume_slot` |
+| `cemu` | Wii U save data for the game being launched: `usr/save/00050000/<title>/` | not taken | not taken |
+| `eden` | Switch NAND save folders, `nand/user/save/<space>/<user>/<title>/`, with the profile store an account save needs | not taken | not taken |
+| `azahar` | 3DS save data from an unencrypted SD card or NAND folder: `title/` and `extdata/` folders | not taken | not taken |
+| `xemu` | the launched game's `UDATA/<title id>/` and `TDATA/<title id>/` folders | not taken | not taken |
+| `xenia` | Xbox 360 save folders, `content/<XUID>/<title id>/00000001/`, with their `Headers/` file | not taken | not taken |
+| `shadps4` | PS4 save folders, `<serial>/<save dir>/` | not taken | not taken |
 
-Dolphin takes nothing on any other platform, and every other emulator takes
-nothing yet.
+Dolphin takes nothing on any other platform, and Desktop takes nothing yet.
 
 **RetroArch** renames the `.srm` after the game being launched and places it
 in `saves/<library_name>/`, where the core loads it. `library_name` is the
 name the core reports about itself, such as `mGBA` or `Genesis Plus GX`, not
 the manifest's `core` (see
 [RetroArch cores](/docs/emulators/retroarch-cores#saves-states-and-imports)).
-It takes one `.srm` per archive: a second one, or a save the archive already
-carries at the same path, is a `destination_conflict`. It refuses these:
+On a platform that takes a `.srm`, it takes one per archive: a second one, or a
+save the archive already carries at the same path, is a `destination_conflict`.
+`wii` and `3ds` take folders instead, described below the list. It refuses these:
 
 - On `psp`: `destination_unresolvable`, with `suggest_emulator: "ppsspp"`.
   The PPSSPP core keeps SAVEDATA folders, not a `.srm`.
-- On `ngc`, `wii` and `3ds`: `shape_unverified`. These cores keep saves in
-  their own folders, which imports don't place yet. On `ngc` and `wii`,
-  import through `dolphin` instead; this refusal names no `suggest_emulator`.
+- On `ngc`: `shape_unverified`. The Dolphin core keeps GameCube saves as GCI
+  files in its own folders, which imports don't place yet. Import through
+  `dolphin` instead; this refusal names no `suggest_emulator`.
+- A `.srm` on `wii` or `3ds`: `unrecognised_layout`, whatever its name. The
+  detail names the kind of folder that platform takes.
 - On any other platform whose core loads no `.srm`, such as `nds`, `dc` or
   `arcade`: `destination_unresolvable`. The core keeps its save in a file of
   its own, or has none. Discovery lists no `save` shapes there, and
@@ -161,11 +172,46 @@ carries at the same path, is a `destination_conflict`. It refuses these:
   its save.
 - On a platform RetroArch has no core for: `destination_unresolvable`.
 - A `.sav`, `.rtc`, `.nv`, `.eep` or `.mpk` file: `needs_conversion`, until
-  each core's name for that file has been checked.
+  each core's name for that file has been checked. On `wii` and `3ds` a file
+  with one of those names is judged as part of a save folder, so it gets the
+  folder refusals instead.
 - A `memcard` member: `kind_not_accepted`, with `expected` naming `save`.
   On a platform that takes a `.srm`, send the core's `.srm` as a save instead.
 - A `state` member: `state_uses_push`. On `jaguar`, whose core has no states,
   and on a platform RetroArch has no core for, it is `kind_not_accepted`.
+
+On `wii`, the Dolphin core keeps the same emulated NAND as standalone Dolphin,
+and a save is a game's title folder, under `save`:
+
+- Its path is `title/<type>/<title id>/data/...`, where the type is
+  `00010000`, `00010001` or `00010004`. It can sit under `Wii/`, under
+  `saves/dolphin-emu/User/Wii/` or directly under `.import/save/`. It lands
+  in `saves/dolphin-emu/User/Wii/title/`, with the title id lower-cased.
+- The title id must be RomM's `title_id`, or it is `identity_mismatch`.
+  RetroArch reads no id off the rom, so with no `title_id` the title is taken
+  on trust.
+- A loose `data.bin` is `needs_conversion` and a `nand.bin` is
+  `source_incompatible`, as under Dolphin. `title/00000001/` and a title's
+  `content/` folder are `protected_destination`. `sys/` and `ticket/` are
+  `unrecognised_layout` here, since the core's save folders leave them out, and
+  so is anything else, a `.gci` included.
+
+On `3ds`, the Azahar core's SD card and NAND are placed exactly as named, and
+nothing is renamed:
+
+- A member must already sit under `saves/Azahar/`, and then inside
+  `sdmc/Nintendo 3DS/<id0>/<id1>/title/<high>/<low>/...`,
+  `sdmc/Nintendo 3DS/<id0>/<id1>/extdata/<high>/<low>/...` or
+  `nand/data/<id0>/...`. Every id0 and id1 is 32 hexadecimal digits.
+- A title's id, its high and low halves together, must be RomM's `title_id`, or
+  it is `identity_mismatch`. Extdata and NAND data carry no title id and are
+  not held to one, and with no `title_id` a title is taken on trust.
+- `nand/data/<id0>/sysdata/` and a title's `content/` folder are
+  `protected_destination`.
+- Anything else, including a member that does not already sit under
+  `saves/Azahar/`, is `shape_unverified`. Azahar's layout has not been checked
+  against a running core beyond these paths, so the broker refuses rather than
+  guess.
 
 **Flycast** places every file loose in its data folder, `flycast/`, under the
 name Flycast reads:
@@ -304,10 +350,224 @@ default):
   [state-file PUT](/docs/api/state#move-a-state-file-in-or-out) after
   activate, which refuses a state named for another game's serial.
 
-Flycast and DuckStation have no mid-session save states, but each boots
+**RPCS3** places PS3 save folders in its `dev_hdd0` and one state in its
+savestates folder:
+
+- A save folder holds `PARAM.SFO` at its root. Save data goes to
+  `home/00000001/savedata/<SAVEDIR>/` and can arrive under
+  `dev_hdd0/home/<user>/savedata/`, `home/<user>/savedata/`, `PS3/SAVEDATA/`
+  or `SAVEDATA/`. The user is eight digits and is rewritten to `00000001`, the
+  only user the broker's layout has, so two users' folders of one name are a
+  `destination_conflict`. Game data goes to `game/<DIR>/` and can arrive under
+  `dev_hdd0/game/` or `game/`.
+- A folder with none of those around it is `unrecognised_layout`: RPCS3 keeps
+  save data and game data apart, and a bare folder does not say which it is.
+  So is a folder name of anything but letters, digits, `_` and `-`, up to 32
+  of them, a single file where a folder belongs, and a state sent as a save.
+- A folder without `PARAM.SFO` at its root is `incomplete_unit`, detail
+  `missing PARAM.SFO`. One further down does not count.
+- A folder named for another game's serial is placed and only logged: a
+  sequel or DLC writes its predecessor's folders.
+- `home/<user>/exdata/` and `home/<user>/trophy/`, a game's `USRDIR/EBOOT.*`,
+  RPCS3's lock folders under `game/` (a name starting with `$` or its
+  full-width form) and the game folder of the installed title being booted are
+  `protected_destination`. An installed title
+  is an `EBOOT.BIN` under the game folder, or a `.pkg`.
+- The state is one `.SAVESTAT`, `.SAVESTAT.zst` or `.SAVESTAT.gz`, in exactly
+  that case, alone or in one folder named for the game's serial. It is renamed
+  `<serial>_import.SAVESTAT` and filed under the serial the launch will look
+  in. The serial is the one the boot target holds; RomM's `title_id` is not
+  used. A boot target with none, a bare `.iso`, refuses a state as
+  `identity_unknown`, and a folder named for another serial is
+  `identity_mismatch`. An empty state is `incomplete_unit`, and a RetroArch
+  state is `source_incompatible`.
+
+**ScummVM** names every save after a target, the name `scummvm --add`
+registers a game folder under in `scummvm.ini`, and keeps saves and states in
+one folder:
+
+- A save is one file, `<game>.NNN` or `<game>.sNN`, directly under
+  `.import/save/` or under `saves/`. Its `<game>` must be a name of the game
+  in the rom folder, in any case: a target, the game id or the engine id. It
+  lands as `saves/<name>.<ext>` with the name as `scummvm.ini` spells it. A
+  save for another target of the same folder, such as another language, keeps
+  that target's name, and only shows in a session that boots that target.
+- A name that is none of the folder's is `identity_mismatch`, listing the
+  ones that are. A folder ScummVM detects no game in is `identity_unknown`. A
+  generic `SAVEGAME` name, a `.srm`, a `.state` and `scummvm.ini` are
+  `unrecognised_layout`.
+- A save in the working slot under the session target's own name is a
+  `destination_conflict`, whose detail says to declare it as a state. The same
+  slot under another name is an ordinary save.
+- The state is one `<game>.sNN` or `<game>.NNN` file naming any target of the
+  folder. It is renamed onto the session's target in the working slot, keeping
+  its spelling. It counts every save the archive already carries in that slot
+  under the session target's name, so leave the old one out.
+- The first import into a folder ScummVM has not seen registers it, which runs
+  `scummvm --add` and can take up to two minutes. The registration stays even
+  if the import is then refused.
+
+
+**Cemu, Eden, Azahar, xemu, Xenia and shadPS4** take saves and nothing else.
+A `state` or `memcard` member is `kind_not_accepted`, since none of them has
+either. A save that lands on a file the archive already holds is a
+`destination_conflict`. The import does not merge with the archive's copy, so
+leave that copy out to send the new one.
+
+**Cemu** keeps one account, `80000001`, and files every save under it:
+
+- A save is `usr/save/00050000/<title>/`, with `user/<account>/`,
+  `user/common/` and `meta/` inside. The tree can sit under
+  `mlc01/usr/save/`, `storage_mlc/usr/save/`, `usr/save/` or `save/`. A save
+  collected as one 16-digit Saviine folder name is split. A donor console's
+  account folder, `user/<8 hex digits>` starting with `8`, becomes
+  `user/80000001`. Two different donor accounts in one archive are a
+  `destination_conflict` for every file that names one, while `user/common/`
+  and `meta/` files are not held to it.
+- The title folder is lower case, as Cemu writes it, and must be the game
+  being launched: RomM's `title_id` is read as the title's low half, such as
+  `1010EC00`, or as the whole sixteen-digit id, such as `000500001010EC00`.
+  Another game's save is `identity_mismatch`. A path that names its own
+  title is still placed when RomM sends no `title_id`.
+- A member that names no title, such as `user/80000001/slot0.dat`, is placed
+  under the launched game's when RomM names one, and is `identity_unknown`
+  when it does not. A sixteen-digit id of any other title type, such as an
+  update's `0005000E...`, names no save folder, so it is read as no id.
+- Anything under `usr/save/` whose first folder is not a title id, the
+  account store `system` included, is `protected_destination`. A title type
+  other than `00050000` is `unrecognised_layout`. So is a `user/<x>` folder
+  that is neither `common` nor an account id of that shape, an account
+  folder with no file in it, a loose file, and a `00050000/...` path with
+  none of the wrappers above.
+
+**Eden** takes verbatim NAND exports:
+
+- A save is `nand/user/save/<space>/<user>/<title>/<files>`. The ids are
+  upper-cased, as Eden writes them. When RomM sends a `title_id`, the title
+  must be the game being launched, or it is `identity_mismatch`.
+- A device save, whose user is 32 zeros, stands alone. An account save needs
+  the profile store in the same import, `nand/system/save/8000000000000010/`,
+  or it is `incomplete_unit`. The check is that the import holds at least one
+  file under that folder; it does not verify that the store is complete.
+- An archive that already carries a profile store refuses the imported one as
+  `destination_conflict`, and its own store does not stand in for the
+  import's. So an account save can only be imported into an archive with no
+  profile store yet.
+- A `bis/` folder, a `Nintendo/` or `sdmc/` folder and a `.bin` file that
+  fits no shape and is too large to be a save (a raw dump) are
+  `source_incompatible`. A path that starts with a title id, a JKSV folder
+  and a Checkpoint folder name no save space or profile Eden could find, so
+  they are `destination_unresolvable`. Anything else, a loose file and the
+  rest of the NAND included, is `unrecognised_layout`.
+
+**Azahar** takes the folders of a 3DS SD card or NAND that has not been
+encrypted, and rewrites the console and card ids to the ones it uses:
+
+- Saves are `title/<high>/<low>/...` and `extdata/<high>/<low>/...` under
+  `sdmc/Nintendo 3DS/<id0>/<id1>/`, and `extdata/<high>/<low>/...` under
+  `nand/data/<id0>/`. The ids are 32 hex digits. The SD card's folders can
+  sit under `saves/Azahar/` or `Nintendo 3DS/`, or be the two ids alone. The
+  NAND's can sit under `saves/Azahar/`. The `<high>` and `<low>` folders are
+  lower-cased.
+- A `title/` save is held to the game being launched whenever RomM names it,
+  and another game's is `identity_mismatch`. The game is named by
+  `save_target`, the title's `<high>/<low>` pair, or, when there is none, by
+  `title_id`, which is that same pair written as one sixteen-digit id. With
+  neither the title is taken on trust. An `extdata` folder is not checked,
+  since its id is not always the game's.
+- An SD card whose ids are not zeros and which has a `dbs/` or `backups/`
+  folder beside its `title/` is a console's, and encrypted: every member
+  under that card's ids, the folder's own files included, is
+  `source_incompatible`. A donor card with no such folder is taken, and its
+  ids rewritten. Two cards' copies of one title are a `destination_conflict`,
+  since they land in one folder.
+- A JKSM or Checkpoint backup folder is `shape_unverified`. A file under
+  `sysdata` is `protected_destination`. A `title/` or `extdata/` tree with no
+  console and card folders above it is `unrecognised_layout`.
+- A loose file, or a bare `data/` folder, at the top of the archive names no
+  title. It is `destination_unresolvable` when RomM sends a `title_id` or a
+  `save_target`, and `unrecognised_layout` otherwise. The broker never
+  places a member from `save_target` alone.
+
+**xemu** files a save under its own title id, which must be the session's,
+and the launch then writes it into the hard drive image:
+
+- A save is `UDATA/<title id>/<files>` or `TDATA/<title id>/<files>`, at the
+  top of the member's path. The folder names can be in either case, and land
+  upper-cased. The session's title id comes from the disc's own certificate,
+  and from nowhere else: another game's folder is `identity_mismatch`, and a
+  disc whose certificate cannot be read is `identity_unknown` even when RomM
+  sends a `title_id`.
+- The disc's title id is also what the launch clears stale saves under and
+  what the exit dumps, and it does neither without one. A save taken on
+  RomM's word alone would reach the shared hard drive image, outlive every
+  later session and never leave in a dump, so it is refused instead.
+- A folder above `UDATA` or `TDATA`, such as a drive letter, a partition
+  folder or `saves/`, is `unrecognised_layout`. A whole hard drive image,
+  named `.qcow2`, `.img`, `.raw`, `.vhd`, `.vhdx` or `.vmdk` or opening with
+  the qcow2 header, is `source_incompatible`. A file under a title folder is
+  a save whatever its name.
+- FATX stores names of 42 bytes at most, so a longer one is `unsafe_path`.
+  Names compare without regard to case: `Save.dat` and `save.dat` are one
+  file, so they are a `destination_conflict`, and so is a save that differs
+  from the archive's copy only in case.
+
+**Xenia** files a save under the profile that is signed in, which the
+broker reads from `logged_profile_slot_0_xuid` in Xenia's config,
+`xenia-edge.config.toml` under its storage root:
+
+- The key is found in any table. Its value is 16 hex digits, with or without
+  `0x`, in either case, and the folder is named for it in upper case. A
+  missing file, a missing or blank key, a value that is not a XUID, or two
+  different XUIDs is `destination_unresolvable`: create a profile on the
+  desktop first.
+- A save is `content/<XUID>/<title id>/00000001/<save>/...`, with its header
+  file at `<title id>/Headers/00000001/<save>`. The tree can sit under
+  `content/`, `Content/` or nothing, and the XUID folder can be left out.
+  The donor's XUID is replaced with the signed-in profile's.
+- The title is the one in the member's path, and must be the game being
+  launched. The launched game is named by the rom's own folder, when it is
+  laid out as `<title id>/000D0000/<package>` or
+  `<title id>/00007000/<package>`, or by RomM's `title_id`. With neither it
+  is `identity_unknown`, and another game's title is `identity_mismatch`.
+- A profile package, `FFFE07D1`, is `protected_destination`, whether or not a
+  profile is signed in. Any other content type, DLC and updates included, is
+  `unrecognised_layout`, and so is a file where a save folder belongs. A
+  save that is one STFS package file rather than a folder is
+  `shape_unverified`. A RetroArch `.srm` is `source_incompatible`.
+
+**shadPS4** files a save under the default user, whichever user it was
+collected from:
+
+- A save is `<serial>/<save dir>/<files>`, optionally under `savedata/` or
+  `home/<n>/savedata/`, where `<n>` is a number. The serial, such as
+  `CUSA12345`, is four letters and five digits in either case, and is
+  upper-cased. Everything below it is kept as sent.
+- The serial must be the launched game's when the session names one.
+  The broker reads `TITLE_ID` out of the rom's own `sce_sys/param.sfo`, the
+  file shadPS4 itself names a save folder for, and falls back to RomM's
+  `title_id`. Another game's serial is `identity_mismatch`, since the exit
+  dump ships the whole savedata subtree and would carry it into this rom's
+  archive. A `.pkg`, a `.zar` or an archive is still packed when the import
+  is checked, so a launch of one is compared against RomM's `title_id`
+  alone; a launch with neither takes a save without comparing it.
+- The `param.sfo` is only read when it is a regular file resolving inside
+  the ROM library root, so a library that carries a symlink out of the tree,
+  or a named pipe, names no serial rather than reading a host file.
+- A save that names no serial, or one of the wrong length, is
+  `identity_unknown`. `sce_sys/corrupted`, the marker shadPS4 leaves while a
+  save is mounted, is `protected_destination`. `config.json`, `extracted/`
+  and `sys_modules/`, another folder under `home/<n>/`, and a `home/<name>/`
+  whose name is not a number are `unrecognised_layout`. So are a loose file
+  and a serial with no save folder and file below it. A flat `.srm` is
+  `source_incompatible`.
+- Two users' copies of one save are a `destination_conflict`, since they land
+  in the same folder. A name too long for the filesystem is `unsafe_path`.
+
+Flycast, DuckStation and RPCS3 have no mid-session save states, but each boots
 straight into a state the archive carries, the same way it resumes the one
-it writes on exit. PPSSPP and Dolphin do have them, and resume a state the
-archive carries the way they resume one pushed after activate. So all four
+it writes on exit. PPSSPP, Dolphin and ScummVM do have them, and resume a state the
+archive carries the way they resume one pushed after activate. So all six
 answer `state_channel: "archive"`, take at most one state counting any the
 archive already holds, and need discovery's `state_slot` sent as
 `save.resume_slot`. An archive that already holds a state of its own refuses
@@ -319,7 +579,7 @@ core has states.
 
 Flycast and DuckStation name no `card_subtree`: their cards are ordinary
 save files, restored with the rest of the archive. PPSSPP has no memory card
-and names none, and neither does Dolphin on `wii`. Dolphin on `ngc` names
+and names none, and neither do Dolphin on `wii`, RPCS3, ScummVM or RetroArch. Dolphin on `ngc` names
 `GC`, and PCSX2 names `memcards`. When the session syncs that card on the
 memory-card routes, a member that would land on it answers
 `memcard_synced_separately`. Otherwise an imported card, or a GCI, in an
@@ -387,32 +647,53 @@ The shape is recognised, but loading it is unproven or blocked by a known
 broker limit, so the broker refuses rather than place a file that silently
 won't load.
 
-A PCSX2 folder card without `_pcsx2_superblock` is refused this way.
+A PCSX2 folder card without `_pcsx2_superblock` is refused this way. So are
+an Xbox 360 save that is one STFS package file, a 3DS save manager's JKSM or
+Checkpoint backup folder, a RetroArch GameCube save, and a RetroArch 3DS
+member that is not in one of Azahar's save folders.
 
 ### `incomplete_unit` [#incomplete-unit]
 A save that spans several files is missing one, or a file is empty: a PSP
-save folder without its `PARAM.SFO`, a PPSSPP screenshot sent without its
-`.ppst`, or a PCSX2 card whose `_pcsx2_superblock` is empty. When other
+or PS3 save folder without its `PARAM.SFO`, a PPSSPP screenshot sent without its
+`.ppst`, a PCSX2 card whose `_pcsx2_superblock` is empty, or an Eden account
+save sent without a profile store. When other
 members were also refused, a missing-file detail says this may be a knock-on
 effect of those refusals.
 
 ### `destination_unresolvable` [#destination-unresolvable]
-The emulator cannot work out where this member belongs for this rom.
+The emulator cannot work out where this member belongs for this rom. On Eden,
+a save collected by JKSV or Checkpoint, or as a folder that starts with a
+title id, has no save space or profile in its path. On Azahar, a loose file
+or bare `data/` folder names no title, when RomM knows the game. On Xenia,
+the config names no single signed-in profile.
 
 ### `identity_unknown` [#identity-unknown]
 The emulator needs to know which game this is, and neither the rom nor
-RomM says.
+RomM says. ScummVM refuses a save this way when it detects no game in the rom
+folder, and RPCS3 a state when the boot target carries no title id. For Xenia,
+neither the rom nor RomM names the title; for xemu, the disc's own certificate
+does not, whatever RomM sends; for Cemu, neither does when the member's path
+names no title; for shadPS4, the member's path names no serial.
 
 ### `identity_mismatch` [#identity-mismatch]
 The member belongs to a different game than the one being launched. When
-RomM supplied the session's id, the detail says how to correct it.
+RomM supplied the session's id, the detail says how to correct it. Cemu,
+Eden, Azahar, shadPS4, xemu and Xenia check a save's title this way; Cemu,
+Eden, Azahar and shadPS4 check only when the session names a game at all,
+which for shadPS4 means the rom's own `param.sfo` or RomM's `title_id`.
 
 ### `protected_destination` [#protected-destination]
-The member would overwrite emulator configuration, not save data.
+The member would overwrite emulator configuration, not save data, or data the
+console owns. Examples are Cemu's account store, Xenia's profile package, 3DS
+`sysdata`, the mount marker shadPS4 leaves in a save, an RPCS3 licence, trophy
+or `EBOOT`, and a Wii system title.
 
 ### `destination_conflict` [#destination-conflict]
 Two members land on the same file, a member lands where a restored save
 already goes, or there are more members of a kind than the emulator allows.
+Cemu refuses an archive that holds saves for two donor accounts this way,
+and Eden refuses an imported profile store when the archive already carries
+one.
 
 ### `too_large` [#too-large]
 The archive, imports included, is over the size or file-count limit.

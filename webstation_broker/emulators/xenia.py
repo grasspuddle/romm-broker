@@ -52,6 +52,10 @@ HDD itself unless storage_selection_dialog is turned on in its config.
 
 One title per process: loading a second game requires a process restart.
 
+Declared imports (`import_spec`, `place_import`) place a save under the
+signed-in profile's XUID, which `_logged_profile_xuid` reads out of the config
+before launch. See docs/content/docs/api/imports.mdx for the shapes taken.
+
 Bootable forms: an XISO (.iso), a bare executable (.xex), an extracted dump
 (folder with default.xex at its root), or an XBLA / Games on Demand title
 folder, whose STFS package the resolver digs out of the content-type layout
@@ -63,9 +67,11 @@ import os
 import re
 import shutil
 import time
+import tomllib
 from pathlib import Path, PurePosixPath
-from typing import Any, Optional
+from typing import Any, Optional, Union
 
+from .. import imports
 from .base import Emulator, base_launch_env
 
 log = logging.getLogger(__name__)
@@ -124,6 +130,24 @@ data, so the stale-save clear must not reach them.
 """
 _HEADERS_DIR = "Headers"
 """Sibling tree holding a saved game's STFS header, keyed by content type too."""
+CONFIG_NAME = "xenia-edge.config.toml"
+"""Xenia Edge's config file, under the storage root; it names the signed-in profile."""
+_XUID_KEY = "logged_profile_slot_0_xuid"
+"""The config key Xenia Edge writes the signed-in profile's XUID under."""
+_CONFIG_XUID_RE = re.compile(r"(?:0[xX])?([0-9A-Fa-f]{16})", re.ASCII)
+"""A XUID as a config value spells it: 16 hex digits, with or without `0x`."""
+_PROTECTED = ("content/*/FFFE07D1/*",)
+"""The profile package. The hook refuses it first; the glob backstops a destination it would miss."""
+_EXPECTED = "content/<XUID>/<TITLE_ID>/00000001/<save name>/..., or its header under Headers/00000001"
+"""The shape an import member is asked to take, for refusals."""
+_CONTENT_WRAPPERS = ((CONTENT_SUBTREE,), ("Content",), ())
+"""Folders an archive may wrap the content tree in, longest first."""
+_LEVEL_XUID = re.compile(r"[0-9A-Fa-f]{16}", re.ASCII)
+"""A XUID folder."""
+_LEVEL_TITLE = re.compile(r"[0-9A-Fa-f]{8}", re.ASCII)
+"""A title id folder."""
+_LEVEL_TYPE = re.compile(r"[0-9A-Fa-f]{8}|headers", re.ASCII | re.IGNORECASE)
+"""A content type folder, or the `Headers` tree that holds a save's STFS headers."""
 
 
 def _pick_rom_file(candidates: list[Path], base: Path) -> Optional[Path]:
@@ -269,6 +293,187 @@ def _title_save_dirs(title: Path) -> list[Path]:
             exc,
         )
     return found
+
+
+def _values_for(node: object, key: str) -> list[object]:
+    """Collect every value stored under `key`, at any depth of a parsed TOML document.
+
+    Xenia Edge's config groups its keys into tables, and which table holds
+    the XUID is not something this code should depend on.
+
+    Args:
+        node: A parsed TOML value: a table, an array of tables, or a scalar.
+        key: The key to look for.
+
+    Returns:
+        Every value stored under `key`, in document order.
+    """
+    found: list[object] = []
+    if isinstance(node, dict):
+        for name, value in node.items():
+            if name == key:
+                found.append(value)
+            else:
+                found.extend(_values_for(value, key))
+    elif isinstance(node, list):
+        for item in node:
+            found.extend(_values_for(item, key))
+    return found
+
+
+def _logged_profile_xuid(config: Path) -> Optional[str]:
+    """Read the signed-in profile's XUID out of Xenia Edge's config file.
+
+    A profile has to exist before the broker launches anything, and creating
+    one on the desktop persists its XUID here. The content folder is named for
+    it, so an imported save cannot be placed without it.
+
+    Args:
+        config: The config file, `<storage_root>/xenia-edge.config.toml`.
+
+    Returns:
+        The XUID as 16 upper-case hex digits, or None when the file is
+        missing or unreadable, names no profile, or names more than one.
+    """
+    try:
+        with config.open("rb") as fh:
+            document = tomllib.load(fh)
+    except FileNotFoundError:
+        log.info("xenia: no config at %s, so no profile has signed in yet", config)
+        return None
+    except (OSError, tomllib.TOMLDecodeError) as exc:
+        log.warning("xenia: could not read the profile XUID from %s: %s", config, exc)
+        return None
+    xuids: set[str] = set()
+    for value in _values_for(document, _XUID_KEY):
+        if isinstance(value, str) and not value.strip():
+            continue
+        match = _CONFIG_XUID_RE.fullmatch(value.strip()) if isinstance(value, str) else None
+        if match is None:
+            log.warning("xenia: %s in %s is not a XUID: %r", _XUID_KEY, config, value)
+            return None
+        xuids.add(match[1].upper())
+    if len(xuids) > 1:
+        log.warning("xenia: %s names more than one profile, taking none: %s", config, sorted(xuids))
+    return next(iter(xuids)) if len(xuids) == 1 else None
+
+
+def _rom_title_id(rom_file: Path) -> Optional[str]:
+    """Read the title id out of a container path, `<TITLE_ID>/<content type>/<hash>`.
+
+    An XBLA or Games on Demand title keeps that layout, so the folder above the
+    content type is the title. Any other layout says nothing about the title.
+
+    Args:
+        rom_file: The bootable file.
+
+    Returns:
+        The title id as the path spells it, or None.
+    """
+    if rom_file.parent.name not in _CONTAINER_TYPE_DIRS:
+        return None
+    name = rom_file.parent.parent.name
+    return name if _TITLE_ID_RE.fullmatch(name) else None
+
+
+def _stray_refusal(member: imports.ImportMember) -> imports.ImportRefusal:
+    """Refuse a member that does not sit in the content tree's shape.
+
+    Args:
+        member: The member.
+
+    Returns:
+        `shape_unverified` for a monolithic STFS package, whose layout is not
+        the directory form Xenia writes, and `unrecognised_layout` for anything else.
+    """
+    if member.head(4) in _STFS_MAGICS:
+        return imports.ImportRefusal(
+            "shape_unverified",
+            member.name,
+            _EXPECTED,
+            detail="a monolithic STFS package; send the save as Xenia's own folder",
+        )
+    return imports.ImportRefusal("unrecognised_layout", member.name, _EXPECTED)
+
+
+def _place_content(
+    member: imports.ImportMember, session: imports.SessionIdentity, xuid: Optional[str]
+) -> Union[imports.Placement, imports.ImportRefusal]:
+    """Place one file of a saved game, or its header, under the signed-in profile.
+
+    The path is found below at most one wrapper (`content`, `Content` or none),
+    with a donor's XUID folder or without one. The XUID is always the
+    profile's, since the donor's names nothing on this console. Only the
+    saved-game content type is a player's data: DLC and updates are the game.
+
+    Args:
+        member: The member.
+        session: The session's identity.
+        xuid: The signed-in profile's XUID, or None when there is not one.
+
+    Returns:
+        The placement, or a refusal.
+    """
+    if member.parts[-1].lower().endswith(".srm"):
+        return imports.ImportRefusal(
+            "source_incompatible", member.name, _EXPECTED, detail="a RetroArch save file"
+        )
+    found = imports.match_anchored(
+        member.parts, wrappers=_CONTENT_WRAPPERS, levels=(_LEVEL_XUID, _LEVEL_TITLE, _LEVEL_TYPE)
+    )
+    if found is not None:
+        title, kind = found.ids[1:]
+    else:
+        found = imports.match_anchored(
+            member.parts, wrappers=_CONTENT_WRAPPERS, levels=(_LEVEL_TITLE, _LEVEL_TYPE)
+        )
+        if found is None:
+            return _stray_refusal(member)
+        title, kind = found.ids
+    if title.upper() == _PROFILE_TITLE_ID:
+        return imports.ImportRefusal(
+            "protected_destination", member.name, _EXPECTED, detail="the profile package"
+        )
+    if kind.lower() == _HEADERS_DIR.lower():
+        if len(found.tail) < 2 or found.tail[0] != _SAVE_CONTENT_TYPE:
+            return imports.ImportRefusal(
+                "unrecognised_layout", member.name, _EXPECTED, detail="a header names a saved game"
+            )
+        below, tail = (_HEADERS_DIR, _SAVE_CONTENT_TYPE), found.tail[1:]
+    elif kind == _SAVE_CONTENT_TYPE:
+        if len(found.tail) == 1:
+            return _stray_refusal(member)
+        below, tail = (kind,), found.tail
+    else:
+        return imports.ImportRefusal(
+            "unrecognised_layout",
+            member.name,
+            _EXPECTED,
+            detail="only saved games (content type 00000001) are imported; DLC and updates are the game",
+        )
+    refusal = imports.check_member_identity(
+        member,
+        imports.NORMALISERS["hex8"](title),
+        session,
+        family="hex8",
+        policy="required",
+        expected=_EXPECTED,
+    )
+    if refusal is not None:
+        return refusal
+    if xuid is None:
+        return imports.ImportRefusal(
+            "destination_unresolvable",
+            member.name,
+            _EXPECTED,
+            detail="no profile is signed in: create one on the desktop first",
+        )
+    dest = imports.build_dest(
+        CONTENT_SUBTREE, (xuid, title.upper(), *below), tail, member=member, expected=_EXPECTED
+    )
+    if isinstance(dest, imports.ImportRefusal):
+        return dest
+    return imports.Placement(member, dest)
 
 
 class Xenia(Emulator):
@@ -441,6 +646,62 @@ class Xenia(Emulator):
             and _XUID_RE.match(parts[1]) is not None
             and parts[2].upper() == _PROFILE_TITLE_ID
         )
+
+    def import_spec(self) -> imports.ImportSpec:
+        """Declare what Xenia takes: saved games in the directory form, with their headers.
+
+        Xenia has no states and no cards, so the save kind is the only one.
+
+        Returns:
+            The spec.
+        """
+        shapes = (
+            "content/<XUID>/<TITLE_ID>/00000001/<save name>/...",
+            "content/<XUID>/<TITLE_ID>/Headers/00000001/<save name>",
+        )
+        return imports.ImportSpec(kinds=(imports.KindSpec("save", shapes),), protected=_PROTECTED)
+
+    def _profile_xuid(self, ctx: imports.ImportCtx) -> Optional[str]:
+        """Read the signed-in profile's XUID, once per preflight.
+
+        This is the one file a placement hook reads. It sits outside the save
+        subtrees and is only read, and preflight runs before anything is
+        cleared or restored.
+
+        Args:
+            ctx: The launch context; its `memo` holds the answer.
+
+        Returns:
+            The XUID, or None when no single profile is signed in.
+        """
+        key = ("xenia-xuid", str(self.save_root))
+        if key not in ctx.memo:
+            ctx.memo[key] = _logged_profile_xuid(self.save_root / CONFIG_NAME)
+        cached = ctx.memo[key]
+        return cached if isinstance(cached, str) else None
+
+    def place_import(
+        self, member: imports.ImportMember, spec: imports.ImportSpec, ctx: imports.ImportCtx
+    ) -> Union[imports.Placement, imports.ImportRefusal]:
+        """Place one declared save file under the signed-in profile.
+
+        Args:
+            member: The member, already past the kind gate.
+            spec: This emulator's spec.
+            ctx: The launch context.
+
+        Returns:
+            The placement, or a refusal.
+        """
+        return _place_content(member, imports.identity_for(self, ctx), self._profile_xuid(ctx))
+
+    def identity_source(self) -> Optional[imports.IdentitySource]:
+        """Read the title id off a container path, or take RomM's.
+
+        Returns:
+            A `hex8` source that reads the rom's path through `_rom_title_id`.
+        """
+        return imports.IdentitySource("hex8", rom_reader=_rom_title_id)
 
     def resolve_rom_file(self, path: Path) -> Optional[Path]:
         """Resolve a library entry to the file Xenia should boot.

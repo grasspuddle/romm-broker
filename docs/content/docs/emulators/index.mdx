@@ -47,7 +47,8 @@ kept. Each emulator's exact save paths are listed as the `save_subtrees`
 attribute of its class in the
 [Python reference](/docs/developer/reference/emulators).
 
-RetroArch, Flycast, DuckStation, PPSSPP, Dolphin and PCSX2 also take
+RetroArch, Flycast, DuckStation, PPSSPP, Dolphin, PCSX2, RPCS3, ScummVM, Cemu,
+Azahar, Eden, shadPS4, xemu and Xenia also take
 [declared imports](/docs/api/imports): save files made outside the broker,
 such as another emulator's, placed into the session at activate.
 [What each emulator takes](/docs/api/imports#what-each-emulator-takes) lists
@@ -97,6 +98,12 @@ For multi-disc games, `rom.path` can point at an `.m3u` playlist file, or a
 folder that contains one; on disc-based platforms the broker prefers the
 playlist when one exists. While the game is running, you can switch discs
 through the [swap-disc route](/docs/api/activate#swap-discs).
+
+A [declared import](/docs/api/imports#what-each-emulator-takes) brings in one
+`.srm` on a platform whose core loads one, Wii title folders on `wii`, or
+Azahar's SD card and NAND folders on `3ds`. `ngc` still refuses a save: its
+GCI shape has not been verified, so import through `dolphin` instead. See
+[RetroArch cores](/docs/emulators/retroarch-cores#saves-states-and-imports).
 
 The full list matching each platform to its core lives in
 `retroarch_platforms.json`, next to the launcher's code. To pin exactly where
@@ -218,6 +225,10 @@ a SIGTERM shutdown request at all, so
 the broker allows for tearing down Cemu's process group, not for Cemu to
 shut itself down cleanly.
 
+A [declared import](/docs/api/imports#what-each-emulator-takes) can bring in
+a Wii U save for the game being launched. It is placed under Cemu's own
+account, in place of the account the save was made under.
+
 ## Azahar
 
 Azahar has no save states and no way for the broker to send it commands
@@ -228,12 +239,19 @@ in [Azahar setup](/docs/emulators/setup#azahar). For 3DS games, the
 RetroArch core is the better option, and it's what a `3ds` launch uses by
 default.
 
+A [declared import](/docs/api/imports#what-each-emulator-takes) can bring in
+the save data of a 3DS title from an unencrypted SD card or NAND folder.
+
 ## Eden
 
 Eden has no save states; `nand/user/save/` is where saves persist. A running
 game takes longer than the broker's usual shutdown grace period to close,
 which is why Eden gets its own
 [`EDEN_STOP_WAIT`](/docs/configuration/emulators#eden) setting.
+
+A [declared import](/docs/api/imports#what-each-emulator-takes) can bring in
+Switch save folders from a NAND export. An account save has to come with the
+profile store it needs.
 
 ## shadPS4
 
@@ -269,6 +287,9 @@ through, and they're left off the emulator's list of supported file types
 entirely. See [shadPS4 setup](/docs/emulators/setup#shadps4) for sizing the
 cache and the disk space an archive needs.
 
+A [declared import](/docs/api/imports#what-each-emulator-takes) can bring in
+PS4 save folders. They are placed under the default user, whoever made them.
+
 ## RPCS3
 
 Like DuckStation and Flycast, RPCS3 has no live save states: nothing here
@@ -285,6 +306,12 @@ per title, so `resume_slot` always finds the right one. The state an exit
 confirms is served through the state-file GET until the next activate, the
 same way DuckStation's is. The game's own save
 data, under `dev_hdd0/home/`, persists separately from all of this.
+
+A [declared import](/docs/api/imports#what-each-emulator-takes) can bring in
+PS3 save folders, each with its `PARAM.SFO`, or one savestate, which needs
+`resume_slot` and which the game boots straight into. The savestate has to
+belong to the game being launched, and a rom the broker can read no title id
+from, a bare `.iso`, takes none.
 
 `rom.path` can be a PKG file, which the launcher installs first
 ([`RPCS3_INSTALL_TIMEOUT`](/docs/configuration/emulators#rpcs3) limits how
@@ -315,6 +342,10 @@ leave your own choice alone), and
 the CPU instead of the GPU, for hosts where neither GPU rendering path
 works.
 
+A [declared import](/docs/api/imports#what-each-emulator-takes) can bring in
+the `UDATA` and `TDATA` folders of the game being launched. They reach the
+hard drive image at launch.
+
 ## Xenia
 
 `emulator: "xenia"` launches the Xenia Edge Xbox 360 emulator. Xenia has no
@@ -342,6 +373,11 @@ Live content), confirmed by checking the start of the file rather than its
 name. That way DLC, title updates, and the extra
 `.data` file that sits beside a Games on Demand package are correctly
 skipped.
+
+A [declared import](/docs/api/imports#what-each-emulator-takes) can bring in
+Xbox 360 saves for the game being launched. They are placed under the profile
+that is signed in, which the broker reads from Xenia's config, so a profile
+has to exist first.
 
 ## Flycast
 
@@ -456,6 +492,11 @@ When a state
 is loaded back in, it's renamed to match the currently booted target,
 because ScummVM finds a save purely by name, and a multilingual folder can
 register a separate target per language.
+
+A [declared import](/docs/api/imports#what-each-emulator-takes) can bring in
+`<game>.NNN` saves, named for a game in the rom folder, or one state, which
+needs `resume_slot`. The state is renamed onto the booted target in the
+working slot, like a state loaded back in.
 
 Two more settings are pinned for the sake of the video stream, not because
 ScummVM itself needs them. `fullscreen` is pinned **off**, no matter how the

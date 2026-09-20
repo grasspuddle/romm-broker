@@ -651,7 +651,7 @@ def test_restore_leaves_no_staging_file_behind_when_a_member_fails(
     assert list((tmp_path / "GC").iterdir()) == []
 
 
-# ── read_archive: the partition every restore starts from ──────────────
+# -- read_archive: the partition every restore starts from --
 
 
 def test_read_archive_partitions_v1_imports_and_the_manifest() -> None:
@@ -785,7 +785,7 @@ def test_read_archive_reports_a_manifest_whose_data_is_corrupt() -> None:
     assert "manifest unreadable" in (view.manifest_error or "")
 
 
-# ── plan_v1: every v1 check, with nothing written ──────────────────────
+# -- plan_v1: every v1 check, with nothing written --
 
 
 def _plan(tmp_path: Path, members: dict[str, bytes], **kwargs: Any) -> saves.V1Plan:
@@ -948,7 +948,112 @@ def test_surviving_chain_escapes_checks_every_level_of_a_nested_subtree(tmp_path
     assert saves.surviving_chain_escapes(root, PurePosixPath("a/b/f"), ("a", "a/b")) is True
 
 
-# ── write_save_archive: the write half of a restore ────────────────────
+def _linked_root(tmp_path: Path) -> tuple[Path, Path]:
+    """Build a save root whose `savestates` subtree links to a directory beside it.
+
+    Args:
+        tmp_path: The per-test temporary directory.
+
+    Returns:
+        The save root and the directory `savestates` links to.
+    """
+    real = tmp_path / "sstates"
+    real.mkdir()
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / "savestates").symlink_to(real, target_is_directory=True)
+    return root, real
+
+
+def test_surviving_chain_escapes_lets_a_declared_link_root_through(tmp_path: Path) -> None:
+    """A subtree link that resolves exactly to a link root is not an escape."""
+    root, real = _linked_root(tmp_path)
+    rel = PurePosixPath("savestates/BLUS30443/x")
+
+    assert saves.surviving_chain_escapes(root, rel, ("savestates",)) is True
+    assert saves.surviving_chain_escapes(root, rel, ("savestates",), (real,)) is False
+
+
+def test_surviving_chain_escapes_holds_a_link_root_to_an_exact_match(tmp_path: Path) -> None:
+    """A link into a subdirectory of a link root, or to anywhere else, still escapes."""
+    root, real = _linked_root(tmp_path)
+    (real / "sub").mkdir()
+    (root / "savestates").unlink()
+    (root / "savestates").symlink_to(real / "sub", target_is_directory=True)
+    rel = PurePosixPath("savestates/x")
+
+    assert saves.surviving_chain_escapes(root, rel, ("savestates",), (real,)) is True
+
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (root / "savestates").unlink()
+    (root / "savestates").symlink_to(elsewhere, target_is_directory=True)
+
+    assert saves.surviving_chain_escapes(root, rel, ("savestates",), (real,)) is True
+
+
+def test_plan_v1_accepts_a_member_through_a_link_root(tmp_path: Path) -> None:
+    """The later-activate case: the link exists when the plan is made, and the plan takes it."""
+    root, real = _linked_root(tmp_path)
+    view = saves.read_archive(_zip({"savestates/BLUS30443/x.SAVESTAT": b"s"}))
+
+    refused = saves.plan_v1(view, root, ("savestates",), ())
+    accepted = saves.plan_v1(view, root, ("savestates",), (), link_roots=(real,))
+
+    assert [p[2] for p in refused.problems] == ["symlink"]
+    assert accepted.problems == ()
+    assert accepted.names == ("savestates/BLUS30443/x.SAVESTAT",)
+
+
+def test_write_save_archive_writes_through_a_link_root(tmp_path: Path) -> None:
+    """The first-activate case: the link is made after the plan, and the write still lands."""
+    root, real = _linked_root(tmp_path)
+    body = _zip({"savestates/BLUS30443/x.SAVESTAT": b"state"})
+    names = ("savestates/BLUS30443/x.SAVESTAT",)
+
+    result = saves.write_save_archive(body, root, saves.ArchivePlan(names, 0, link_roots=(real,)))
+
+    assert (result["written"], result["failed"]) == (1, 0)
+    assert (real / "BLUS30443" / "x.SAVESTAT").read_bytes() == b"state"
+
+
+def test_write_save_archive_refuses_a_link_root_write_without_the_declaration(tmp_path: Path) -> None:
+    """With no `link_roots` the same write fails, as it always has."""
+    root, real = _linked_root(tmp_path)
+    body = _zip({"savestates/BLUS30443/x.SAVESTAT": b"state"})
+
+    result = saves.write_save_archive(body, root, saves.ArchivePlan(("savestates/BLUS30443/x.SAVESTAT",), 0))
+
+    assert (result["written"], result["failed"]) == (0, 1)
+    assert not (real / "BLUS30443").exists()
+
+
+def test_write_save_archive_still_refuses_a_hostile_link_below_a_link_root(tmp_path: Path) -> None:
+    """A link inside the link root that leaves it is caught by the write-time check."""
+    root, real = _linked_root(tmp_path)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (real / "BLUS30443").symlink_to(outside, target_is_directory=True)
+    body = _zip({"savestates/BLUS30443/x.SAVESTAT": b"state"})
+    names = ("savestates/BLUS30443/x.SAVESTAT",)
+
+    result = saves.write_save_archive(body, root, saves.ArchivePlan(names, 0, link_roots=(real,)))
+
+    assert (result["written"], result["failed"]) == (0, 1)
+    assert list(outside.iterdir()) == []
+
+
+def test_plan_v1_still_refuses_a_dotdot_member_with_link_roots(tmp_path: Path) -> None:
+    """Declaring a link root does not soften the member-path checks."""
+    root, real = _linked_root(tmp_path)
+    view = saves.read_archive(_zip({"savestates/../escape": b"x"}))
+
+    plan = saves.plan_v1(view, root, ("savestates",), (), link_roots=(real,))
+
+    assert [p[2] for p in plan.problems] == ["escapes"]
+
+
+# -- write_save_archive: the write half of a restore --
 
 
 def test_write_save_archive_writes_v1_members_under_the_guard(tmp_path: Path) -> None:
@@ -1078,7 +1183,7 @@ def test_read_archive_reports_a_corrupt_lzma_manifest() -> None:
     assert view.manifest_error.startswith("manifest unreadable: ")
 
 
-# ── verify_members: the pre-clear read ─────────────────────────────────
+# -- verify_members: the pre-clear read --
 
 
 @pytest.mark.parametrize("method", _METHODS, ids=_METHOD_IDS)
@@ -1167,7 +1272,7 @@ def test_extract_save_archive_still_refuses_import_members(tmp_path: Path) -> No
     assert not (root / "GC").exists()
 
 
-# ── always_include: placed imports ship even if untouched ──────────────
+# -- always_include: placed imports ship even if untouched --
 
 
 def test_always_include_ships_an_untouched_placed_file(tmp_path: Path) -> None:

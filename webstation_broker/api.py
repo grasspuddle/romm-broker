@@ -686,7 +686,14 @@ async def _start_session(body: ActivateIn, request: Request) -> dict[str, Any]:
         view = await anyio.to_thread.run_sync(saves.read_archive, content)
         if view.error is None:
             v1_plan = await anyio.to_thread.run_sync(
-                functools.partial(saves.plan_v1, view, emulator.save_root, subtrees, excluded)
+                functools.partial(
+                    saves.plan_v1,
+                    view,
+                    emulator.save_root,
+                    subtrees,
+                    excluded,
+                    link_roots=emulator.link_roots,
+                )
             )
         if not view.imports:
             legacy_error = view.error or (v1_plan.error if v1_plan else None)
@@ -783,6 +790,7 @@ async def _start_session(body: ActivateIn, request: Request) -> dict[str, Any]:
                 v1_plan.excluded_count,
                 tuple((p.member.name, p.dest) for p in placements),
                 tuple(sc for p in placements for sc in p.sidecars),
+                emulator.link_roots,
             ),
             emulator.always_restore,
         )

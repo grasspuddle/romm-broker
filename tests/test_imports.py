@@ -860,6 +860,11 @@ def test_owner_marker_sidecar_falls_back_to_the_raw_path(caplog: pytest.LogCaptu
         ("gc_wii_disc", "GZLE01", "475A4C45"),
         ("gc_wii_disc", "0x475a4c45", "475A4C45"),
         ("hex16", "0100/0000/0000/1000", "0100000000001000"),
+        ("wiiu_title", "1010ec00", "1010EC00"),
+        ("wiiu_title", "00050000101C9400", "101C9400"),
+        ("wiiu_title", "0005000E101C9400", None),
+        ("wiiu_title", "00050000", None),
+        ("wiiu_title", "not a title id", None),
         ("dc_product", "T-8101N", None),
         ("scummvm_target", "Monkey1", "monkey1"),
     ],
@@ -922,6 +927,30 @@ def test_session_identity_falls_back_to_romm_then_none() -> None:
 
     assert romm == imports.SessionIdentity("BASLUS-20001ALL", "romm")
     assert nothing == imports.SessionIdentity(None, "none")
+
+
+def test_a_title_id_stands_in_for_a_missing_save_target_only_when_asked() -> None:
+    """The fallback is opt-in, so a family that reads the save target alone still finds nothing."""
+    ctx = _ctx(rom=_rom(title_id="0004000000033500"))
+
+    without = imports.resolve_session_identity(ctx, family="hex16", use_save_target=True)
+    with_fallback = imports.resolve_session_identity(
+        ctx, family="hex16", use_save_target=True, fall_back_to_title_id=True
+    )
+
+    assert without == imports.SessionIdentity(None, "none")
+    assert with_fallback == imports.SessionIdentity("0004000000033500", "romm")
+
+
+def test_a_save_target_is_still_read_first_when_a_title_id_can_stand_in() -> None:
+    """The fallback only fills a gap, so a save target that is there is the one compared."""
+    ctx = _ctx(rom=_rom(title_id="0004000000099999", save_target="00040000/00033500"))
+
+    identity = imports.resolve_session_identity(
+        ctx, family="hex16", use_save_target=True, fall_back_to_title_id=True
+    )
+
+    assert identity == imports.SessionIdentity("0004000000033500", "romm")
 
 
 def test_a_rom_reader_that_raises_reads_as_no_id() -> None:
@@ -1166,6 +1195,7 @@ class _PlanEmu:
         """
         self.save_root = root
         self.restore_subtrees = subtrees
+        self.link_roots: tuple[Path, ...] = ()
         self.validated: list[int] = []
 
     def save_file_kind(self, rel: str) -> str:
@@ -1472,6 +1502,25 @@ def test_a_destination_through_an_escaping_symlink_is_unsafe(tmp_path: Path) -> 
     (root / "saves").symlink_to(tmp_path / "outside")
 
     assert _check(tmp_path, [_placed("a", "saves/a")]) == [("unsafe_path", ".import/save/a")]
+
+
+def test_a_destination_through_a_declared_link_root_is_safe(tmp_path: Path) -> None:
+    """`check_plan` passes the emulator's link roots to the chain check."""
+    real = tmp_path / "sstates"
+    real.mkdir()
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / "states").symlink_to(real, target_is_directory=True)
+    emu = _PlanEmu(root)
+    spec = imports.ImportSpec(kinds=(imports.KindSpec("save", ("x",)),))
+    plan = [_placed("a", "states/a")]
+
+    refused = imports.check_plan(plan, _ctx(), spec, emu)  # type: ignore[arg-type]
+    emu.link_roots = (real,)
+    accepted = imports.check_plan(plan, _ctx(), spec, emu)  # type: ignore[arg-type]
+
+    assert [r.reason for r in refused] == ["unsafe_path"]
+    assert accepted == []
 
 
 def test_the_size_cap_counts_v1_bytes_too(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
