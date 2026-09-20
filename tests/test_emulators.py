@@ -940,6 +940,12 @@ _EXAMPLES: list[tuple[str, str, bytes]] = [
 ]
 """One member each importing emulator accepts, for every kind it accepts on its example platform."""
 
+_EXAMPLE_ROM: dict[str, imports.RomRef] = {}
+"""The rom RomM would name for an emulator's examples, where the emulator needs a session id."""
+
+_EXAMPLE_SEED: dict[str, Callable[[base.Emulator], None]] = {}
+"""What an emulator's hook reads before launch, written into the emulator's patched `save_root`."""
+
 
 def test_every_accepted_kind_has_an_example() -> None:
     """Each kind an importing emulator can place has an example in `_EXAMPLES`.
@@ -967,7 +973,8 @@ def test_an_accepted_member_lands_inside_the_save_tree(
     `check_plan` holds a member's own destination to the save tree, but not
     its sidecars. A sidecar written outside the tree is never shipped by the
     exit dump, so it is lost with the session, and never cleared, so it
-    outlives it.
+    outlives it. An emulator that needs a session id or a config file gets them from `_EXAMPLE_ROM`
+    and `_EXAMPLE_SEED`.
 
     Args:
         monkeypatch: Pytest's attribute patcher.
@@ -978,10 +985,19 @@ def test_an_accepted_member_lands_inside_the_save_tree(
     """
     emu = _on(name, _EXAMPLE_PLATFORM[name])
     monkeypatch.setattr(emu, "save_root", tmp_path / "data")
+    seed = _EXAMPLE_SEED.get(name)
+    if seed is not None:
+        seed(emu)
     rom = tmp_path / "Game.bin"
     rom.write_bytes(b"rom")
 
-    result = preflight_import(emu, import_zip({member: data}), rom_file=rom, resume_slot=emu.state_slot)
+    result = preflight_import(
+        emu,
+        import_zip({member: data}),
+        rom_file=rom,
+        resume_slot=emu.state_slot,
+        rom=_EXAMPLE_ROM.get(name),
+    )
 
     assert result.refusals == ()
     assert [p.member.name for p in result.placements] == [member]

@@ -23,7 +23,7 @@ from webstation_broker.emulators import xemu
 SECTOR = 2048
 
 
-# ── Disc images ──────────────────────────────────────────────────────────────
+# -- Disc images --
 
 
 def _xiso(path: Path, title_id: int = 0x4D530064, *, base: int = 0,
@@ -127,7 +127,7 @@ def test_a_disc_claiming_an_absurd_root_directory_is_not_read(tmp_path: Path, cl
     assert xemu._disc_title_id(disc) is None
 
 
-# ── ROM resolution ───────────────────────────────────────────────────────────
+# -- ROM resolution --
 
 
 @pytest.fixture
@@ -206,7 +206,7 @@ def test_a_direct_path_that_is_a_symlink_out_of_the_rom_root_is_rejected(
     assert xemu.Xemu.resolve_rom_file(None, linked) is None
 
 
-# ── HDD image location ───────────────────────────────────────────────────────
+# -- HDD image location --
 
 
 def _toml(tmp_path: Path, hdd_path: str) -> Path:
@@ -253,7 +253,7 @@ def test_an_unparseable_config_falls_back(monkeypatch: pytest.MonkeyPatch, tmp_p
     assert xemu._hdd_image_path() == xemu.FALLBACK_HDD_IMAGE
 
 
-# ── One-time raw conversion ──────────────────────────────────────────────────
+# -- One-time raw conversion --
 
 
 def test_a_raw_image_is_left_alone(tmp_path: Path) -> None:
@@ -304,7 +304,7 @@ def test_a_failed_conversion_leaves_the_qcow2_playable(
     assert image.read_bytes() == original
 
 
-# ── Display settings pin ─────────────────────────────────────────────────────
+# -- Display settings pin --
 
 
 # A config shaped like the one xemu writes: comments, several tables, and a
@@ -608,7 +608,7 @@ def test_a_launch_tells_xemu_which_toml_the_broker_pinned(
     assert cmd[cmd.index("-config_path") + 1] == str(xemu.XEMU_TOML)
 
 
-# ── Stray process reaping ────────────────────────────────────────────────────
+# -- Stray process reaping --
 
 
 @pytest.fixture
@@ -688,7 +688,7 @@ def test_a_stray_that_ignores_sigterm_is_killed(
     assert signals == [(777, signal.SIGTERM), (777, signal.SIGKILL)]
 
 
-# ── FATX save sync ───────────────────────────────────────────────────────────
+# -- FATX save sync --
 
 
 @pytest.fixture
@@ -1093,7 +1093,7 @@ def test_a_successful_extraction_replaces_the_staged_files(emulator: xemu.Xemu) 
     assert (emulator.staging_dir / "UDATA/4D530064/saved.dat").read_bytes() == b"progress"
 
 
-# ── Stale save clear ─────────────────────────────────────────────────────────
+# -- Stale save clear --
 
 
 def test_the_clear_takes_the_launched_titles_saves_off_the_image(emulator: xemu.Xemu) -> None:
@@ -1285,7 +1285,7 @@ def test_a_launch_that_cannot_clear_the_image_neither_injects_nor_archives(
     assert emulator.save_and_exit(None)["saves_extracted"] == 0
 
 
-# ── Session contract ─────────────────────────────────────────────────────────
+# -- Session contract --
 
 
 def test_xemu_reports_no_save_state_support() -> None:

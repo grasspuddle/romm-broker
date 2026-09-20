@@ -923,7 +923,7 @@ def test_ipc_send_returns_false_when_there_is_no_stdin() -> None:
     assert emu._ipc_send("RUN") is False
 
 
-# ── shutdown verdict and unmounted saves ───────────────────────────────
+# -- shutdown verdict and unmounted saves --
 
 
 @pytest.fixture
@@ -1122,7 +1122,7 @@ def test_unmounted_saves_is_empty_without_a_savedata_tree(tmp_path: Path) -> Non
     assert shadps4._unmounted_saves(tmp_path / "nope") == []
 
 
-# ── clearing stale save data at activate ───────────────────────────────
+# -- clearing stale save data at activate --
 
 
 def test_shadps4_declares_that_it_clears_stale_saves() -> None:
@@ -1231,7 +1231,7 @@ def test_clearing_the_working_slot_is_a_noop_without_a_savedata_tree(
     assert not (tmp_path / "shadPS4").exists()
 
 
-# ── pkg extraction / extraction cache ──────────────────────────────────
+# -- pkg extraction / extraction cache --
 
 
 def _touch(path: Path, mtime: Optional[float] = None) -> Path:
@@ -1922,7 +1922,7 @@ def test_extract_and_cache_pkg_serializes_a_second_call_racing_the_same_pkg(
     second.join(timeout=5)
 
 
-# ── archive extraction (zip/7z/rar) feeding pkg_extractor ──────────────
+# -- archive extraction (zip/7z/rar) feeding pkg_extractor --
 
 
 def _make_zip(path: Path, members: dict) -> Path:
@@ -2265,7 +2265,7 @@ def test_the_cache_is_disabled_by_default(monkeypatch: pytest.MonkeyPatch) -> No
     assert shadps4._truthy(os.environ.get("SHADPS4_CACHE_ENABLED", "false")) is False
 
 
-# ── archive listings must fail closed ──────────────────────────────────
+# -- archive listings must fail closed --
 
 
 def test_rar_member_paths_raises_when_the_listing_names_nothing(
@@ -2380,7 +2380,7 @@ def test_extract_archive_discards_a_tree_that_escaped_dest(
     assert outside.exists()
 
 
-# ── cache lock and expansion accounting ────────────────────────────────
+# -- cache lock and expansion accounting --
 
 
 def test_the_cache_lock_gives_up_rather_than_parking_a_request(

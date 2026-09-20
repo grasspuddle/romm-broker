@@ -40,7 +40,7 @@ def _touch(path: Path) -> Path:
     return path
 
 
-# ── ROM resolution ───────────────────────────────────────────────────────────
+# -- ROM resolution --
 
 
 def test_resolve_takes_a_file_as_given(rom_root: Path) -> None:
@@ -221,7 +221,7 @@ def test_resolve_prefers_an_executable_or_disc_over_a_container(rom_root: Path) 
     assert xenia.Xenia().resolve_rom_file(game) == iso
 
 
-# ── Launch ───────────────────────────────────────────────────────────────────
+# -- Launch --
 
 
 def _spawned(monkeypatch: pytest.MonkeyPatch, rom: Path, resume_slot: Optional[int] = None) -> list[str]:
@@ -322,7 +322,7 @@ def test_launch_records_the_session_baseline(
     assert before <= emu._session_start <= time.time()
 
 
-# ── Exit restamp ─────────────────────────────────────────────────────────────
+# -- Exit restamp --
 
 _XUID = "0000000000000000"
 _TITLE = "58410824"
@@ -488,7 +488,7 @@ def test_exit_reports_no_state(data_dir: Path) -> None:
     }
 
 
-# ── Stale save data ──────────────────────────────────────────────────────────
+# -- Stale save data --
 
 
 def test_clearing_the_working_slot_drops_the_last_players_save(data_dir: Path) -> None:
@@ -645,7 +645,7 @@ def test_the_profile_survives_a_clear_that_no_restore_follows(data_dir: Path) ->
     assert not stale.exists()
 
 
-# ── Profile restore ──────────────────────────────────────────────────────────
+# -- Profile restore --
 
 _PROFILE_REL = f"content/{_XUID}/FFFE07D1/00010000/Account"
 _SAVE_REL = f"content/{_XUID}/{_TITLE}/00000001/SAVEGAME/savedata.bin"

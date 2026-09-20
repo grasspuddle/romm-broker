@@ -365,7 +365,7 @@ def _pick_rom_file(candidates: Iterable[Path], base: Path) -> Optional[Path]:
     return min(ranked)[4]
 
 
-# ── One-time image conversion ────────────────────────────────────────────────
+# -- One-time image conversion --
 
 
 def _ensure_raw_image(image: Path) -> bool:
@@ -425,7 +425,7 @@ def _ensure_raw_image(image: Path) -> bool:
     return True
 
 
-# ── Title id from the disc image ─────────────────────────────────────────────
+# -- Title id from the disc image --
 
 _XISO_SECTOR = 2048
 """Sector size of an XISO, in bytes."""
@@ -557,7 +557,7 @@ def _disc_title_id(rom_path: Path) -> Optional[str]:
         return None
 
 
-# ── FATX access (pyfatx surfaces libfatx errors as bare AssertionError) ──────
+# -- FATX access (pyfatx surfaces libfatx errors as bare AssertionError) --
 
 
 def _open_fatx_e(image: Path) -> Optional[Fatx]:
@@ -712,7 +712,7 @@ def _remove_tree(path: Path) -> None:
         log.warning("could not fully remove %s: %s", path, exc)
 
 
-# ── Provider ─────────────────────────────────────────────────────────────────
+# -- Provider --
 
 
 def _proc_pids() -> list[int]:
