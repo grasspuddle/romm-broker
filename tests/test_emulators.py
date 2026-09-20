@@ -648,7 +648,7 @@ def test_the_launch_env_points_at_the_labwc_session(monkeypatch: pytest.MonkeyPa
 
 
 _IMPORTING: frozenset[str] = frozenset(
-    {"cemu", "dolphin", "duckstation", "flycast", "pcsx2", "ppsspp", "retroarch", "xenia"}
+    {"cemu", "dolphin", "duckstation", "eden", "flycast", "pcsx2", "ppsspp", "retroarch", "xenia"}
 )
 """The emulators that accept declared imports; every other one inherits the refusing base hooks."""
 
@@ -917,6 +917,7 @@ _EXAMPLE_PLATFORM: dict[str, str] = {
     "cemu": "wiiu",
     "dolphin": "ngc",
     "duckstation": "psx",
+    "eden": "switch",
     "flycast": "dc",
     "pcsx2": "ps2",
     "ppsspp": "psp",
@@ -924,6 +925,9 @@ _EXAMPLE_PLATFORM: dict[str, str] = {
     "xenia": "xbox360",
 }
 """The platform each importing emulator's examples below are placed on."""
+
+_EDEN_DEVICE_SAVE = f".import/save/nand/user/save/{'0' * 16}/{'0' * 32}/0100000000010000/save.bin"
+"""A device save unit's file, the one Eden shape that needs no profile store beside it."""
 
 _EXAMPLES: list[tuple[str, str, bytes]] = [
     ("cemu", ".import/save/usr/save/00050000/1010EC00/user/80000001/slot0.dat", b"save"),
@@ -933,6 +937,7 @@ _EXAMPLES: list[tuple[str, str, bytes]] = [
     ("duckstation", ".import/save/card.mcd", bytes(131072)),
     ("duckstation", ".import/memcard/card.mcr", bytes(131072)),
     ("duckstation", ".import/state/SLUS-00594_resume.sav", b"progress"),
+    ("eden", _EDEN_DEVICE_SAVE, b"save"),
     ("flycast", ".import/save/vmu_save_B2.bin", bytes(131072)),
     ("flycast", ".import/save/dc_nvmem.bin", b"flash"),
     ("flycast", ".import/memcard/card.bin", bytes(131072)),
@@ -960,6 +965,7 @@ def _seed_xenia(emu: base.Emulator) -> None:
 
 _EXAMPLE_ROM: dict[str, imports.RomRef] = {
     "cemu": imports.RomRef(1, "Game", "wiiu", title_id="1010EC00"),
+    "eden": imports.RomRef(1, "Game", "switch", title_id="0100000000010000"),
     "xenia": imports.RomRef(1, "Game", "xbox360", title_id="4D5307E6"),
 }
 """The rom RomM would name for an emulator's examples, where the emulator needs a session id."""
