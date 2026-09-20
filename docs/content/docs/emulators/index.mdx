@@ -47,7 +47,8 @@ kept. Each emulator's exact save paths are listed as the `save_subtrees`
 attribute of its class in the
 [Python reference](/docs/developer/reference/emulators).
 
-RetroArch, Flycast, DuckStation, PPSSPP, Dolphin and PCSX2 also take
+RetroArch, Flycast, DuckStation, PPSSPP, Dolphin, PCSX2, Cemu, Azahar, Eden,
+shadPS4, xemu and Xenia also take
 [declared imports](/docs/api/imports): save files made outside the broker,
 such as another emulator's, placed into the session at activate.
 [What each emulator takes](/docs/api/imports#what-each-emulator-takes) lists
@@ -218,6 +219,10 @@ a SIGTERM shutdown request at all, so
 the broker allows for tearing down Cemu's process group, not for Cemu to
 shut itself down cleanly.
 
+A [declared import](/docs/api/imports#what-each-emulator-takes) can bring in
+a Wii U save for the game being launched. It is placed under Cemu's own
+account, in place of the account the save was made under.
+
 ## Azahar
 
 Azahar has no save states and no way for the broker to send it commands
@@ -228,12 +233,19 @@ in [Azahar setup](/docs/emulators/setup#azahar). For 3DS games, the
 RetroArch core is the better option, and it's what a `3ds` launch uses by
 default.
 
+A [declared import](/docs/api/imports#what-each-emulator-takes) can bring in
+the save data of a 3DS title from an unencrypted SD card or NAND folder.
+
 ## Eden
 
 Eden has no save states; `nand/user/save/` is where saves persist. A running
 game takes longer than the broker's usual shutdown grace period to close,
 which is why Eden gets its own
 [`EDEN_STOP_WAIT`](/docs/configuration/emulators#eden) setting.
+
+A [declared import](/docs/api/imports#what-each-emulator-takes) can bring in
+Switch save folders from a NAND export. An account save has to come with the
+profile store it needs.
 
 ## shadPS4
 
@@ -268,6 +280,9 @@ turned off, those formats are rejected up front instead of failing partway
 through, and they're left off the emulator's list of supported file types
 entirely. See [shadPS4 setup](/docs/emulators/setup#shadps4) for sizing the
 cache and the disk space an archive needs.
+
+A [declared import](/docs/api/imports#what-each-emulator-takes) can bring in
+PS4 save folders. They are placed under the default user, whoever made them.
 
 ## RPCS3
 
@@ -315,6 +330,10 @@ leave your own choice alone), and
 the CPU instead of the GPU, for hosts where neither GPU rendering path
 works.
 
+A [declared import](/docs/api/imports#what-each-emulator-takes) can bring in
+the `UDATA` and `TDATA` folders of the game being launched. They reach the
+hard drive image at launch.
+
 ## Xenia
 
 `emulator: "xenia"` launches the Xenia Edge Xbox 360 emulator. Xenia has no
@@ -342,6 +361,11 @@ Live content), confirmed by checking the start of the file rather than its
 name. That way DLC, title updates, and the extra
 `.data` file that sits beside a Games on Demand package are correctly
 skipped.
+
+A [declared import](/docs/api/imports#what-each-emulator-takes) can bring in
+Xbox 360 saves for the game being launched. They are placed under the profile
+that is signed in, which the broker reads from Xenia's config, so a profile
+has to exist first.
 
 ## Flycast
 
