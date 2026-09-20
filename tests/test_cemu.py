@@ -8,12 +8,16 @@ import logging
 import os
 import time
 import xml.etree.ElementTree as ET
-from pathlib import Path
-from typing import Optional
+import zipfile
+from pathlib import Path, PurePosixPath
+from typing import Optional, Union
 
 import pytest
 
+from webstation_broker import imports
 from webstation_broker.emulators import cemu
+
+from .conftest import import_zip, preflight_import, restore_import
 
 
 @pytest.fixture
@@ -482,3 +486,365 @@ def test_exit_reports_no_state(save_dir: Path) -> None:
     """Exit reports that Cemu has no save state to offer."""
     report = cemu.Cemu().save_and_exit(10)
     assert report == {"state_saved": None, "state_slot": None, "state_file": None}
+
+
+# -- declared imports --
+
+_ROMM = imports.RomRef(1, "Game", "wiiu", title_id="1010EC00")
+"""The rom an activate for the session's game carries; RomM sends the low half of the title id."""
+_TITLE_DIR = "usr/save/00050000/1010ec00"
+"""Where the session's game keeps its save, below the MLC root."""
+
+
+def _preflight(
+    members: dict[str, bytes],
+    *,
+    rom: Optional[imports.RomRef] = _ROMM,
+    v1: Optional[dict[str, bytes]] = None,
+) -> imports.PreflightResult:
+    """Preflight an archive of import members against a Cemu whose MLC is patched into tmp_path.
+
+    Args:
+        members: `.import/<kind>/...` names mapped to bytes.
+        rom: The activate body's rom, or None.
+        v1: Ordinary archive members to carry beside them, or None.
+
+    Returns:
+        What preflight decided.
+    """
+    return preflight_import(cemu.Cemu(), import_zip(members, v1), rom_file=None, rom=rom)
+
+
+def _save_member(rel: str) -> imports.ImportMember:
+    """Build a save member as preflight hands one to a hook, with no archive behind it.
+
+    Args:
+        rel: The member's path below `.import/save/`.
+
+    Returns:
+        The member; its data cannot be read.
+    """
+    return imports.ImportMember(
+        f".import/save/{rel}",
+        "save",
+        "unknown",
+        PurePosixPath(rel),
+        tuple(rel.split("/")),
+        1,
+        zipfile.ZipInfo(rel),
+    )
+
+
+@pytest.mark.usefixtures("save_dir")
+@pytest.mark.parametrize(
+    ("rel", "dest"),
+    [
+        ("usr/save/00050000/1010EC00/user/80000001/slot0.dat", f"{_TITLE_DIR}/user/80000001/slot0.dat"),
+        ("mlc01/usr/save/00050000/1010ec00/user/80000001/slot0.dat", f"{_TITLE_DIR}/user/80000001/slot0.dat"),
+        (
+            "storage_mlc/usr/save/00050000/1010ec00/user/80000001/slot0.dat",
+            f"{_TITLE_DIR}/user/80000001/slot0.dat",
+        ),
+        ("save/00050000/1010ec00/user/80000001/slot0.dat", f"{_TITLE_DIR}/user/80000001/slot0.dat"),
+        ("usr/save/000500001010EC00/user/80000001/slot0.dat", f"{_TITLE_DIR}/user/80000001/slot0.dat"),
+        ("usr/save/00050000/1010ec00/user/80000007/slot0.dat", f"{_TITLE_DIR}/user/80000001/slot0.dat"),
+        ("usr/save/00050000/1010ec00/user/common/opts.dat", f"{_TITLE_DIR}/user/common/opts.dat"),
+        ("usr/save/00050000/1010ec00/meta/meta.xml", f"{_TITLE_DIR}/meta/meta.xml"),
+        ("user/80000003/slot0.dat", f"{_TITLE_DIR}/user/80000001/slot0.dat"),
+        ("user/common/opts.dat", f"{_TITLE_DIR}/user/common/opts.dat"),
+    ],
+    ids=[
+        "usr/save",
+        "mlc01",
+        "storage_mlc",
+        "save",
+        "saviine",
+        "donor account",
+        "common",
+        "meta",
+        "anchorless",
+        "anchorless common",
+    ],
+)
+def test_a_save_lands_in_the_title_folder_cemu_opens(rel: str, dest: str) -> None:
+    """A save is placed under the session's title in lower case, on the account Cemu created.
+
+    The donor's account id names nothing on this console, so it is replaced by
+    `80000001`. A member with no title folder takes the session's.
+
+    Args:
+        rel: The member's path below `.import/save/`.
+        dest: Where it lands, below the MLC root.
+    """
+    result = _preflight({f".import/save/{rel}": b"save"})
+
+    assert result.refusals == ()
+    assert [str(p.dest) for p in result.placements] == [dest]
+
+
+@pytest.mark.usefixtures("save_dir")
+@pytest.mark.parametrize(
+    ("rel", "reason"),
+    [
+        ("usr/save/system/act/80000001/account.dat", "protected_destination"),
+        ("usr/save/system/save/80000001.dat", "protected_destination"),
+        ("usr/save/notes/readme.txt", "protected_destination"),
+        ("usr/save/00050000/10143500/user/80000001/slot0.dat", "identity_mismatch"),
+        ("usr/save/0005000010143500/user/80000001/slot0.dat", "identity_mismatch"),
+        ("usr/save/00050002/1010ec00/user/80000001/slot0.dat", "unrecognised_layout"),
+        ("usr/save/0005000E/1010ec00/user/80000001/slot0.dat", "unrecognised_layout"),
+        ("usr/save/00050000/loose.bin", "unrecognised_layout"),
+        ("usr/save/00050000/1010ec00", "unrecognised_layout"),
+        ("usr/save/loose.bin", "unrecognised_layout"),
+        ("mlc01/sys/title/00050010/1000400a/code/app.xml", "unrecognised_layout"),
+        ("00050000/1010ec00/user/80000001/slot0.dat", "unrecognised_layout"),
+        ("slot0.dat", "unrecognised_layout"),
+        ("user/00000001/slot0.dat", "unrecognised_layout"),
+        ("user/80000001", "unrecognised_layout"),
+        ("usr/save/00050000/1010ec00/user/00000001/slot0.dat", "unrecognised_layout"),
+        ("usr/save/00050000/1010ec00/user/80000001", "unrecognised_layout"),
+        ("usr/save/00050000/1010ec00/user/common", "unrecognised_layout"),
+    ],
+    ids=[
+        "account store",
+        "play stats",
+        "not a title folder",
+        "another title",
+        "another title, saviine",
+        "a demo's high half",
+        "an update's high half",
+        "a loose file under the high half",
+        "a title folder with no file",
+        "a loose file under the save tree",
+        "outside the save tree",
+        "no wrapper",
+        "loose file",
+        "a persistent id Cemu never issues",
+        "an account folder with no file",
+        "an anchored persistent id Cemu never issues",
+        "an anchored account folder with no file",
+        "an anchored common folder with no file",
+    ],
+)
+def test_a_member_cemu_would_not_read_is_refused(rel: str, reason: str) -> None:
+    """Each shape the spec names is refused with its own code, and nothing is placed.
+
+    Args:
+        rel: The member's path below `.import/save/`.
+        reason: The refusal code.
+    """
+    result = _preflight({f".import/save/{rel}": b"x"})
+
+    assert [r.reason for r in result.refusals] == [reason]
+    assert result.placements == ()
+
+
+@pytest.mark.usefixtures("save_dir")
+def test_an_anchorless_save_needs_a_game_to_sit_under() -> None:
+    """With no title folder in the path and no game named by RomM, there is nowhere to place it."""
+    result = _preflight({".import/save/user/80000001/slot0.dat": b"x"}, rom=None)
+
+    assert [r.reason for r in result.refusals] == ["identity_unknown"]
+
+
+@pytest.mark.usefixtures("save_dir")
+def test_an_anchored_save_is_placed_when_romm_names_no_game() -> None:
+    """A path that names its own title is held to the session's game only when there is one."""
+    result = _preflight({".import/save/usr/save/00050000/1010ec00/user/80000001/slot0.dat": b"x"}, rom=None)
+
+    assert result.refusals == ()
+    assert [str(p.dest) for p in result.placements] == [f"{_TITLE_DIR}/user/80000001/slot0.dat"]
+
+
+@pytest.mark.usefixtures("save_dir")
+def test_two_donor_accounts_are_refused_rather_than_merged() -> None:
+    """Cemu has one account here, so two donor accounts would land on top of each other.
+
+    The `common` file names no account, so it is not part of the clash.
+    """
+    result = _preflight(
+        {
+            ".import/save/usr/save/00050000/1010ec00/user/80000001/a.dat": b"a",
+            ".import/save/usr/save/00050000/1010ec00/user/80000002/b.dat": b"b",
+            ".import/save/usr/save/00050000/1010ec00/user/common/c.dat": b"c",
+        }
+    )
+
+    assert [(r.reason, r.member) for r in result.refusals] == [
+        ("destination_conflict", ".import/save/usr/save/00050000/1010ec00/user/80000001/a.dat"),
+        ("destination_conflict", ".import/save/usr/save/00050000/1010ec00/user/80000002/b.dat"),
+    ]
+
+
+@pytest.mark.usefixtures("save_dir")
+def test_one_donor_account_across_many_files_is_not_a_clash() -> None:
+    """Two files under one donor account both land under the session's account."""
+    result = _preflight(
+        {
+            ".import/save/user/80000004/a.dat": b"a",
+            ".import/save/user/80000004/b.dat": b"b",
+        }
+    )
+
+    assert result.refusals == ()
+    assert sorted(str(p.dest) for p in result.placements) == [
+        f"{_TITLE_DIR}/user/80000001/a.dat",
+        f"{_TITLE_DIR}/user/80000001/b.dat",
+    ]
+
+
+@pytest.mark.usefixtures("save_dir")
+def test_an_imported_save_beside_an_archived_one_is_refused() -> None:
+    """A save that lands on a file the archive already holds is a destination conflict."""
+    result = _preflight(
+        {".import/save/user/80000004/slot0.dat": b"imported"},
+        v1={f"{_TITLE_DIR}/user/80000001/slot0.dat": b"archived"},
+    )
+
+    assert [r.reason for r in result.refusals] == ["destination_conflict"]
+
+
+@pytest.mark.usefixtures("save_dir")
+def test_a_state_or_memory_card_is_not_taken() -> None:
+    """Cemu has no states and no cards, so the kind gate stops them before the hook."""
+    result = _preflight({".import/state/game.sav": b"x", ".import/memcard/card.mcd": b"x"})
+
+    assert sorted(r.reason for r in result.refusals) == ["kind_not_accepted", "kind_not_accepted"]
+
+
+def test_an_imported_save_is_where_cemus_own_lookups_find_it(save_dir: Path) -> None:
+    """The placed file is the one the exit restamp walks and the stale clear removes, in lower case.
+
+    The read-back is by literal lower-case path: on a case-sensitive
+    filesystem, a destination Cemu never opens would be written and no
+    refusal could catch it.
+
+    Args:
+        save_dir: The patched save tree.
+    """
+    emu = cemu.Cemu()
+    body = import_zip(
+        {
+            ".import/save/usr/save/00050000/1010EC00/user/80000009/slot0.dat": b"progress",
+            ".import/save/usr/save/00050000/1010EC00/meta/meta.xml": b"<meta/>",
+        }
+    )
+    result = preflight_import(emu, body, rom_file=None, rom=_ROMM)
+    restore_import(emu, body, result)
+
+    title = save_dir / "00050000" / "1010ec00"
+    assert (title / "user" / "80000001" / "slot0.dat").read_bytes() == b"progress"
+    emu._session_start = time.time() - 100
+    assert emu._modified_title_saves() == [title]
+
+    _touch(save_dir / "system" / "act" / "80000001" / "account.dat")
+    emu.clear_working_slot()
+
+    assert not title.exists()
+    assert (save_dir / "system" / "act" / "80000001" / "account.dat").exists()
+
+
+@pytest.mark.usefixtures("save_dir")
+def test_cemu_declares_a_save_kind_only() -> None:
+    """The spec names the save kind alone, with no state channel, and protects the account store."""
+    emu = cemu.Cemu()
+    spec = emu.import_spec()
+
+    assert [k.kind for k in spec.kinds] == ["save"]
+    assert spec.state_channel == "none"
+    assert spec.protected == ("usr/save/system/*",)
+    assert spec.case_insensitive_dest is False
+    assert cemu.DEFAULT_PERSISTENT_ID == "80000001"
+    assert emu.identity_source() == imports.IdentitySource("hex8")
+
+
+def test_the_donor_accounts_are_collected_once_per_preflight(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The archive is read for donor accounts on the first ask, and the answer is reused.
+
+    Args:
+        monkeypatch: Pytest's attribute patcher.
+    """
+    calls: list[str] = []
+    real_split = cemu._split
+
+    def counting_split(member: imports.ImportMember) -> Union[cemu._Split, imports.ImportRefusal]:
+        """Count each member the hook reads, then split it as usual.
+
+        Args:
+            member: The member.
+
+        Returns:
+            What `_split` returns.
+        """
+        calls.append(member.name)
+        return real_split(member)
+
+    monkeypatch.setattr(cemu, "_split", counting_split)
+    members = tuple(
+        _save_member(rel)
+        for rel in ("user/80000001/a.dat", "user/80000001/b.dat", "user/common/c.dat", "user/80000002/d.dat")
+    )
+    ctx = imports.ImportCtx(
+        rom_file=None, rom=None, memory_card_synced=False, excluded=(), resume_slot=None, members=members
+    )
+
+    first = cemu._donor_persistent_ids(ctx)
+    second = cemu._donor_persistent_ids(ctx)
+
+    assert first == frozenset({"80000001", "80000002"})
+    assert second is first
+    assert len(calls) == len(members)
+
+
+@pytest.mark.usefixtures("save_dir")
+def test_a_file_that_names_no_account_never_asks_who_the_donors_are(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The archive is not scanned for accounts until a member that names one needs the answer.
+
+    Args:
+        monkeypatch: Pytest's attribute patcher.
+    """
+    asked: list[str] = []
+
+    def record_scan(ctx: imports.ImportCtx) -> frozenset[str]:
+        """Record that the scan ran.
+
+        Args:
+            ctx: The launch context.
+
+        Returns:
+            No accounts.
+        """
+        asked.append("scan")
+        return frozenset()
+
+    monkeypatch.setattr(cemu, "_donor_persistent_ids", record_scan)
+
+    result = _preflight(
+        {
+            ".import/save/usr/save/00050000/1010ec00/user/common/c.dat": b"c",
+            ".import/save/usr/save/00050000/1010ec00/meta/meta.xml": b"m",
+        }
+    )
+
+    assert result.refusals == ()
+    assert asked == []
+
+
+def test_the_persistent_id_is_read_only_from_an_account_folder() -> None:
+    """Only `user/<8xxxxxxx>/...` names an account; `common`, `meta` and a bare `user` folder do not."""
+
+    def split(tail: tuple[str, ...]) -> cemu._Split:
+        """Build a split path below a title folder.
+
+        Args:
+            tail: The components below the title's folder.
+
+        Returns:
+            The split path.
+        """
+        return cemu._Split("00050000", "1010ec00", tail)
+
+    assert split(("user", "8000000a", "x.dat")).persistent_id == "8000000A"
+    assert split(("user", "common", "x.dat")).persistent_id is None
+    assert split(("meta", "meta.xml")).persistent_id is None
+    assert split(("user",)).persistent_id is None

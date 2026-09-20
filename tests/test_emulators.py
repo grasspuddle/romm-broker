@@ -648,7 +648,7 @@ def test_the_launch_env_points_at_the_labwc_session(monkeypatch: pytest.MonkeyPa
 
 
 _IMPORTING: frozenset[str] = frozenset(
-    {"dolphin", "duckstation", "flycast", "pcsx2", "ppsspp", "retroarch", "xenia"}
+    {"cemu", "dolphin", "duckstation", "flycast", "pcsx2", "ppsspp", "retroarch", "xenia"}
 )
 """The emulators that accept declared imports; every other one inherits the refusing base hooks."""
 
@@ -914,6 +914,7 @@ def test_a_flat_card_is_an_ordinary_save(name: str) -> None:
 
 
 _EXAMPLE_PLATFORM: dict[str, str] = {
+    "cemu": "wiiu",
     "dolphin": "ngc",
     "duckstation": "psx",
     "flycast": "dc",
@@ -925,6 +926,7 @@ _EXAMPLE_PLATFORM: dict[str, str] = {
 """The platform each importing emulator's examples below are placed on."""
 
 _EXAMPLES: list[tuple[str, str, bytes]] = [
+    ("cemu", ".import/save/usr/save/00050000/1010EC00/user/80000001/slot0.dat", b"save"),
     ("dolphin", ".import/save/USA/Card A/01-GZLE-zelda.gci", b"GZLE01" + bytes(0x40 - 6 + 0x2000)),
     ("dolphin", ".import/memcard/USA/Card A/01-GZLE-zelda.gci", b"GZLE01" + bytes(0x40 - 6 + 0x2000)),
     ("dolphin", ".import/state/GZLE01.s01", b"GZLE01" + b"progress"),
@@ -957,6 +959,7 @@ def _seed_xenia(emu: base.Emulator) -> None:
 
 
 _EXAMPLE_ROM: dict[str, imports.RomRef] = {
+    "cemu": imports.RomRef(1, "Game", "wiiu", title_id="1010EC00"),
     "xenia": imports.RomRef(1, "Game", "xbox360", title_id="4D5307E6"),
 }
 """The rom RomM would name for an emulator's examples, where the emulator needs a session id."""
