@@ -9,6 +9,10 @@ Thanks for looking at romm-broker. A few ground rules before you open a PR.
   for a feature, in the PR description.
 - Keep commit messages short, concise, and accurate: what changed and why, no
   filler.
+- Every commit must be signed, so GitHub marks it Verified. `commit.gpgsign` is
+  the default for `git commit` and `git merge`, but plumbing such as
+  `git commit-tree` ignores it: pass `-S`. Check with `git log --format='%h %G?'`
+  (an `N` means unsigned).
 
 ## Before you open a PR
 
