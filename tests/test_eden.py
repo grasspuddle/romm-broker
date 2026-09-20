@@ -13,7 +13,10 @@ from typing import Optional
 
 import pytest
 
+from webstation_broker import imports
 from webstation_broker.emulators import eden
+
+from .conftest import import_zip, preflight_import, restore_import
 
 TITLE_ID = "0100000000010000"
 """A title id directory name, the leaf of a save unit path."""
@@ -671,3 +674,323 @@ def test_exit_cannot_ship_a_previous_players_leftover_save(
     emu.save_and_exit(None)
 
     assert not leftover.exists()
+
+
+# -- declared imports --
+
+_IMPORT_TITLE = "0100ABCD01230000"
+"""The title the session runs, in the case Eden names its save folder."""
+_ROMM = imports.RomRef(1, "Game", "switch", title_id=_IMPORT_TITLE)
+"""The rom a Switch activate carries, with RomM's id for it."""
+_ACCOUNT = f"nand/user/save/{SPACE_ID}/{USER_ID}/{_IMPORT_TITLE.lower()}"
+"""An account save unit's folder as a hand-collected export might spell it."""
+_DEVICE = f"nand/user/save/{SPACE_ID}/{'0' * 32}/{_IMPORT_TITLE}"
+"""A device save unit's folder."""
+_PROFILE = "nand/system/save/8000000000000010"
+"""The profile store's folder."""
+_PROFILE_FILE = f"{_PROFILE}/su/avators/profiles.dat"
+"""A file in the profile store."""
+
+
+@pytest.fixture
+def nand_root(save_dir: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
+    """Point `Eden.save_root` at the data directory the `save_dir` fixture built.
+
+    A restore lands under `save_root`, which the class resolves once at
+    import, so a round trip would reach outside tmp_path without this.
+
+    Args:
+        save_dir: The patched save tree.
+        monkeypatch: The pytest monkeypatch fixture.
+        tmp_path: The per-test temporary directory.
+
+    Returns:
+        The data directory holding `nand`.
+    """
+    root = tmp_path / "data"
+    monkeypatch.setattr(eden.Eden, "save_root", root)
+    return root
+
+
+def _preflight(
+    members: dict[str, bytes],
+    *,
+    rom: Optional[imports.RomRef] = _ROMM,
+    v1: Optional[dict[str, bytes]] = None,
+) -> imports.PreflightResult:
+    """Preflight an archive of import members against an Eden whose NAND is patched into tmp_path.
+
+    Args:
+        members: `.import/<kind>/...` names mapped to bytes.
+        rom: The activate body's rom, or None.
+        v1: Ordinary archive members to carry beside them, or None.
+
+    Returns:
+        What preflight decided.
+    """
+    return preflight_import(eden.Eden(), import_zip(members, v1), rom_file=None, rom=rom)
+
+
+@pytest.mark.usefixtures("nand_root")
+@pytest.mark.parametrize(
+    ("rel", "dest"),
+    [
+        (
+            f"{_ACCOUNT}/save.bin",
+            f"nand/user/save/{SPACE_ID}/{'A' * 32}/{_IMPORT_TITLE}/save.bin",
+        ),
+        (
+            f"nand/user/save/{SPACE_ID}/{'B' * 32}/{_IMPORT_TITLE}/sub/dir/slot.dat",
+            f"nand/user/save/{SPACE_ID}/{'B' * 32}/{_IMPORT_TITLE}/sub/dir/slot.dat",
+        ),
+    ],
+    ids=["lower case ids", "nested"],
+)
+def test_an_account_save_lands_under_its_own_space_user_and_title(rel: str, dest: str) -> None:
+    """A verbatim NAND export is placed where it came from, with its ids in upper case.
+
+    Args:
+        rel: The member's path below `.import/save/`.
+        dest: Where it lands, below the data directory.
+    """
+    result = _preflight({f".import/save/{rel}": b"save", f".import/save/{_PROFILE_FILE}": b"profiles"})
+
+    assert result.refusals == ()
+    assert dest in [str(p.dest) for p in result.placements]
+
+
+@pytest.mark.usefixtures("nand_root")
+def test_a_device_save_stands_alone() -> None:
+    """A device save needs no profile store, since it belongs to no profile."""
+    result = _preflight({f".import/save/{_DEVICE.lower()}/system.bin": b"save"})
+
+    assert result.refusals == ()
+    assert [str(p.dest) for p in result.placements] == [f"{_DEVICE}/system.bin"]
+
+
+@pytest.mark.usefixtures("nand_root")
+def test_a_profile_store_alone_is_taken() -> None:
+    """The profile store is a valid import on its own, with no identity to check."""
+    result = _preflight({f".import/save/{_PROFILE_FILE}": b"profiles"}, rom=None)
+
+    assert result.refusals == ()
+    assert [str(p.dest) for p in result.placements] == [_PROFILE_FILE]
+
+
+@pytest.mark.usefixtures("nand_root")
+def test_an_account_save_is_taken_when_no_game_id_is_known() -> None:
+    """With no id from the rom or RomM there is nothing to hold the save's title to."""
+    result = _preflight(
+        {f".import/save/{_ACCOUNT}/save.bin": b"save", f".import/save/{_PROFILE_FILE}": b"profiles"},
+        rom=None,
+    )
+
+    assert result.refusals == ()
+    assert len(result.placements) == 2
+
+
+@pytest.mark.usefixtures("nand_root")
+@pytest.mark.parametrize(
+    ("rel", "reason"),
+    [
+        (f"bis/user/save/{SPACE_ID}/{USER_ID}/{_IMPORT_TITLE}/save.bin", "source_incompatible"),
+        ("bis/system/save/8000000000000010/x", "source_incompatible"),
+        ("Nintendo/Contents/registered/00", "source_incompatible"),
+        (f"sdmc/Nintendo/save/{_IMPORT_TITLE}", "source_incompatible"),
+        (f"{_IMPORT_TITLE}/save.bin", "destination_unresolvable"),
+        (f"0x{_IMPORT_TITLE}/save.bin", "destination_unresolvable"),
+        (f"{_IMPORT_TITLE}", "destination_unresolvable"),
+        ("JKSV/Game/Slot 1/save.bin", "destination_unresolvable"),
+        (f"switch/Checkpoint/saves/{_IMPORT_TITLE} Game/save.bin", "destination_unresolvable"),
+        (f"nand/user/save/{SPACE_ID}/{USER_ID}/0100000000020000/save.bin", "identity_mismatch"),
+        (f"nand/user/save/{SPACE_ID}/{_IMPORT_TITLE}/save.bin", "unrecognised_layout"),
+        (f"nand/user/save/{SPACE_ID}/{USER_ID}/{_IMPORT_TITLE}", "unrecognised_layout"),
+        ("nand/user/save/cache/save.bin", "unrecognised_layout"),
+        ("nand/system/Contents/registered/00", "unrecognised_layout"),
+        ("nand/system/save/8000000000000011/su/x", "unrecognised_layout"),
+        (_PROFILE, "unrecognised_layout"),
+        ("notes.txt", "unrecognised_layout"),
+    ],
+    ids=[
+        "bis account save",
+        "bis profile store",
+        "Nintendo folder",
+        "sdmc",
+        "loose title folder",
+        "loose 0x title folder",
+        "loose title file",
+        "JKSV",
+        "Checkpoint",
+        "another title",
+        "no user level",
+        "no file under the title",
+        "cache space",
+        "installed contents",
+        "another system save",
+        "a profile store with no file",
+        "a loose file",
+    ],
+)
+def test_a_member_eden_would_not_read_is_refused(rel: str, reason: str) -> None:
+    """Each shape the spec names is refused with its own code, and nothing is placed.
+
+    Args:
+        rel: The member's path below `.import/save/`.
+        reason: The refusal code.
+    """
+    result = _preflight({f".import/save/{rel}": b"x"})
+
+    assert [r.reason for r in result.refusals] == [reason]
+    assert result.placements == ()
+
+
+@pytest.mark.usefixtures("nand_root")
+def test_a_raw_dump_over_the_limit_is_a_hardware_export(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A `.bin` bigger than the limit is a raw dump; a small one is just an unrecognised file.
+
+    Args:
+        monkeypatch: The pytest monkeypatch fixture.
+    """
+    monkeypatch.setattr(eden, "_RAW_SAVE_LIMIT", 4)
+
+    big = _preflight({".import/save/dump.bin": b"12345678"})
+    small = _preflight({".import/save/dump.bin": b"1234"})
+
+    assert [r.reason for r in big.refusals] == ["source_incompatible"]
+    assert [r.reason for r in small.refusals] == ["unrecognised_layout"]
+
+
+@pytest.mark.usefixtures("nand_root")
+def test_a_save_file_named_like_a_raw_dump_is_still_a_save(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The size check reads members that fit no shape; a well-shaped `.bin` is placed however big.
+
+    Args:
+        monkeypatch: The pytest monkeypatch fixture.
+    """
+    monkeypatch.setattr(eden, "_RAW_SAVE_LIMIT", 4)
+
+    result = _preflight({f".import/save/{_DEVICE}/system.bin": b"12345678"})
+
+    assert result.refusals == ()
+    assert [str(p.dest) for p in result.placements] == [f"{_DEVICE}/system.bin"]
+
+
+@pytest.mark.usefixtures("nand_root")
+def test_an_account_save_needs_its_profile_store() -> None:
+    """Without the profile store an account save's user folder would resolve to nothing."""
+    result = _preflight({f".import/save/{_ACCOUNT}/save.bin": b"save"})
+
+    assert [(r.reason, r.member) for r in result.refusals] == [
+        ("incomplete_unit", f".import/save/{_ACCOUNT}/save.bin")
+    ]
+
+
+@pytest.mark.usefixtures("nand_root")
+def test_a_profile_store_already_in_the_archive_does_not_stand_in_for_one_in_the_import() -> None:
+    """The profile store has to come in the same import as the account save it belongs to."""
+    result = _preflight({f".import/save/{_ACCOUNT}/save.bin": b"save"}, v1={_PROFILE_FILE: b"archived"})
+
+    assert [r.reason for r in result.refusals] == ["incomplete_unit"]
+
+
+@pytest.mark.usefixtures("nand_root")
+def test_a_profile_store_in_the_import_and_the_archive_is_refused() -> None:
+    """Two profile stores cannot both be Eden's; the imported one is refused, not merged."""
+    result = _preflight(
+        {f".import/save/{_PROFILE}/su/avators/other.dat": b"imported"},
+        rom=None,
+        v1={_PROFILE_FILE: b"archived"},
+    )
+
+    assert [r.reason for r in result.refusals] == ["destination_conflict"]
+
+
+@pytest.mark.usefixtures("nand_root")
+def test_a_profile_store_on_the_same_file_as_the_archives_is_refused_once() -> None:
+    """The shared clash check already names this member, so the profile check leaves it alone."""
+    result = _preflight(
+        {f".import/save/{_PROFILE_FILE}": b"imported"}, rom=None, v1={_PROFILE_FILE: b"archived"}
+    )
+
+    assert [r.reason for r in result.refusals] == ["destination_conflict"]
+
+
+@pytest.mark.usefixtures("nand_root")
+def test_an_account_save_that_clashes_is_refused_once_for_the_clash() -> None:
+    """Two spellings of one file are the shared check's to refuse, not also a missing profile store."""
+    upper = f"nand/user/save/{SPACE_ID}/{USER_ID.upper()}/{_IMPORT_TITLE}"
+
+    result = _preflight(
+        {f".import/save/{_ACCOUNT}/save.bin": b"one", f".import/save/{upper}/save.bin": b"two"}
+    )
+
+    assert [r.reason for r in result.refusals] == ["destination_conflict", "destination_conflict"]
+
+
+@pytest.mark.usefixtures("nand_root")
+def test_an_account_save_with_its_profile_store_is_taken_whole() -> None:
+    """Both halves arrive together and neither is refused."""
+    result = _preflight(
+        {f".import/save/{_ACCOUNT}/save.bin": b"save", f".import/save/{_PROFILE_FILE}": b"profiles"}
+    )
+
+    assert result.refusals == ()
+    assert len(result.placements) == 2
+
+
+@pytest.mark.usefixtures("nand_root")
+def test_a_state_or_memory_card_is_not_taken() -> None:
+    """Eden has no states and no cards, so the kind gate stops them before the hook."""
+    result = _preflight({".import/state/game.sav": b"x", ".import/memcard/card.mcd": b"x"})
+
+    assert sorted(r.reason for r in result.refusals) == ["kind_not_accepted", "kind_not_accepted"]
+
+
+def test_the_import_paths_are_the_save_subtrees_eden_dumps_and_restores() -> None:
+    """The literals `place_import` builds destinations from are the ones the class and module declare."""
+    subtrees = (eden._SAVE_SUBTREE, eden._PROFILE_SUBTREE)
+
+    assert eden.Eden.save_subtrees == subtrees
+    assert eden.DATA_DIR.joinpath(*eden._SAVE_WRAPPER) == eden.SAVE_DIR
+    assert eden.DATA_DIR.joinpath(*eden._PROFILE_WRAPPER) == eden.PROFILE_STORE_DIR
+    assert tuple("/".join(w) for w in (eden._SAVE_WRAPPER, eden._PROFILE_WRAPPER)) == subtrees
+
+
+def test_an_imported_save_is_where_edens_own_lookups_find_it(save_dir: Path, nand_root: Path) -> None:
+    """The placed save unit is the one the exit restamp walks, and the clear empties both trees.
+
+    The read-back is by literal upper-case path: on a case-sensitive
+    filesystem, a destination Eden never opens would be written and no
+    refusal could catch it.
+
+    Args:
+        save_dir: The patched save tree.
+        nand_root: The patched data directory.
+    """
+    emu = eden.Eden()
+    body = import_zip(
+        {f".import/save/{_ACCOUNT}/save.bin": b"progress", f".import/save/{_PROFILE_FILE}": b"profiles"}
+    )
+    result = preflight_import(emu, body, rom_file=None, rom=_ROMM)
+    restore_import(emu, body, result)
+
+    unit = save_dir / SPACE_ID / ("A" * 32) / _IMPORT_TITLE
+    assert (unit / "save.bin").read_bytes() == b"progress"
+    assert (nand_root / _PROFILE_FILE).read_bytes() == b"profiles"
+    emu._session_start = time.time() - 100
+    assert emu._session_save_dirs() == [unit]
+
+    emu.clear_working_slot()
+
+    assert not any(save_dir.rglob("*"))
+    assert not any((nand_root / _PROFILE).rglob("*"))
+
+
+def test_eden_declares_a_save_kind_only() -> None:
+    """The spec names the save kind alone, with no state channel and no protected globs."""
+    spec = eden.Eden().import_spec()
+
+    assert [k.kind for k in spec.kinds] == ["save"]
+    assert spec.state_channel == "none"
+    assert spec.protected == ()
+    assert spec.case_insensitive_dest is False
