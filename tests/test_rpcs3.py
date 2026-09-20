@@ -4,6 +4,7 @@ Covers config/ipc patching, the savestates symlink, save_subtrees, resume
 target selection, save-and-exit, and boot verification.
 """
 
+import io
 import logging
 import os
 import shlex
@@ -20,7 +21,7 @@ from typing import Callable, NoReturn, Optional
 
 import pytest
 
-from webstation_broker import settings
+from webstation_broker import saves, settings
 from webstation_broker.emulators import rpcs3
 
 
@@ -2835,6 +2836,76 @@ def test_session_save_dirs_is_empty_without_a_launch(
         assert emu._session_save_dirs() == []
 
     assert "no launch" in caplog.text
+
+
+# -- link_roots --
+
+
+def _state_zip(name: str) -> bytes:
+    """Build a one-member v1 archive holding a savestate.
+
+    Args:
+        name: The member's name.
+
+    Returns:
+        The zip file contents.
+    """
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr(zipfile.ZipInfo(name, date_time=(2020, 1, 1, 0, 0, 0)), b"state")
+    return buf.getvalue()
+
+
+def test_link_roots_names_the_savestate_root(rpcs3_dirs: dict[str, Path]) -> None:
+    """The one directory a subtree may link to is where RPCS3 writes its states.
+
+    Args:
+        rpcs3_dirs: The patched RPCS3 layout.
+    """
+    assert rpcs3.Rpcs3().link_roots == (rpcs3_dirs["sstate_root"],)
+
+
+def test_a_v1_state_restores_through_the_link_on_a_later_activate(rpcs3_dirs: dict[str, Path]) -> None:
+    """With the link already there, the plan takes a v1 state and the write lands beside RPCS3's.
+
+    Args:
+        rpcs3_dirs: The patched RPCS3 layout.
+    """
+    emu = rpcs3.Rpcs3()
+    rpcs3._ensure_sstate_link()
+    body = _state_zip("savestates/BLUS30443/BLUS30443.SAVESTAT")
+    view = saves.read_archive(body)
+
+    control = saves.plan_v1(view, emu.save_root, emu.restore_subtrees, ())
+    plan = saves.plan_v1(view, emu.save_root, emu.restore_subtrees, (), link_roots=emu.link_roots)
+    result = saves.write_save_archive(
+        body, emu.save_root, saves.ArchivePlan(plan.names, 0, link_roots=emu.link_roots)
+    )
+
+    assert [p[2] for p in control.problems] == ["symlink"]
+    assert plan.problems == ()
+    assert (result["written"], result["failed"]) == (1, 0)
+    assert (rpcs3_dirs["sstate_root"] / "BLUS30443" / "BLUS30443.SAVESTAT").read_bytes() == b"state"
+
+
+def test_a_v1_state_restores_when_the_link_is_made_after_the_plan(rpcs3_dirs: dict[str, Path]) -> None:
+    """On a first activate the link appears between the plan and the write, and the write still lands.
+
+    Args:
+        rpcs3_dirs: The patched RPCS3 layout.
+    """
+    emu = rpcs3.Rpcs3()
+    body = _state_zip("savestates/BLUS30443/BLUS30443.SAVESTAT")
+    plan = saves.plan_v1(saves.read_archive(body), emu.save_root, emu.restore_subtrees, ())
+    assert plan.problems == ()
+
+    rpcs3._ensure_sstate_link()
+    result = saves.write_save_archive(
+        body, emu.save_root, saves.ArchivePlan(plan.names, 0, link_roots=emu.link_roots)
+    )
+
+    assert (result["written"], result["failed"]) == (1, 0)
+    assert (rpcs3_dirs["sstate_root"] / "BLUS30443" / "BLUS30443.SAVESTAT").exists()
 
 
 def test_restore_subtrees_is_the_whole_restore_set_before_the_clear() -> None:

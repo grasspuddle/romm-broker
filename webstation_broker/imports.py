@@ -1372,6 +1372,7 @@ def _save_tree_refusal(
     spec: ImportSpec,
     save_root: Path,
     subtrees: tuple[str, ...],
+    link_roots: tuple[Path, ...] = (),
     *,
     sidecar: bool = False,
 ) -> Optional[ImportRefusal]:
@@ -1387,6 +1388,7 @@ def _save_tree_refusal(
         spec: The emulator's spec, for its protected globs.
         save_root: The emulator's save data root.
         subtrees: The emulator's restore subtrees.
+        link_roots: The emulator's `link_roots`, for the chain check.
         sidecar: Whether `dest` is a sidecar the broker builds rather than a member.
 
     Returns:
@@ -1407,7 +1409,7 @@ def _save_tree_refusal(
         )
     if not sidecar and _is_protected(rel, spec):
         return ImportRefusal("protected_destination", name, None, detail=f"{rel} is emulator configuration")
-    if saves.surviving_chain_escapes(save_root, dest, subtrees):
+    if saves.surviving_chain_escapes(save_root, dest, subtrees, link_roots):
         return ImportRefusal(
             "unsafe_path", name, _SAFE_EXPECTED, detail=f"{rel} resolves outside the save root"
         )
@@ -1484,13 +1486,21 @@ def check_plan(
                 )
 
     subtrees = tuple(emulator.restore_subtrees)
+    link_roots = tuple(emulator.link_roots)
     for placement in plan:
         # A sidecar is written just like its destination, so it is held to the
         # same save-tree rules, and the first path that fails refuses the member.
         paths = ((placement.dest, False), *((d, True) for d, _ in placement.sidecars))
         for dest, sidecar in paths:
             refusal = _save_tree_refusal(
-                dest, placement.member.name, ctx, spec, emulator.save_root, subtrees, sidecar=sidecar
+                dest,
+                placement.member.name,
+                ctx,
+                spec,
+                emulator.save_root,
+                subtrees,
+                link_roots,
+                sidecar=sidecar,
             )
             if refusal is not None:
                 refusals.append(refusal)

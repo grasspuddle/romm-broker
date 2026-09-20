@@ -190,6 +190,7 @@ def restore_import(emulator: Emulator, body: bytes, result: imports.PreflightRes
             0,
             tuple((p.member.name, p.dest) for p in placements),
             tuple(sidecar for p in placements for sidecar in p.sidecars),
+            emulator.link_roots,
         ),
     )
 

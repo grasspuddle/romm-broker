@@ -276,6 +276,79 @@ def test_activate_restores_the_save_archive_it_is_pointed_at(
     assert (root / "saves" / "card.bin").read_bytes() == b"restored"
 
 
+@pytest.fixture
+def rpcs3_session(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> dict[str, Path]:
+    """Register the real RPCS3 module under a redirected layout, with only the process launch stubbed.
+
+    The rest is the real emulator: its `link_roots`, its `restore_subtrees` and the
+    `clear_working_slot` that creates the savestates link.
+
+    Args:
+        monkeypatch: Pytest's attribute patcher, undone when the test ends.
+        tmp_path: The per-test temporary directory.
+
+    Returns:
+        The layout, keyed "dev_hdd0", "sstate_root" and "sstate_link".
+    """
+    data_dir = tmp_path / "rpcs3data"
+    dev_hdd0 = data_dir / "dev_hdd0"
+    user_home = dev_hdd0 / "home" / "00000001"
+    game_dir = dev_hdd0 / "game"
+    (user_home / "savedata").mkdir(parents=True)
+    game_dir.mkdir()
+    layout = {
+        "dev_hdd0": dev_hdd0,
+        "sstate_root": data_dir / "savestates",
+        "sstate_link": dev_hdd0 / "savestates",
+    }
+    monkeypatch.setattr(rpcs3, "DATA_DIR", data_dir)
+    monkeypatch.setattr(rpcs3, "DEV_HDD0", dev_hdd0)
+    monkeypatch.setattr(rpcs3, "USER_HOME", user_home)
+    monkeypatch.setattr(rpcs3, "GAME_DIR", game_dir)
+    monkeypatch.setattr(rpcs3, "SSTATE_ROOT", layout["sstate_root"])
+    monkeypatch.setattr(rpcs3, "_SSTATE_LINK", layout["sstate_link"])
+    monkeypatch.setattr(rpcs3.Rpcs3, "save_root", dev_hdd0)
+    monkeypatch.setattr(rpcs3.Rpcs3, "launch", lambda self, rom_path, resume_slot: None)
+    return layout
+
+
+@pytest.mark.parametrize("link_first", [True, False], ids=["link-already-there", "link-made-by-the-clear"])
+def test_activate_restores_a_savestate_through_rpcs3s_link_root(
+    client: TestClient,
+    broker_dirs: dict[str, Path],
+    rpcs3_session: dict[str, Path],
+    link_first: bool,
+) -> None:
+    """A v1 savestate restores through `dev_hdd0/savestates` on either activate ordering.
+
+    With the link in place, the plan (`plan_v1`) has to accept the member. Without it,
+    the plan runs before `clear_working_slot` creates the link and the write runs after,
+    so the `ArchivePlan` has to carry the link root into the write-time check. Dropping
+    either wiring in `activate` refuses the state, the second one as a 422 after the
+    clear.
+
+    Args:
+        client: The app client.
+        broker_dirs: The redirected ROM root and archive directories.
+        rpcs3_session: The redirected RPCS3 layout.
+        link_first: Whether the savestates link exists before the activate.
+    """
+    if link_first:
+        rpcs3._ensure_sstate_link()
+    assert rpcs3_session["sstate_link"].is_symlink() is link_first
+    archive = broker_dirs["imports"] / "sess-1.zip"
+    archive.write_bytes(_zip({"savestates/BLUS30443/BLUS30443.SAVESTAT": b"state"}))
+
+    response = _activate(client, broker_dirs, emulator="rpcs3", save={"archive": str(archive)})
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["status"] == "launching"
+    assert (body["save_restore"]["written"], body["save_restore"]["failed"]) == (1, 0)
+    assert (rpcs3_session["sstate_root"] / "BLUS30443" / "BLUS30443.SAVESTAT").read_bytes() == b"state"
+    assert rpcs3_session["sstate_link"].is_symlink()
+
+
 def test_activate_refuses_a_save_archive_that_is_not_there(
     client: TestClient, broker_dirs: dict[str, Path], fake_emulator: list[FakeEmulator], tmp_path: Path
 ) -> None:

@@ -1166,6 +1166,7 @@ class _PlanEmu:
         """
         self.save_root = root
         self.restore_subtrees = subtrees
+        self.link_roots: tuple[Path, ...] = ()
         self.validated: list[int] = []
 
     def save_file_kind(self, rel: str) -> str:
@@ -1472,6 +1473,25 @@ def test_a_destination_through_an_escaping_symlink_is_unsafe(tmp_path: Path) -> 
     (root / "saves").symlink_to(tmp_path / "outside")
 
     assert _check(tmp_path, [_placed("a", "saves/a")]) == [("unsafe_path", ".import/save/a")]
+
+
+def test_a_destination_through_a_declared_link_root_is_safe(tmp_path: Path) -> None:
+    """`check_plan` passes the emulator's link roots to the chain check."""
+    real = tmp_path / "sstates"
+    real.mkdir()
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / "states").symlink_to(real, target_is_directory=True)
+    emu = _PlanEmu(root)
+    spec = imports.ImportSpec(kinds=(imports.KindSpec("save", ("x",)),))
+    plan = [_placed("a", "states/a")]
+
+    refused = imports.check_plan(plan, _ctx(), spec, emu)  # type: ignore[arg-type]
+    emu.link_roots = (real,)
+    accepted = imports.check_plan(plan, _ctx(), spec, emu)  # type: ignore[arg-type]
+
+    assert [r.reason for r in refused] == ["unsafe_path"]
+    assert accepted == []
 
 
 def test_the_size_cap_counts_v1_bytes_too(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

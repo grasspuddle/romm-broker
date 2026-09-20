@@ -1761,6 +1761,17 @@ class Rpcs3(Emulator):
         """
         return ("home/00000001/savedata", "game", "savestates")
 
+    @property
+    def link_roots(self) -> tuple[Path, ...]:
+        """The savestate tree `dev_hdd0/savestates` links to.
+
+        Read at call time so a test that patches `SSTATE_ROOT` is honoured.
+
+        Returns:
+            `SSTATE_ROOT` alone.
+        """
+        return (SSTATE_ROOT,)
+
     def prepare_restore(self) -> None:
         """Stop any running instance and mark the session as archive-restoring."""
         self.stop()

@@ -731,6 +731,19 @@ def test_restore_subtrees_covers_every_save_subtree(name: str) -> None:
     }
 
 
+@pytest.mark.parametrize("name", sorted(emulators.REGISTRY))
+def test_only_rpcs3_declares_a_link_root(name: str) -> None:
+    """A link root widens what a restore may write through, so each one is deliberate.
+
+    Args:
+        name: The registry name.
+    """
+    emu = emulators.get_emulator(name)
+    assert emu is not None
+
+    assert bool(emu.link_roots) is (name == "rpcs3")
+
+
 def _spec_cases() -> list[tuple[str, Optional[str]]]:
     """List every registry emulator once, then RetroArch once per platform and Dolphin once per console.
 
