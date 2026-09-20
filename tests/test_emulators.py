@@ -648,7 +648,19 @@ def test_the_launch_env_points_at_the_labwc_session(monkeypatch: pytest.MonkeyPa
 
 
 _IMPORTING: frozenset[str] = frozenset(
-    {"azahar", "cemu", "dolphin", "duckstation", "eden", "flycast", "pcsx2", "ppsspp", "retroarch", "xenia"}
+    {
+        "azahar",
+        "cemu",
+        "dolphin",
+        "duckstation",
+        "eden",
+        "flycast",
+        "pcsx2",
+        "ppsspp",
+        "retroarch",
+        "xemu",
+        "xenia",
+    }
 )
 """The emulators that accept declared imports; every other one inherits the refusing base hooks."""
 
@@ -923,6 +935,7 @@ _EXAMPLE_PLATFORM: dict[str, str] = {
     "pcsx2": "ps2",
     "ppsspp": "psp",
     "retroarch": "gb",
+    "xemu": "xbox",
     "xenia": "xbox360",
 }
 """The platform each importing emulator's examples below are placed on."""
@@ -954,6 +967,7 @@ _EXAMPLES: list[tuple[str, str, bytes]] = [
     ("ppsspp", ".import/save/ULUS10041DATA00/PARAM.SFO", b"sfo"),
     ("ppsspp", ".import/state/ULUS10041_1.00_1.ppst", b"progress"),
     ("retroarch", ".import/save/Game.srm", b"sram"),
+    ("xemu", ".import/save/UDATA/4D530064/TitleMeta.xbx", b"meta"),
     ("xenia", ".import/save/content/E0FFFFFFFFFFFFFF/4D5307E6/00000001/SAVEGAME/savedata.bin", b"save"),
     ("xenia", ".import/save/content/E0FFFFFFFFFFFFFF/4D5307E6/Headers/00000001/SAVEGAME", b"header"),
 ]
@@ -974,6 +988,7 @@ _EXAMPLE_ROM: dict[str, imports.RomRef] = {
     "azahar": imports.RomRef(1, "Game", "3ds", title_id="0004000000033500", save_target="00040000/00033500"),
     "cemu": imports.RomRef(1, "Game", "wiiu", title_id="1010EC00"),
     "eden": imports.RomRef(1, "Game", "switch", title_id="0100000000010000"),
+    "xemu": imports.RomRef(1, "Game", "xbox", title_id="4D530064"),
     "xenia": imports.RomRef(1, "Game", "xbox360", title_id="4D5307E6"),
 }
 """The rom RomM would name for an emulator's examples, where the emulator needs a session id."""

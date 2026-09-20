@@ -21,8 +21,12 @@ How a session moves saves in and out of the image:
   TDATA trees are extracted from the image into the staging dir (post-close
   hook), where the standard dump zips them.
 - title: the title id (the UDATA directory name) is read from the disc's
-  default.xbe certificate; if the disc cannot be parsed, extraction falls
-  back to every title on the disk rather than losing the session's saves.
+  default.xbe certificate. If the disc cannot be parsed, nothing is cleared
+  or extracted that session (`_save_roots`): scoping to every title on the
+  disk would archive, and later restore, the whole drive's save data.
+- imports: a declared import (`import_spec`, `place_import`) is filed in the
+  staging directory under the session's title id, and the launch injects it
+  like any restored archive. See docs/content/docs/api/imports.mdx.
 """
 
 import logging
@@ -36,11 +40,11 @@ import time
 import tomllib
 from collections.abc import Iterable
 from pathlib import Path
-from typing import IO, Any, Optional
+from typing import IO, Any, Optional, Union
 
 from pyfatx import Fatx
 
-from .. import settings
+from .. import imports, settings
 from .base import Emulator, _cmdline, base_launch_env
 
 log = logging.getLogger(__name__)
@@ -137,6 +141,16 @@ launch/exit hooks move them in and out of the FATX filesystem.
 
 QCOW2_MAGIC = b"QFI\xfb"
 """The four-byte header that marks a qcow2 image; its absence means raw content."""
+FATX_NAME_LIMIT = 42
+"""The longest file or folder name FATX stores, in bytes."""
+_EXPECTED = "UDATA/<title id>/<tail>, or TDATA/<title id>/<tail>"
+"""The shape an import member is asked to take, for refusals."""
+_TOP_LEVEL = re.compile(r"[UT]DATA", re.ASCII | re.IGNORECASE)
+"""The save partition's two top folders. FATX is case-insensitive, so an export's spelling is too."""
+_TID_LEVEL = re.compile(r"[0-9A-Fa-f]{8}", re.ASCII)
+"""A title id, as a folder name."""
+_IMAGE_SUFFIXES = (".qcow2", ".img", ".raw", ".vhd", ".vhdx", ".vmdk")
+"""File name endings of a whole HDD image."""
 
 ROM_EXTENSIONS = (".iso",)
 """Bootable disc formats: only XISO, always named `.iso`, including the `.xiso.iso` double extension."""
@@ -712,6 +726,105 @@ def _remove_tree(path: Path) -> None:
         log.warning("could not fully remove %s: %s", path, exc)
 
 
+def _refuse(member: imports.ImportMember, reason: str, detail: str) -> imports.ImportRefusal:
+    """Refuse a member with the xemu shape in the message.
+
+    Args:
+        member: The member.
+        reason: The refusal code.
+        detail: What is wrong with this member.
+
+    Returns:
+        The refusal.
+    """
+    return imports.ImportRefusal(reason, member.name, _EXPECTED, detail=detail)
+
+
+def _is_hdd_image(member: imports.ImportMember) -> bool:
+    """Whether a member is a whole HDD image, by its name or its qcow2 header.
+
+    Args:
+        member: The member.
+
+    Returns:
+        True for a disk image, which is not a save file.
+    """
+    return member.parts[-1].lower().endswith(_IMAGE_SUFFIXES) or member.head(len(QCOW2_MAGIC)) == QCOW2_MAGIC
+
+
+def _unmatched(member: imports.ImportMember) -> imports.ImportRefusal:
+    """Refuse a member that is not under UDATA or TDATA and a title id, saying why.
+
+    This runs only for a member that failed to match, so a save under a title
+    is never taken for a disk image on its name or its bytes.
+
+    Args:
+        member: The member.
+
+    Returns:
+        `source_incompatible` for a disk image, `unrecognised_layout` otherwise.
+    """
+    if _is_hdd_image(member):
+        return _refuse(
+            member, "source_incompatible", "a whole HDD image, not a save; export the UDATA and TDATA folders"
+        )
+    if not _TOP_LEVEL.fullmatch(member.parts[0]) and any(
+        _TOP_LEVEL.fullmatch(part) for part in member.parts[1:-1]
+    ):
+        return _refuse(
+            member,
+            "unrecognised_layout",
+            "a folder above UDATA or TDATA, such as a drive, a partition or saves; send those at the top",
+        )
+    return _refuse(member, "unrecognised_layout", "not a file under UDATA or TDATA and a title id")
+
+
+def _place_save(
+    member: imports.ImportMember, session: imports.SessionIdentity, *, max_component_bytes: int
+) -> Union[imports.Placement, imports.ImportRefusal]:
+    """File a save under the session's title in the staging tree.
+
+    The member's title must be the session's and the session must have one:
+    the launch's clear and the exit's extraction only touch the launched
+    title's folder, so a save filed anywhere else would reach the image and
+    never be cleared or dumped.
+
+    Args:
+        member: The member.
+        session: The session's identity.
+        max_component_bytes: The longest name FATX stores.
+
+    Returns:
+        The placement, or a refusal.
+    """
+    found = imports.match_anchored(member.parts, wrappers=((),), levels=(_TOP_LEVEL, _TID_LEVEL))
+    if found is None:
+        return _unmatched(member)
+    top, title = found.ids
+    refusal = imports.check_member_identity(
+        member,
+        imports.NORMALISERS["hex8"](title),
+        session,
+        family="hex8",
+        policy="required",
+        expected=_EXPECTED,
+    )
+    if refusal is not None:
+        return refusal
+    # The `required` check passed, so the member's title is the session's.
+    dest = imports.build_dest(
+        SAVE_STAGING_DIRNAME,
+        (top.upper(), title.upper()),
+        found.tail,
+        member=member,
+        expected=_EXPECTED,
+        max_component_bytes=max_component_bytes,
+    )
+    if isinstance(dest, imports.ImportRefusal):
+        return dest
+    return imports.Placement(member, dest)
+
+
 # -- Provider --
 
 
@@ -1271,6 +1384,47 @@ class Xemu(Emulator):
         self._restore_failed = False
         self._forced_exit = False
         log.info("xemu: prepared %s for a save restore", self.hdd_image)
+
+    def import_spec(self) -> imports.ImportSpec:
+        """Declare what xemu takes: the title's UDATA and TDATA trees, and nothing else.
+
+        FATX names are 42 bytes at most and compare without regard to case, so
+        the spec carries both facts for the shared name and clash checks.
+
+        Returns:
+            The spec.
+        """
+        shapes = ("UDATA/<title id>/<tail>", "TDATA/<title id>/<tail>")
+        return imports.ImportSpec(
+            kinds=(imports.KindSpec("save", shapes),),
+            case_insensitive_dest=True,
+            max_component_bytes=FATX_NAME_LIMIT,
+        )
+
+    def place_import(
+        self, member: imports.ImportMember, spec: imports.ImportSpec, ctx: imports.ImportCtx
+    ) -> Union[imports.Placement, imports.ImportRefusal]:
+        """File one declared save file under the session's title.
+
+        Args:
+            member: The member, already past the kind gate.
+            spec: This emulator's spec.
+            ctx: The launch context.
+
+        Returns:
+            The placement, or a refusal.
+        """
+        return _place_save(
+            member, imports.identity_for(self, ctx), max_component_bytes=spec.max_component_bytes
+        )
+
+    def identity_source(self) -> Optional[imports.IdentitySource]:
+        """Take the session's title from the disc's certificate, then from RomM's Xbox id.
+
+        Returns:
+            A `hex8` source that reads the disc and reads RomM's id as an Xbox one.
+        """
+        return imports.IdentitySource("hex8", rom_reader=_disc_title_id, romm_family="xbox")
 
     def launch(self, rom_path: Path, resume_slot: Optional[int]) -> None:
         """Inject any restored saves, pin display settings and boot the disc.
