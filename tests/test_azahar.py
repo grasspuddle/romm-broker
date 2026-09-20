@@ -986,15 +986,41 @@ def test_a_title_folder_for_another_game_is_refused() -> None:
     assert result.placements == ()
 
 
-@pytest.mark.parametrize("rom", [_ROMM_NO_TARGET, None], ids=["title id only", "no rom"])
 @pytest.mark.usefixtures("user_dir")
-def test_a_title_save_is_taken_on_trust_without_a_save_target(rom: Optional[imports.RomRef]) -> None:
-    """RomM's title id is not Azahar's key, so with no save target there is nothing to compare.
+def test_a_title_id_alone_still_names_the_title_a_save_must_match() -> None:
+    """RomM's title id is the save target's two halves run together, so it keys the title too."""
+    result = _preflight(_save(_SD + "/" + _SAVE_FILE), rom=_ROMM_NO_TARGET)
 
-    Args:
-        rom: The activate body's rom.
-    """
-    result = _preflight(_save(f"{_SD}/title/00040000/00099999/data/00000001.sav"), rom=rom)
+    assert result.refusals == ()
+    assert [str(p.dest) for p in result.placements] == [f"{_DEST_SD}/{_SAVE_FILE}"]
+
+
+@pytest.mark.usefixtures("user_dir")
+def test_another_titles_save_is_refused_against_a_title_id_alone() -> None:
+    """With no save target the title id is read in its place, so a foreign title still mismatches."""
+    result = _preflight(
+        _save(f"{_SD}/title/00040000/00099999/data/00000001.sav"), rom=_ROMM_NO_TARGET
+    )
+
+    assert [r.reason for r in result.refusals] == ["identity_mismatch"]
+    assert result.placements == ()
+
+
+@pytest.mark.usefixtures("user_dir")
+def test_a_save_target_outranks_a_title_id_that_disagrees() -> None:
+    """The save target is read first, so a title id naming another game is never consulted."""
+    rom = imports.RomRef(1, "Game", "3ds", title_id="0004000000099999", save_target="00040000/00033500")
+
+    result = _preflight(_save(_SD + "/" + _SAVE_FILE), rom=rom)
+
+    assert result.refusals == ()
+    assert [str(p.dest) for p in result.placements] == [f"{_DEST_SD}/{_SAVE_FILE}"]
+
+
+@pytest.mark.usefixtures("user_dir")
+def test_a_title_save_is_taken_on_trust_without_a_rom() -> None:
+    """A route that carries no rom names no title, so there is nothing to compare a save with."""
+    result = _preflight(_save(f"{_SD}/title/00040000/00099999/data/00000001.sav"), rom=None)
 
     assert result.refusals == ()
 
@@ -1200,11 +1226,11 @@ def test_azahar_declares_a_save_kind_only() -> None:
     assert spec.case_insensitive_dest is False
 
 
-def test_azahars_session_id_is_romms_save_target() -> None:
-    """A 3DS title is keyed by the `high/low` pair RomM carries as the save target."""
+def test_azahars_session_id_is_romms_save_target_then_its_title_id() -> None:
+    """A 3DS title is keyed by the `high/low` pair, which RomM carries in either field."""
     source = azahar.Azahar().identity_source()
 
-    assert source == imports.IdentitySource("hex16", use_save_target=True)
+    assert source == imports.IdentitySource("hex16", use_save_target=True, fall_back_to_title_id=True)
 
 
 @pytest.mark.usefixtures("user_dir")

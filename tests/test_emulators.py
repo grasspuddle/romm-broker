@@ -21,7 +21,15 @@ import pytest
 from webstation_broker import emulators, imports, saves
 from webstation_broker.emulators import base, retroarch, rpcs3, scummvm, xemu, xenia
 
-from .conftest import DETACHED_CMD, SLEEPER_CMD, await_cmdline, await_gone, import_zip, preflight_import
+from .conftest import (
+    DETACHED_CMD,
+    SLEEPER_CMD,
+    await_cmdline,
+    await_gone,
+    import_zip,
+    preflight_import,
+    xiso,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -1033,6 +1041,9 @@ _EXAMPLE_ROM: dict[str, imports.RomRef] = {
 _EXAMPLE_SEED: dict[str, Callable[[base.Emulator], None]] = {"xenia": _seed_xenia}
 """What an emulator's hook reads before launch, written into the emulator's patched `save_root`."""
 
+_EXAMPLE_ROM_FILE: dict[str, Callable[[Path], Path]] = {"xemu": xiso}
+"""How to write the rom file, where the emulator reads the session's id off it rather than RomM's."""
+
 
 def test_every_accepted_kind_has_an_example() -> None:
     """Each kind an importing emulator can place has an example in `_EXAMPLES`.
@@ -1106,7 +1117,11 @@ def test_an_accepted_member_lands_inside_the_save_tree(
     if seed is not None:
         seed(emu)
     rom = tmp_path / "Game.bin"
-    rom.write_bytes(b"rom")
+    write_rom = _EXAMPLE_ROM_FILE.get(name)
+    if write_rom is None:
+        rom.write_bytes(b"rom")
+    else:
+        write_rom(rom)
 
     result = preflight_import(
         emu,

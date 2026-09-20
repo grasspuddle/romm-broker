@@ -46,6 +46,7 @@ IdFamily = Literal[
     "xbox",
     "gc_wii_disc",
     "hex16",
+    "wiiu_title",
     "dc_product",
     "scummvm_target",
 ]
@@ -1027,6 +1028,37 @@ def _hex16(raw: str) -> Optional[str]:
     return m[1].upper() if m else None
 
 
+_WIIU_TITLE_HIGH = "00050000"
+"""The only Wii U title type that keeps a player's save, and so the only one a save folder is named for.
+
+The same value guards `cemu.py`'s own reading of a member's path: a member
+under any other high half is refused there, so an id RomM writes with
+another one names nothing this emulator could place a save under.
+"""
+
+
+def _wiiu_title(raw: str) -> Optional[str]:
+    """Normalise a Wii U title id to the eight-digit low half its save folder is named for.
+
+    Args:
+        raw: The id as found: the low half on its own (`1010EC00`), or the
+            whole sixteen-digit title id (`00050000101C9400`), whose high
+            half must be `00050000`.
+
+    Returns:
+        The canonical low half, or None, which includes a sixteen-digit id of
+        any other title type: its low half names a demo, an update or DLC,
+        none of which keeps a save, so guessing one would compare the session
+        against a folder that cannot exist. The bare high half is None too,
+        since it is the one eight-digit value that provably names no title.
+    """
+    wide = _hex16(raw)
+    if wide is not None:
+        return wide[8:] if wide[:8] == _WIIU_TITLE_HIGH else None
+    low = _hex8(raw)
+    return None if low == _WIIU_TITLE_HIGH else low
+
+
 def _dc_product(raw: str) -> Optional[str]:
     """Dreamcast product numbers are not unique enough to compare.
 
@@ -1047,6 +1079,7 @@ NORMALISERS: dict[str, Callable[[str], Optional[str]]] = {
     "xbox": _xbox,
     "gc_wii_disc": _gc_wii_disc,
     "hex16": _hex16,
+    "wiiu_title": _wiiu_title,
     "dc_product": _dc_product,
     "scummvm_target": lambda raw: raw.strip().casefold() or None,
 }
@@ -1065,12 +1098,14 @@ class IdentitySource:
         rom_reader: Reads the id off the rom file, or None when it cannot.
         use_save_target: Whether RomM's value is `save_target` rather than `title_id`.
         romm_family: The family RomM's value is written in, when it differs from `family`.
+        fall_back_to_title_id: Whether `title_id` stands in for a missing `save_target`.
     """
 
     family: IdFamily
     rom_reader: Optional[Callable[[Path], Optional[str]]] = None
     use_save_target: bool = False
     romm_family: Optional[IdFamily] = None
+    fall_back_to_title_id: bool = False
 
 
 def resolve_session_identity(
@@ -1080,6 +1115,7 @@ def resolve_session_identity(
     rom_reader: Optional[Callable[[Path], Optional[str]]] = None,
     use_save_target: bool = False,
     romm_family: Optional[IdFamily] = None,
+    fall_back_to_title_id: bool = False,
 ) -> SessionIdentity:
     """Work out the game id the session runs as, once per preflight.
 
@@ -1092,11 +1128,14 @@ def resolve_session_identity(
         rom_reader: Reads the id off `ctx.rom_file`, or None.
         use_save_target: Whether RomM's value is `save_target` rather than `title_id`.
         romm_family: The family RomM's value is written in, when it differs.
+        fall_back_to_title_id: Whether `title_id` stands in when RomM sent no
+            `save_target`. Only for a platform whose two spellings normalise
+            to the same id, since both are read in the one family.
 
     Returns:
         The identity, with the source it came from.
     """
-    key = ("identity", family, rom_reader, use_save_target, romm_family)
+    key = ("identity", family, rom_reader, use_save_target, romm_family, fall_back_to_title_id)
     cached = ctx.memo.get(key)
     if isinstance(cached, SessionIdentity):
         return cached
@@ -1112,6 +1151,8 @@ def resolve_session_identity(
             log.warning("imports: could not read an id off %s: %s", ctx.rom_file, exc)
     from_romm: Optional[str] = None
     raw_romm = (ctx.rom.save_target if use_save_target else ctx.rom.title_id) if ctx.rom else None
+    if not raw_romm and use_save_target and fall_back_to_title_id and ctx.rom:
+        raw_romm = ctx.rom.title_id
     if raw_romm:
         from_romm = NORMALISERS[romm_family or family](raw_romm)
         if from_romm is None:
@@ -1245,6 +1286,7 @@ def identity_for(emulator: "Emulator", ctx: ImportCtx) -> SessionIdentity:
         rom_reader=source.rom_reader,
         use_save_target=source.use_save_target,
         romm_family=source.romm_family,
+        fall_back_to_title_id=source.fall_back_to_title_id,
     )
 
 

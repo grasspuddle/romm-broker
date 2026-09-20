@@ -26,7 +26,9 @@ How a session moves saves in and out of the image:
   disk would archive, and later restore, the whole drive's save data.
 - imports: a declared import (`import_spec`, `place_import`) is filed in the
   staging directory under the session's title id, and the launch injects it
-  like any restored archive. See docs/content/docs/api/imports.mdx.
+  like any restored archive. A disc whose title id cannot be read takes no
+  import, since that session clears and extracts nothing. See
+  docs/content/docs/api/imports.mdx.
 """
 
 import logging
@@ -784,10 +786,12 @@ def _place_save(
 ) -> Union[imports.Placement, imports.ImportRefusal]:
     """File a save under the session's title in the staging tree.
 
-    The member's title must be the session's and the session must have one:
-    the launch's clear and the exit's extraction only touch the launched
-    title's folder, so a save filed anywhere else would reach the image and
-    never be cleared or dumped.
+    The member's title must be the session's, and the session's must come off
+    the disc: `_clear_stale_saves` and `_save_roots` both scope themselves to
+    the title id the launch reads there, and both do nothing without one. A
+    save placed on RomM's word alone would reach the hard drive image, outlive
+    every later session and never leave in a dump, so a disc whose title id
+    cannot be read takes no import at all.
 
     Args:
         member: The member.
@@ -801,6 +805,17 @@ def _place_save(
     if found is None:
         return _unmatched(member)
     top, title = found.ids
+    if session.source != "rom":
+        return _refuse(
+            member,
+            "identity_unknown",
+            "the title id on the disc is what xemu scopes this session to, and it could not be read; "
+            "a save placed on RomM's id alone would stay on the shared image and never be dumped",
+        )
+    # `required` stays even though the refusal above already covers the no-id
+    # case: if that refusal is ever relaxed, a session with no id still fails
+    # closed here instead of accepting a save under a title the launch never
+    # scopes to.
     refusal = imports.check_member_identity(
         member,
         imports.NORMALISERS["hex8"](title),
@@ -811,7 +826,7 @@ def _place_save(
     )
     if refusal is not None:
         return refusal
-    # The `required` check passed, so the member's title is the session's.
+    # The check passed, so the member's title is the session's.
     dest = imports.build_dest(
         SAVE_STAGING_DIRNAME,
         (top.upper(), title.upper()),
@@ -1420,6 +1435,10 @@ class Xemu(Emulator):
 
     def identity_source(self) -> Optional[imports.IdentitySource]:
         """Take the session's title from the disc's certificate, then from RomM's Xbox id.
+
+        RomM's id names the session for the routes that report it, but not for
+        an import: `place_import` places a save only under a title id the disc
+        itself gave, since that is the only one the clear and the dump scope to.
 
         Returns:
             A `hex8` source that reads the disc and reads RomM's id as an Xbox one.

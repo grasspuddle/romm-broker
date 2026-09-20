@@ -571,14 +571,17 @@ class Azahar(Emulator):
         return _place_save(member, imports.identity_for(self, ctx), ctx)
 
     def identity_source(self) -> Optional[imports.IdentitySource]:
-        """Take the session's game from RomM's save target, the 3DS title's `high/low` pair.
+        """Take the session's game from RomM's save target, or its title id when there is none.
 
-        Azahar boots a file, not a path that names an id, so there is no rom reader.
+        A 3DS `save_target` is the title's `high/low` pair and `title_id` is
+        that same pair written as one sixteen-digit id, so the two normalise
+        alike and either names the folder a title save belongs in. Azahar
+        boots a file, not a path that names an id, so there is no rom reader.
 
         Returns:
-            A `hex16` source that reads `save_target`.
+            A `hex16` source that reads `save_target`, then `title_id`.
         """
-        return imports.IdentitySource("hex16", use_save_target=True)
+        return imports.IdentitySource("hex16", use_save_target=True, fall_back_to_title_id=True)
 
     def resolve_rom_file(self, path: Path) -> Optional[Path]:
         """The file Azahar should boot for `path`.
