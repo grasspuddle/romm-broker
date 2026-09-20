@@ -1,21 +1,26 @@
 """ScummVM target resolution, ini pinning, GMM macros and slot naming.
 
 Covers registering a game folder, the settings pinned into scummvm.ini, the
-keystroke sequences the Global Main Menu is driven with, and the save naming
-that decides what is a state and what is the game's own save. Nothing here
-needs a display, a binary or a real ScummVM.
+keystroke sequences the Global Main Menu is driven with, the save naming
+that decides what is a state and what is the game's own save, and the saves
+and state an archive can declare. Nothing here needs a display, a binary or a
+real ScummVM.
 """
 
 import subprocess
 import time
+import unicodedata
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Optional
 
 import pytest
 
+from webstation_broker import imports
 from webstation_broker.emulators import scummvm
 from webstation_broker.emulators.scummvm import Scummvm
+
+from .conftest import import_zip, preflight_import, restore_import
 
 
 @pytest.fixture(autouse=True)
@@ -85,7 +90,7 @@ def game_folder(roms: Path, name: str = "monkey") -> Path:
     return folder
 
 
-# ── ROM resolution ────────────────────────────────────────────────────────────
+# -- ROM resolution --
 
 
 def test_a_game_folder_resolves_to_itself(dirs: dict[str, Path]) -> None:
@@ -149,7 +154,7 @@ def test_a_missing_path_resolves_to_nothing(dirs: dict[str, Path]) -> None:
     assert Scummvm().resolve_rom_file(dirs["roms"] / "absent") is None
 
 
-# ── Targets in scummvm.ini ────────────────────────────────────────────────────
+# -- Targets in scummvm.ini --
 
 
 def test_a_registered_folder_resolves_to_its_target(dirs: dict[str, Path]) -> None:
@@ -438,7 +443,7 @@ def test_a_genuinely_undetectable_folder_still_reports_nothing(
     assert scummvm.register_target(folder) is None
 
 
-# ── The pinned ini ────────────────────────────────────────────────────────────
+# -- The pinned ini --
 
 
 def test_a_missing_ini_is_created_with_the_pins(dirs: dict[str, Path]) -> None:
@@ -713,7 +718,7 @@ def test_fullscreen_is_pinned_off_whatever_the_ini_said(dirs: dict[str, Path]) -
     assert scummvm._ini_domains()["scummvm"]["fullscreen"] == "false"
 
 
-# ── GMM hotkeys ───────────────────────────────────────────────────────────────
+# -- GMM hotkeys --
 
 
 def test_an_untranslated_gui_uses_the_english_hotkeys(dirs: dict[str, Path]) -> None:
@@ -738,7 +743,7 @@ def test_a_language_with_no_table_entry_falls_back_to_english(dirs: dict[str, Pa
     assert scummvm.gmm_hotkeys() == ("s", "l")
 
 
-# ── Slot naming ───────────────────────────────────────────────────────────────
+# -- Slot naming --
 
 
 def test_a_slot_has_both_canonical_names() -> None:
@@ -774,7 +779,7 @@ def test_nothing_booted_means_no_slot_file(dirs: dict[str, Path]) -> None:
     assert scummvm.slot_file(None, 1) is None
 
 
-# ── State routes ──────────────────────────────────────────────────────────────
+# -- State routes --
 
 
 def booted(target: str = "monkey") -> Scummvm:
@@ -885,7 +890,7 @@ def test_an_empty_save_dir_is_nothing_to_clear(
     Scummvm().clear_working_slot()
 
 
-# ── Archive classification ────────────────────────────────────────────────────
+# -- Archive classification --
 
 
 def test_the_working_slot_is_the_only_state_in_the_archive(dirs: dict[str, Path]) -> None:
@@ -909,7 +914,7 @@ def test_with_nothing_booted_every_member_is_a_save(dirs: dict[str, Path]) -> No
     assert Scummvm().save_file_kind("saves/monkey.s01") == "save"
 
 
-# ── Launching ─────────────────────────────────────────────────────────────────
+# -- Launching --
 
 
 class Spawned:
@@ -1083,7 +1088,7 @@ def test_a_launch_pins_the_ini_first(dirs: dict[str, Path], spawned: Spawned) ->
     assert scummvm._ini_domains()["scummvm"]["gui_saveload_chooser"] == "list"
 
 
-# ── The save and load macros ──────────────────────────────────────────────────
+# -- The save and load macros --
 
 
 class Xdo:
@@ -1309,7 +1314,7 @@ def test_an_empty_slot_file_is_not_a_finished_save(
     assert emu.save_state(1) is False
 
 
-# ── Exit ──────────────────────────────────────────────────────────────────────
+# -- Exit --
 
 
 def test_an_exit_that_saves_reports_the_file(
@@ -1359,7 +1364,7 @@ def test_an_exit_whose_save_failed_reports_it(
     assert report["state_file"] is None
 
 
-# ── The deferred resume ───────────────────────────────────────────────────────
+# -- The deferred resume --
 
 
 def test_a_deferred_resume_loads_once_the_state_arrives(
@@ -1419,7 +1424,7 @@ def test_waiting_for_a_state_returns_as_soon_as_it_lands(
 
     assert emu.wait_for_state(time.monotonic() + 0.2, poll=0.05) is True
 
-# ── Language ──────────────────────────────────────────────────────────────────
+# -- Language --
 
 
 @pytest.mark.parametrize(
@@ -1710,3 +1715,606 @@ def test_an_unusable_gui_language_is_not_pinned(
 
     assert "gui_language" not in scummvm._ini_domains()["scummvm"]
     assert not any(arg.startswith("--language=") for arg in spawned.cmd)
+
+# -- declared imports --
+
+_STATE_NAME = f"s{scummvm.STATE_SLOT:02d}"
+"""The working slot's `.sNN` spelling."""
+
+_STATE_NUM = f"{scummvm.STATE_SLOT:03d}"
+"""The working slot's `.NNN` spelling."""
+
+
+def _preflight(
+    emu: Scummvm, folder: Path, members: dict[str, bytes], v1: Optional[dict[str, bytes]] = None
+) -> imports.PreflightResult:
+    """Preflight an archive against a game folder, with a resume slot declared.
+
+    Args:
+        emu: The emulator.
+        folder: The game folder the session boots.
+        members: The `.import/...` members.
+        v1: Ordinary archive members to carry beside them, or None.
+
+    Returns:
+        What preflight decided.
+    """
+    return preflight_import(
+        emu, import_zip(members, v1), rom_file=emu.resolve_rom_file(folder), resume_slot=emu.state_slot
+    )
+
+
+def _refused(result: imports.PreflightResult) -> list[tuple[str, str]]:
+    """List a preflight's refusals as sorted reason and member pairs.
+
+    Args:
+        result: What preflight decided.
+
+    Returns:
+        The pairs.
+    """
+    return sorted((r.reason, r.member or "") for r in result.refusals)
+
+
+def _dests(result: imports.PreflightResult) -> dict[str, str]:
+    """Map each placed member to its destination.
+
+    Args:
+        result: What preflight decided.
+
+    Returns:
+        Member name to posix destination.
+    """
+    return {p.member.name: p.dest.as_posix() for p in result.placements}
+
+
+def _detects_nothing(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess:
+    """Stand in for a `scummvm --add` that finds no game and writes no domain.
+
+    Args:
+        cmd: The argv the launcher ran.
+        **kwargs: The rest of the subprocess arguments, ignored.
+
+    Returns:
+        A clean exit that added nothing.
+    """
+    return subprocess.CompletedProcess(cmd, 0, "Added 0 games\n", "")
+
+
+def _never_runs(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess:
+    """Fail the test that reaches for `scummvm --add` when it must not.
+
+    Args:
+        cmd: The argv the launcher ran.
+        **kwargs: The rest of the subprocess arguments, ignored.
+
+    Raises:
+        AssertionError: Always.
+    """
+    raise AssertionError(f"scummvm must not run here: {cmd}")
+
+
+def test_saves_and_one_state_land_under_the_booted_target(dirs: dict[str, Path]) -> None:
+    """Saves keep their slot, and the state takes the working slot of the booted target."""
+    folder = registered(dirs)
+
+    result = _preflight(
+        Scummvm(),
+        folder,
+        {
+            ".import/save/monkey.003": b"one",
+            ".import/save/saves/monkey.s04": b"two",
+            ".import/state/monkey.s07": b"three",
+        },
+    )
+
+    assert result.refusals == ()
+    assert _dests(result) == {
+        ".import/save/monkey.003": "saves/monkey.003",
+        ".import/save/saves/monkey.s04": "saves/monkey.s04",
+        ".import/state/monkey.s07": f"saves/monkey.{_STATE_NAME}",
+    }
+    assert result.identity == imports.SessionIdentity("monkey", "rom")
+
+
+@pytest.mark.parametrize(
+    ("given", "placed"),
+    [
+        ("monkey.003", "saves/monkey.003"),
+        ("saves/monkey.003", "saves/monkey.003"),
+        ("monkey.s04", "saves/monkey.s04"),
+        ("monkey.S02", "saves/monkey.s02"),
+        ("monkey.s102", "saves/monkey.s102"),
+        ("MONKEY.004", "saves/monkey.004"),
+    ],
+)
+def test_a_save_may_be_spelled_in_either_slot_form_and_any_case(
+    dirs: dict[str, Path], given: str, placed: str
+) -> None:
+    """A bare name or one under `saves/`, `.sNN` or `.NNN`, in any case, lands under the ini's spelling."""
+    folder = registered(dirs)
+
+    result = _preflight(Scummvm(), folder, {f".import/save/{given}": b"data"})
+
+    assert result.refusals == ()
+    assert list(_dests(result).values()) == [placed]
+
+
+def test_a_save_may_carry_the_target_the_gameid_or_the_engineid(dirs: dict[str, Path]) -> None:
+    """Any of the three names a domain answers to is a game the folder holds."""
+    folder = game_folder(dirs["roms"])
+    write_ini(
+        dirs["ini"],
+        f"""
+        [monkey-fr]
+        gameid=monkeyisland
+        engineid=scumm
+        path={folder.resolve()}
+        """,
+    )
+
+    result = _preflight(
+        Scummvm(),
+        folder,
+        {
+            ".import/save/monkey-fr.003": b"target",
+            ".import/save/monkeyisland.004": b"gameid",
+            ".import/save/scumm.005": b"engineid",
+        },
+    )
+
+    assert result.refusals == ()
+    assert sorted(_dests(result).values()) == [
+        "saves/monkey-fr.003",
+        "saves/monkeyisland.004",
+        "saves/scumm.005",
+    ]
+
+
+def test_a_save_takes_the_exact_case_the_ini_spells_its_game_in(dirs: dict[str, Path]) -> None:
+    """ScummVM finds a save by exact name, so the archive's case gives way to the ini's."""
+    folder = game_folder(dirs["roms"])
+    write_ini(dirs["ini"], f"[Monkey]\ngameid=monkeyisland\npath={folder.resolve()}")
+
+    result = _preflight(
+        Scummvm(),
+        folder,
+        {".import/save/MONKEY.004": b"a", ".import/save/monkeyISLAND.005": b"b"},
+    )
+
+    assert result.refusals == ()
+    assert _dests(result) == {
+        ".import/save/MONKEY.004": "saves/Monkey.004",
+        ".import/save/monkeyISLAND.005": "saves/monkeyisland.005",
+    }
+
+
+def test_a_save_for_another_variant_keeps_that_variants_name(dirs: dict[str, Path]) -> None:
+    """A German save in a French session is placed as the German one, not renamed onto French."""
+    folder = _multilingual(dirs)
+    emu = Scummvm()
+    emu.language = "fr"
+
+    result = _preflight(emu, folder, {".import/save/monkey-de.003": b"data"})
+
+    assert result.refusals == ()
+    assert list(_dests(result).values()) == ["saves/monkey-de.003"]
+
+
+def test_a_save_for_another_game_is_an_identity_mismatch(dirs: dict[str, Path]) -> None:
+    """A stem that no domain of this folder answers to is refused, whatever else is registered."""
+    folder = game_folder(dirs["roms"])
+    other = game_folder(dirs["roms"], "other")
+    write_ini(
+        dirs["ini"],
+        f"""
+        [monkey]
+        gameid=monkey
+        path={folder.resolve()}
+
+        [tentacle]
+        gameid=tentacle
+        path={other.resolve()}
+        """,
+    )
+
+    result = _preflight(Scummvm(), folder, {".import/save/tentacle.003": b"data"})
+
+    assert _refused(result) == [("identity_mismatch", ".import/save/tentacle.003")]
+    assert result.refusals[0].detail == "member tentacle, this game monkey"
+
+
+@pytest.mark.parametrize(
+    "given",
+    [
+        "SAVEGAME.001",
+        "savegame.003",
+        "Game.srm",
+        "monkey.state1",
+        "monkey.state.auto",
+        "scummvm.ini",
+        "monkey.0001",
+        "monkey.s1",
+        "monkey.003.bak",
+        "monkey.\u0663\u0663\u0663",
+        "sub/monkey.003",
+        "saves/sub/monkey.003",
+    ],
+)
+def test_a_name_that_is_not_a_save_is_an_unrecognised_layout(dirs: dict[str, Path], given: str) -> None:
+    """Only a single `<game>.NNN` or `<game>.sNN` file is a save, and `SAVEGAME` names no game."""
+    folder = registered(dirs)
+
+    result = _preflight(Scummvm(), folder, {f".import/save/{given}": b"data"})
+
+    assert _refused(result) == [("unrecognised_layout", f".import/save/{given}")]
+
+
+@pytest.mark.parametrize("given", ["monkey.s01", "monkey.001", "MONKEY.S01", "saves/monkey.001"])
+def test_a_save_in_the_working_slot_is_a_destination_conflict(dirs: dict[str, Path], given: str) -> None:
+    """The working slot is the broker's, so a save cannot be filed there; it is declared as the state."""
+    folder = registered(dirs)
+
+    result = _preflight(Scummvm(), folder, {f".import/save/{given}": b"data"})
+
+    assert _refused(result) == [("destination_conflict", f".import/save/{given}")]
+    assert result.refusals[0].detail == (
+        f"slot {scummvm.STATE_SLOT} is the broker's working slot; declare it as a state"
+    )
+
+
+def test_the_working_slot_under_another_name_is_an_ordinary_save(dirs: dict[str, Path]) -> None:
+    """Only the booted target's own slot is the broker's, so another variant's or the gameid's is not."""
+    folder = _multilingual(dirs)
+    emu = Scummvm()
+    emu.language = "fr"
+
+    result = _preflight(
+        emu, folder, {".import/save/monkey-de.s01": b"variant", ".import/save/monkey.001": b"gameid"}
+    )
+
+    assert result.refusals == ()
+    assert sorted(_dests(result).values()) == ["saves/monkey-de.s01", "saves/monkey.001"]
+
+
+def test_an_unregistered_folder_is_registered_once_for_the_whole_archive(
+    dirs: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Preflight registers the folder as launch would, once, and places every member against the result."""
+    folder = game_folder(dirs["roms"])
+    add = AddRuns(folder.resolve())
+    monkeypatch.setattr(scummvm.subprocess, "run", add)
+
+    result = _preflight(
+        Scummvm(),
+        folder,
+        {
+            ".import/save/monkey-fr.003": b"one",
+            ".import/save/monkey.004": b"two",
+            ".import/state/monkey.s02": b"three",
+        },
+    )
+
+    assert result.refusals == ()
+    assert len(add.attempts) == 1
+    assert sorted(_dests(result).values()) == [
+        "saves/monkey-fr.003",
+        "saves/monkey-fr.s01",
+        "saves/monkey.004",
+    ]
+
+
+def test_a_folder_with_no_detectable_game_gives_identity_unknown(
+    dirs: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With nothing to boot there is no game to hold a save or a state to."""
+    folder = game_folder(dirs["roms"])
+    monkeypatch.setattr(scummvm.subprocess, "run", _detects_nothing)
+
+    result = _preflight(
+        Scummvm(), folder, {".import/save/monkey.003": b"one", ".import/state/monkey.s02": b"two"}
+    )
+
+    assert _refused(result) == [
+        ("identity_unknown", ".import/save/monkey.003"),
+        ("identity_unknown", ".import/state/monkey.s02"),
+    ]
+
+
+def test_no_rom_folder_gives_identity_unknown_without_running_scummvm(
+    dirs: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A launch with no game folder has nothing to register, so nothing is run."""
+    monkeypatch.setattr(scummvm.subprocess, "run", _never_runs)
+
+    result = preflight_import(
+        Scummvm(),
+        import_zip({".import/save/monkey.003": b"data"}),
+        rom_file=None,
+        resume_slot=scummvm.STATE_SLOT,
+    )
+
+    assert _refused(result) == [("identity_unknown", ".import/save/monkey.003")]
+
+
+@pytest.mark.parametrize(
+    ("given", "placed"),
+    [
+        ("monkey.s07", f"saves/monkey.{_STATE_NAME}"),
+        ("monkey.s007", f"saves/monkey.{_STATE_NAME}"),
+        ("monkey.005", f"saves/monkey.{_STATE_NUM}"),
+        ("saves/monkey.005", f"saves/monkey.{_STATE_NUM}"),
+        ("MONKEY.S02", f"saves/monkey.{_STATE_NAME}"),
+    ],
+)
+def test_a_state_takes_the_working_slot_in_the_form_it_arrived_in(
+    dirs: dict[str, Path], given: str, placed: str
+) -> None:
+    """The state's own slot is dropped; the `.sNN` or `.NNN` form is kept, as `state_target` keeps it."""
+    folder = registered(dirs)
+
+    result = _preflight(Scummvm(), folder, {f".import/state/{given}": b"data"})
+
+    assert result.refusals == ()
+    assert list(_dests(result).values()) == [placed]
+
+
+def test_a_state_from_another_variant_is_renamed_onto_the_booted_target(dirs: dict[str, Path]) -> None:
+    """A state captured under the German target resumes the French session."""
+    folder = _multilingual(dirs)
+    emu = Scummvm()
+    emu.language = "fr"
+
+    result = _preflight(emu, folder, {".import/state/monkey-de.s02": b"data"})
+
+    assert result.refusals == ()
+    assert list(_dests(result).values()) == [f"saves/monkey-fr.{_STATE_NAME}"]
+
+
+def test_a_state_for_another_game_is_an_identity_mismatch(dirs: dict[str, Path]) -> None:
+    """A state is held to the folder's game exactly as a save is."""
+    folder = registered(dirs)
+
+    result = _preflight(Scummvm(), folder, {".import/state/tentacle.s01": b"data"})
+
+    assert _refused(result) == [("identity_mismatch", ".import/state/tentacle.s01")]
+
+
+@pytest.mark.parametrize("given", ["savegame.001", "monkey.state1", "monkey.s1", "sub/monkey.s01"])
+def test_a_state_that_is_not_a_save_name_is_an_unrecognised_layout(
+    dirs: dict[str, Path], given: str
+) -> None:
+    """A state is one save-named file, so what is not a save name is not a state either."""
+    folder = registered(dirs)
+
+    result = _preflight(Scummvm(), folder, {f".import/state/{given}": b"data"})
+
+    assert _refused(result) == [("unrecognised_layout", f".import/state/{given}")]
+
+
+def test_a_state_needs_a_resume_slot(dirs: dict[str, Path]) -> None:
+    """Without `save.resume_slot` the launch would not resume it, so it is refused."""
+    folder = registered(dirs)
+    emu = Scummvm()
+
+    result = preflight_import(
+        emu,
+        import_zip({".import/state/monkey.s02": b"data"}),
+        rom_file=emu.resolve_rom_file(folder),
+        resume_slot=None,
+    )
+
+    assert _refused(result) == [("resume_slot_required", ".import/state/monkey.s02")]
+
+
+def test_a_memory_card_is_not_accepted(dirs: dict[str, Path]) -> None:
+    """ScummVM has no memory card."""
+    folder = registered(dirs)
+
+    result = _preflight(Scummvm(), folder, {".import/memcard/monkey.003": b"data"})
+
+    assert _refused(result) == [("kind_not_accepted", ".import/memcard/monkey.003")]
+
+
+@pytest.mark.parametrize("second", ["monkey.s03", "monkey.003"])
+def test_two_states_are_each_refused(dirs: dict[str, Path], second: str) -> None:
+    """There is one working slot, so two states compete for it and neither is placed."""
+    folder = registered(dirs)
+
+    result = _preflight(
+        Scummvm(), folder, {".import/state/monkey.s02": b"one", f".import/state/{second}": b"two"}
+    )
+
+    assert _refused(result) == sorted(
+        [
+            ("destination_conflict", ".import/state/monkey.s02"),
+            ("destination_conflict", f".import/state/{second}"),
+        ]
+    )
+
+
+def test_a_v1_save_in_the_working_slot_conflicts_with_the_state(dirs: dict[str, Path]) -> None:
+    """The archive's own working-slot file would be restored beside the state, so the state is refused.
+
+    `save_file_kind` reads every file as a save until a game has booted, so
+    the shared count cannot see this one and `validate_import_plan` does.
+    """
+    folder = registered(dirs)
+
+    result = _preflight(
+        Scummvm(),
+        folder,
+        {".import/state/monkey.s02": b"state"},
+        v1={"saves/monkey.001": b"old"},
+    )
+
+    assert _refused(result) == [("destination_conflict", ".import/state/monkey.s02")]
+    assert result.refusals[0].expected == "one state per archive"
+    assert result.refusals[0].detail == "the archive already carries saves/monkey.001"
+
+
+def test_a_v1_save_on_the_states_destination_is_refused_once(dirs: dict[str, Path]) -> None:
+    """The shared destination check already refuses the state, and the slot check adds nothing."""
+    folder = registered(dirs)
+
+    result = _preflight(
+        Scummvm(),
+        folder,
+        {".import/state/monkey.s02": b"state"},
+        v1={f"saves/monkey.{_STATE_NAME}": b"old"},
+    )
+
+    assert _refused(result) == [("destination_conflict", ".import/state/monkey.s02")]
+
+
+def test_a_v1_state_already_counted_is_refused_once(dirs: dict[str, Path]) -> None:
+    """A booted target makes `save_file_kind` label the v1 slot file a state, and the shared count refuses."""
+    folder = registered(dirs)
+    emu = Scummvm()
+    emu._target = "monkey"
+
+    result = _preflight(
+        emu, folder, {".import/state/monkey.s02": b"state"}, v1={"saves/monkey.001": b"old"}
+    )
+
+    assert _refused(result) == [("destination_conflict", ".import/state/monkey.s02")]
+
+
+def test_v1_saves_outside_the_working_slot_do_not_count(dirs: dict[str, Path]) -> None:
+    """Another slot, and another game's slot, are the game's own saves."""
+    folder = registered(dirs)
+
+    result = _preflight(
+        Scummvm(),
+        folder,
+        {".import/state/monkey.s02": b"state"},
+        v1={"saves/monkey.002": b"one", "saves/tentacle.001": b"two"},
+    )
+
+    assert result.refusals == ()
+
+
+def test_an_imported_state_resumes_through_the_launch(dirs: dict[str, Path], spawned: Spawned) -> None:
+    """The file lands where `slot_file` finds it, and the launch boots it with `--save-slot`."""
+    folder = registered(dirs)
+    emu = Scummvm()
+    body = import_zip({".import/state/monkey.s07": b"progress", ".import/save/monkey.003": b"save"})
+    rom = emu.resolve_rom_file(folder)
+
+    result = preflight_import(emu, body, rom_file=rom, resume_slot=emu.state_slot)
+    restore_import(emu, body, result)
+    emu.launch(rom, 3)
+
+    working = dirs["saves"] / f"monkey.{_STATE_NAME}"
+    assert scummvm.slot_file("monkey", scummvm.STATE_SLOT) == working
+    assert working.read_bytes() == b"progress"
+    assert (dirs["saves"] / "monkey.003").read_bytes() == b"save"
+    assert f"--save-slot={scummvm.STATE_SLOT}" in spawned.cmd
+    assert spawned.cmd[-1] == "monkey"
+
+
+@pytest.mark.parametrize(
+    ("language", "gui_language", "expected"),
+    [
+        (None, None, "monkey-de"),
+        ("fr", None, "monkey-fr"),
+        (None, "fr", "monkey-fr"),
+        ("de", "fr", "monkey-de"),
+        ("klingon", "fr", "monkey-fr"),
+        ("fr", "klingon", "monkey-fr"),
+        ("en", None, "monkey-de"),
+    ],
+)
+def test_preflight_picks_the_target_launch_boots(
+    dirs: dict[str, Path],
+    spawned: Spawned,
+    language: Optional[str],
+    gui_language: Optional[str],
+    expected: str,
+) -> None:
+    """A state is renamed onto the target the launch boots, so the two must pick alike."""
+    folder = _multilingual(dirs)
+    emu = Scummvm()
+    emu.language = language
+    emu.gui_language = gui_language
+    rom = emu.resolve_rom_file(folder)
+    ctx = imports.ImportCtx(rom_file=rom, rom=None, memory_card_synced=False, excluded=(), resume_slot=None)
+
+    target, _ = scummvm._session_game(emu, ctx)
+    emu.launch(rom, None)
+
+    assert target == expected == emu._target
+
+
+def test_the_identity_is_the_registered_target_casefolded(dirs: dict[str, Path]) -> None:
+    """An activate with no preflight reads the ini, and the value is compared casefolded."""
+    folder = game_folder(dirs["roms"])
+    write_ini(dirs["ini"], f"[Monkey]\ngameid=monkey\npath={folder.resolve()}")
+    emu = Scummvm()
+
+    identity = imports.resolve_activate_identity(emu, folder.resolve(), None)
+
+    assert identity == imports.SessionIdentity("monkey", "rom")
+    assert emu._read_target(folder.resolve()) == "Monkey"
+
+
+def test_an_activate_with_no_preflight_never_registers(
+    dirs: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The identity read is a lookup: registering can take minutes and runs in a worker thread."""
+    folder = game_folder(dirs["roms"])
+    monkeypatch.setattr(scummvm.subprocess, "run", _never_runs)
+
+    identity = imports.resolve_activate_identity(Scummvm(), folder.resolve(), None)
+
+    assert identity == imports.SessionIdentity(None, "none")
+
+
+def test_the_names_are_the_target_the_gameid_and_the_engineid_in_ini_order(
+    dirs: dict[str, Path],
+) -> None:
+    """Each domain of the folder contributes its three names once, and another folder's none."""
+    folder = game_folder(dirs["roms"])
+    write_ini(
+        dirs["ini"],
+        f"""
+        [monkey-de]
+        gameid=monkey
+        engineid=scumm
+        path={folder.resolve()}
+
+        [other]
+        gameid=tentacle
+        path=/elsewhere
+
+        [monkey-fr]
+        gameid=monkey
+        path={folder.resolve()}
+        """,
+    )
+
+    assert scummvm._folder_names(folder.resolve()) == ["monkey-de", "monkey", "scumm", "monkey-fr"]
+
+
+def test_a_stem_matches_exactly_before_it_matches_folded() -> None:
+    """The identical spelling wins over an earlier one that differs only in case."""
+    names = ["monkey", "MONKEY"]
+
+    assert scummvm._match_name("MONKEY", names) == "MONKEY"
+    assert scummvm._match_name("Monkey", names) == "monkey"
+    assert scummvm._match_name("tentacle", names) is None
+
+
+def test_the_hotkey_table_holds_the_letters_its_names_say() -> None:
+    """The non-Latin hotkeys are written as escapes, so their names are the check that they are right."""
+    expected = {
+        "be": ("CYRILLIC SMALL LETTER ZE", "CYRILLIC SMALL LETTER A"),
+        "el": ("GREEK SMALL LETTER ALPHA", "GREEK SMALL LETTER PHI"),
+        "he": ("HEBREW LETTER SHIN", "HEBREW LETTER TET"),
+        "nb": ("LATIN SMALL LETTER L", "LATIN SMALL LETTER A WITH RING ABOVE"),
+        "ru": ("CYRILLIC SMALL LETTER A", "CYRILLIC SMALL LETTER ZE"),
+    }
+
+    for code, names in expected.items():
+        assert tuple(unicodedata.name(key) for key in scummvm._GMM_HOTKEYS[code]) == names
+    assert Path(scummvm.__file__).read_text(encoding="utf-8").isascii()

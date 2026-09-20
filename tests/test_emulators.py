@@ -19,7 +19,7 @@ from typing import Optional
 import pytest
 
 from webstation_broker import emulators, imports, saves
-from webstation_broker.emulators import base, retroarch, rpcs3
+from webstation_broker.emulators import base, retroarch, rpcs3, scummvm
 
 from .conftest import DETACHED_CMD, SLEEPER_CMD, await_cmdline, await_gone, import_zip, preflight_import
 
@@ -648,7 +648,7 @@ def test_the_launch_env_points_at_the_labwc_session(monkeypatch: pytest.MonkeyPa
 
 
 _IMPORTING: frozenset[str] = frozenset(
-    {"dolphin", "duckstation", "flycast", "pcsx2", "ppsspp", "retroarch", "rpcs3"}
+    {"dolphin", "duckstation", "flycast", "pcsx2", "ppsspp", "retroarch", "rpcs3", "scummvm"}
 )
 """The emulators that accept declared imports; every other one inherits the refusing base hooks."""
 
@@ -934,6 +934,7 @@ _EXAMPLE_PLATFORM: dict[str, str] = {
     "ppsspp": "psp",
     "retroarch": "gb",
     "rpcs3": "ps3",
+    "scummvm": "scummvm",
 }
 """The platform each importing emulator's examples below are placed on."""
 
@@ -955,6 +956,8 @@ _EXAMPLES: list[tuple[str, str, bytes]] = [
     ("rpcs3", ".import/save/home/00000001/savedata/BLUS30443-AUTOSAVE/PARAM.SFO", b"sfo"),
     ("rpcs3", ".import/save/game/BLES00001/PARAM.SFO", b"sfo"),
     ("rpcs3", ".import/state/BLUS30443_1.SAVESTAT", b"progress"),
+    ("scummvm", ".import/save/monkey.003", b"save"),
+    ("scummvm", ".import/state/monkey.s02", b"progress"),
     ("retroarch", ".import/save/Game.srm", b"sram"),
 ]
 """One member each importing emulator accepts, for every kind it accepts on its example platform."""
@@ -989,15 +992,21 @@ def _example_serial(rom: Path) -> Optional[str]:
     return "BLUS30443"
 
 
-def _arrange(monkeypatch: pytest.MonkeyPatch, name: str) -> None:
+def _arrange(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, name: str) -> None:
     """Give an example's emulator what its hooks read beyond the member itself.
 
     Args:
         monkeypatch: Pytest's attribute patcher.
+        tmp_path: Per-test scratch directory, holding the example boot target `Game.bin`.
         name: The registry name.
     """
     if name == "rpcs3":
         monkeypatch.setattr(rpcs3, "_rom_title_id", _example_serial)
+    if name == "scummvm":
+        ini = tmp_path / "scummvm.ini"
+        ini.write_text(f"[monkey]\ngameid=monkey\npath={tmp_path / 'Game.bin'}\n")
+        monkeypatch.setattr(scummvm, "INI_PATH", ini)
+        monkeypatch.setattr(scummvm, "CONFIG_DIR", tmp_path)
 
 
 @pytest.mark.parametrize(("name", "member", "data"), _EXAMPLES)
@@ -1019,7 +1028,7 @@ def test_an_accepted_member_lands_inside_the_save_tree(
         data: Its bytes.
     """
     emu = _on(name, _EXAMPLE_PLATFORM[name])
-    _arrange(monkeypatch, name)
+    _arrange(monkeypatch, tmp_path, name)
     monkeypatch.setattr(emu, "save_root", tmp_path / "data")
     rom = tmp_path / "Game.bin"
     rom.write_bytes(b"rom")

@@ -46,10 +46,11 @@ import os
 import re
 import subprocess
 import time
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from threading import Thread
-from typing import Any, Optional
+from typing import Any, Optional, Union
 
+from .. import imports
 from .base import Emulator, base_launch_env
 
 log = logging.getLogger(__name__)
@@ -176,22 +177,22 @@ _GMM_HOTKEYS_DEFAULT = ("s", "l")
 """The `~S~ave` and `~L~oad` hotkeys of ScummVM's untranslated GUI."""
 
 _GMM_HOTKEYS = {
-    "be": ("з", "а"),
+    "be": ("\u0437", "\u0430"),
     "ca": ("d", "c"),
     "cs": ("u", "n"),
     "da": ("g", "n"),
     "de": ("s", "l"),
-    "el": ("α", "φ"),
+    "el": ("\u03b1", "\u03c6"),
     "es": ("g", "c"),
     "eu": ("g", "k"),
     "fi": ("t", "l"),
     "fr": ("s", "c"),
-    "he": ("ש", "ט"),
+    "he": ("\u05e9", "\u05d8"),
     "it": ("s", "c"),
-    "nb": ("l", "å"),
+    "nb": ("l", "\u00e5"),
     "pl": ("z", "w"),
     "pt": ("g", "c"),
-    "ru": ("а", "з"),
+    "ru": ("\u0430", "\u0437"),
     "tr": ("k", "y"),
 }
 """GUI language to its `(save, load)` GMM button hotkeys.
@@ -550,6 +551,25 @@ def _game_domains() -> dict[str, dict[str, str]]:
     }
 
 
+def _domains_at(rom_dir: Path) -> dict[str, dict[str, str]]:
+    """The game domains registered for `rom_dir`, in ini order.
+
+    Args:
+        rom_dir: The game folder to look up.
+
+    Returns:
+        Domain name to its keys, for every domain whose `path` is `rom_dir`.
+    """
+    found: dict[str, dict[str, str]] = {}
+    for name, keys in _game_domains().items():
+        try:
+            if Path(keys["path"]) == rom_dir:
+                found[name] = keys
+        except (OSError, ValueError) as exc:
+            log.debug("scummvm: skipping domain %s, bad path %r: %s", name, keys.get("path"), exc)
+    return found
+
+
 def target_for_path(rom_dir: Path, language: Optional[str] = None) -> Optional[str]:
     """The target registered in scummvm.ini for `rom_dir`, or None.
 
@@ -567,24 +587,14 @@ def target_for_path(rom_dir: Path, language: Optional[str] = None) -> Optional[s
     Returns:
         The target name, or None when no domain points at that folder.
     """
-    domains = _game_domains()
-    targets = []
-    for name, keys in domains.items():
-        try:
-            if Path(keys["path"]) == rom_dir:
-                targets.append(name)
-        except (OSError, ValueError) as exc:
-            log.debug(
-                "scummvm: skipping domain %s, bad path %r: %s", name, keys.get("path"), exc
-            )
-            continue
-    if not targets:
+    domains = _domains_at(rom_dir)
+    if not domains:
         return None
-    best = min(targets, key=lambda name: (_language_rank(domains[name], language), name))
-    if len(targets) > 1:
+    best = min(domains, key=lambda name: (_language_rank(domains[name], language), name))
+    if len(domains) > 1:
         log.info(
             "scummvm: %d targets registered for %s, booting %s (language=%s)",
-            len(targets),
+            len(domains),
             rom_dir,
             best,
             language or "-",
@@ -801,6 +811,231 @@ def _slot_stamp(target: Optional[str], slot: int) -> dict[str, tuple[float, int]
     return stamp
 
 
+_IMPORT_NAME_RE = re.compile(r"(?P<stem>[^/\\.]+)\.(?P<ext>s\d{2,3}|\d{3})", re.ASCII | re.IGNORECASE)
+"""A declared save's filename, matched without regard to case.
+
+`_SAVE_NAME_RE` stays case-sensitive because it reads what ScummVM wrote. An
+import is a stranger's file, and `MONKEY.S02` is as good a save as `monkey.s02`.
+"""
+
+_GENERIC_STEM = "savegame"
+"""The stem some engines use for a save that names no game, which no target owns."""
+
+_SAVE_EXPECTED = "a single <game>.NNN or <game>.sNN save file"
+"""The shape a declared save takes, in words."""
+
+_STATE_EXPECTED = "a single <game>.sNN or <game>.NNN state file"
+"""The shape a declared state takes, in words."""
+
+
+def _wanted_language(emu: Emulator) -> Optional[str]:
+    """The language `launch` picks a variant by: the rom's own, else the interface's.
+
+    Args:
+        emu: The emulator, carrying the activate payload's languages.
+
+    Returns:
+        The normalized code, or None for no preference.
+    """
+    return normalize_language(emu.language) or normalize_language(emu.gui_language)
+
+
+def _folder_names(rom_dir: Path) -> list[str]:
+    """Every name a save for the game in `rom_dir` can carry its stem as.
+
+    Args:
+        rom_dir: The game folder.
+
+    Returns:
+        Per domain registered there, in ini order, the target, then its
+        `gameid`, then its `engineid`, each spelling once and as the ini has it.
+    """
+    names: dict[str, None] = {}
+    for name, keys in _domains_at(rom_dir).items():
+        for spelling in (name, keys.get("gameid"), keys.get("engineid")):
+            if spelling:
+                names.setdefault(spelling)
+    return list(names)
+
+
+def _match_name(stem: str, names: list[str]) -> Optional[str]:
+    """Find the name a save's stem stands for.
+
+    Args:
+        stem: The member's stem.
+        names: The candidates, from `_folder_names`.
+
+    Returns:
+        The identical spelling when there is one, else the first that differs
+        only in case, else None.
+    """
+    if stem in names:
+        return stem
+    folded = stem.casefold()
+    return next((name for name in names if name.casefold() == folded), None)
+
+
+def _session_game(emu: Emulator, ctx: imports.ImportCtx) -> tuple[Optional[str], list[str]]:
+    """Work out the target the session boots, and every name a save may carry.
+
+    This is what `launch` will do, in the same order: look the folder up, and
+    register it when it is not there. It runs once per preflight, and it can
+    take as long as a detection pass. Registering writes `scummvm.ini`, which a
+    refused import leaves behind, exactly as a refused launch would.
+
+    Args:
+        emu: The emulator, carrying the activate payload's languages.
+        ctx: The launch context; its `memo` keeps the answer.
+
+    Returns:
+        The target and the names, or None and an empty list when there is no
+        game folder or ScummVM detects no game in it.
+    """
+    key = ("scummvm", "game")
+    cached = ctx.memo.get(key)
+    if isinstance(cached, tuple):
+        return cached
+    target: Optional[str] = None
+    names: list[str] = []
+    rom_dir = ctx.rom_file
+    if rom_dir is not None:
+        language = _wanted_language(emu)
+        target = target_for_path(rom_dir, language)
+        if target is None:
+            patch_ini(normalize_language(emu.gui_language))
+            target = register_target(rom_dir, language)
+        if target is not None:
+            names = _folder_names(rom_dir)
+    game = (target, names)
+    ctx.memo[key] = game
+    return game
+
+
+def _split_name(
+    member: imports.ImportMember, expected: str
+) -> Union[tuple[str, str], imports.ImportRefusal]:
+    """Split a declared member into its stem and lower-cased extension.
+
+    Args:
+        member: The member.
+        expected: The accepted shape, in words.
+
+    Returns:
+        The stem and extension, or `unrecognised_layout` when the member is not
+        one save file (a bare name, or one under `saves/`) with a ScummVM slot
+        extension and a stem that names a game.
+    """
+    parts = member.parts
+    if len(parts) == 2 and parts[0] == "saves":
+        parts = parts[1:]
+    match = _IMPORT_NAME_RE.fullmatch(parts[0]) if len(parts) == 1 else None
+    if match is None or match.group("stem").casefold() == _GENERIC_STEM:
+        return imports.ImportRefusal("unrecognised_layout", member.name, expected)
+    return match.group("stem"), match.group("ext").lower()
+
+
+def _game_name(
+    member: imports.ImportMember, stem: str, expected: str, names: list[str]
+) -> Union[str, imports.ImportRefusal]:
+    """Hold a member's stem to the game the session runs.
+
+    Args:
+        member: The member.
+        stem: Its stem.
+        expected: The accepted shape, in words.
+        names: The session's names, from `_session_game`.
+
+    Returns:
+        The name to file it under, as the ini spells it, or `identity_unknown`
+        when there is no game and `identity_mismatch` when the stem is another's.
+    """
+    if not names:
+        return imports.ImportRefusal(
+            "identity_unknown", member.name, expected, detail="ScummVM detects no game in this rom folder"
+        )
+    matched = _match_name(stem, names)
+    if matched is None:
+        return imports.ImportRefusal(
+            "identity_mismatch",
+            member.name,
+            expected,
+            detail=f"member {stem}, this game {', '.join(names)}",
+        )
+    return matched
+
+
+def _place_save(
+    member: imports.ImportMember, emu: Emulator, ctx: imports.ImportCtx
+) -> Union[imports.Placement, imports.ImportRefusal]:
+    """Place a save under the name of the game it belongs to.
+
+    A save is filed under the spelling the ini has, whatever case the archive
+    used, because ScummVM finds a save by exact name. One for another variant
+    of the folder keeps that variant's name and stays out of sight until that
+    variant boots.
+
+    Args:
+        member: The member.
+        emu: The emulator.
+        ctx: The launch context.
+
+    Returns:
+        The placement, or a refusal. The working slot under the booted target's
+        name is `destination_conflict`: it is the broker's, so it is declared
+        as a state.
+    """
+    split = _split_name(member, _SAVE_EXPECTED)
+    if isinstance(split, imports.ImportRefusal):
+        return split
+    target, names = _session_game(emu, ctx)
+    named = _game_name(member, split[0], _SAVE_EXPECTED, names)
+    if isinstance(named, imports.ImportRefusal):
+        return named
+    dest = imports.build_dest("saves", (), (f"{named}.{split[1]}",), member=member, expected=_SAVE_EXPECTED)
+    if isinstance(dest, imports.ImportRefusal):
+        return dest
+    if target is not None and dest.name in slot_names(target, STATE_SLOT):
+        return imports.ImportRefusal(
+            "destination_conflict",
+            member.name,
+            "a save outside the working slot",
+            detail=f"slot {STATE_SLOT} is the broker's working slot; declare it as a state",
+        )
+    return imports.Placement(member, dest)
+
+
+def _place_state(
+    member: imports.ImportMember, emu: Emulator, ctx: imports.ImportCtx
+) -> Union[imports.Placement, imports.ImportRefusal]:
+    """Place the state in the working slot, under the target the session boots.
+
+    The member's own slot is dropped, as `state_target` drops it for a pushed
+    state, and its extension form is kept. The stem still has to name a game of
+    this folder, but any of its variants will do: a state captured under one
+    language's target is renamed onto the one this session boots.
+
+    Args:
+        member: The member.
+        emu: The emulator.
+        ctx: The launch context.
+
+    Returns:
+        The placement, or a refusal.
+    """
+    split = _split_name(member, _STATE_EXPECTED)
+    if isinstance(split, imports.ImportRefusal):
+        return split
+    target, names = _session_game(emu, ctx)
+    named = _game_name(member, split[0], _STATE_EXPECTED, names)
+    if isinstance(named, imports.ImportRefusal):
+        return named
+    slot_ext = f"s{STATE_SLOT:02d}" if split[1].startswith("s") else f"{STATE_SLOT:03d}"
+    dest = imports.build_dest("saves", (), (f"{target}.{slot_ext}",), member=member, expected=_STATE_EXPECTED)
+    if isinstance(dest, imports.ImportRefusal):
+        return dest
+    return imports.Placement(member, dest)
+
+
 class Scummvm(Emulator):
     """ScummVM sessions, driven through the launcher's own config and menus.
 
@@ -824,6 +1059,10 @@ class Scummvm(Emulator):
     A multilingual folder registers one target per language it detects, so the
     language the session was activated for decides which of them boots; without
     one the pick is alphabetical, which hands a French player a German game.
+
+    Declared imports take a save file per member, and one of them as the state.
+    The stem has to name a game of the folder, and the target the session boots
+    is worked out the way `launch` does, registering the folder when it is new.
 
     Attributes:
         name: Registry key, `scummvm`.
@@ -1426,6 +1665,117 @@ class Scummvm(Emulator):
             return "save"
         name = rel.rsplit("/", 1)[-1]
         return "state" if name in slot_names(self._target, STATE_SLOT) else "save"
+
+    def import_spec(self) -> imports.ImportSpec:
+        """Declare what ScummVM takes: save files, and one of them as the state.
+
+        Saves and states share `saves/`, so the two kinds have the same shapes.
+        The state rides the archive and resumes through `save.resume_slot`,
+        which boots the game with `--save-slot`.
+
+        Returns:
+            The spec.
+        """
+        shapes = ("<game>.NNN", "<game>.sNN")
+        return imports.ImportSpec(
+            kinds=(
+                imports.KindSpec("save", shapes),
+                imports.KindSpec(
+                    "state", shapes, requires_resume_slot=True, max_members=1, counts_v1=True
+                ),
+            ),
+            state_channel="archive",
+        )
+
+    def place_import(
+        self, member: imports.ImportMember, spec: imports.ImportSpec, ctx: imports.ImportCtx
+    ) -> Union[imports.Placement, imports.ImportRefusal]:
+        """Place one declared member: a save, or the state.
+
+        Args:
+            member: The member, already past the kind gate.
+            spec: This emulator's spec.
+            ctx: The launch context.
+
+        Returns:
+            The placement, or a refusal.
+        """
+        if member.kind == "state":
+            return _place_state(member, self, ctx)
+        return _place_save(member, self, ctx)
+
+    def validate_import_plan(
+        self, plan: list[imports.Placement], ctx: imports.ImportCtx
+    ) -> list[imports.ImportRefusal]:
+        """Refuse a state that shares the working slot with a save the archive carries.
+
+        `check_plan` counts the archive's own states by `save_file_kind`, which
+        answers `save` for everything until a game has booted. So a v1 save in
+        the working slot under the target's name goes uncounted there, and
+        would be restored on top of the state, or beside it under the other
+        spelling.
+
+        Args:
+            plan: The placements that passed every per-member check.
+            ctx: The launch context.
+
+        Returns:
+            One `destination_conflict` for the state, or nothing when the state
+            is alone, is already refused, or `check_plan` already counted the
+            v1 slot files.
+        """
+        states = [p for p in plan if p.member.kind == "state"]
+        if len(states) != 1:
+            return []
+        target, _ = _session_game(self, ctx)
+        if target is None:
+            return []
+        state = states[0]
+        if state.member.name in imports.destination_conflicts(
+            plan, ctx.archive_paths, self.import_spec().case_insensitive_dest
+        ):
+            return []
+        working = slot_names(target, STATE_SLOT)
+        carried = sorted(
+            PurePosixPath(rel).as_posix()
+            for rel in ctx.archive_paths
+            if PurePosixPath(rel).parts[:1] == ("saves",)
+            and len(PurePosixPath(rel).parts) == 2
+            and PurePosixPath(rel).name in working
+        )
+        if not carried or any(self.save_file_kind(rel) == "state" for rel in carried):
+            return []
+        return [
+            imports.ImportRefusal(
+                "destination_conflict",
+                state.member.name,
+                "one state per archive",
+                detail=f"the archive already carries {', '.join(carried)}",
+            )
+        ]
+
+    def identity_source(self) -> Optional[imports.IdentitySource]:
+        """Read the target the folder is registered under, for the session's identity.
+
+        Returns:
+            The source.
+        """
+        return imports.IdentitySource("scummvm_target", rom_reader=self._read_target)
+
+    def _read_target(self, rom: Path) -> Optional[str]:
+        """Look up the target registered for `rom`, without registering it.
+
+        Only a lookup: a launch that ran no preflight reads this in a worker
+        thread, and registering can take up to two minutes. The identity is
+        informational, so an unregistered folder reads as no identity.
+
+        Args:
+            rom: The game folder.
+
+        Returns:
+            The target, or None when the ini has no domain for the folder.
+        """
+        return target_for_path(rom, _wanted_language(self))
 
     def save_and_exit(self, slot: Optional[int]) -> dict[str, Any]:
         """Save through the menu if asked, then stop ScummVM.
