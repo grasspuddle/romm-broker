@@ -676,15 +676,18 @@ class Cemu(Emulator):
         return _place_split(member, split, imports.identity_for(self, ctx))
 
     def identity_source(self) -> Optional[imports.IdentitySource]:
-        """Take the session's game from RomM's title id, read as the Wii U low half.
+        """Take the session's game from RomM's title id, in either Wii U spelling.
 
-        Cemu boots titles by file, not by a path that names an id, so there is
-        no rom reader.
+        RomM writes a Wii U title id as the low half on its own (`101C9400`)
+        or as the whole sixteen-digit id (`00050000101C9400`), the same two
+        spellings a member's path may carry, and both name the one save
+        folder. Cemu boots titles by file, not by a path that names an id, so
+        there is no rom reader.
 
         Returns:
-            A `hex8` source with no reader.
+            A `hex8` source with no reader, reading RomM's id as a `wiiu_title`.
         """
-        return imports.IdentitySource("hex8")
+        return imports.IdentitySource("hex8", romm_family="wiiu_title")
 
     def resolve_rom_file(self, path: Path) -> Optional[Path]:
         """The file Cemu should boot for `path`.

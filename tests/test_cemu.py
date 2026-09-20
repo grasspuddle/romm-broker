@@ -640,6 +640,46 @@ def test_a_member_cemu_would_not_read_is_refused(rel: str, reason: str) -> None:
 
 
 @pytest.mark.usefixtures("save_dir")
+@pytest.mark.parametrize(
+    "title_id",
+    ["1010EC00", "1010ec00", "000500001010EC00", "000500001010ec00"],
+    ids=["low half", "low half lower case", "whole id", "whole id lower case"],
+)
+def test_either_spelling_of_romms_title_id_names_the_session(title_id: str) -> None:
+    """RomM sends the low half or the whole sixteen-digit id; both name the same save folder.
+
+    Args:
+        title_id: The id the activate body carries.
+    """
+    rom = imports.RomRef(1, "Game", "wiiu", title_id=title_id)
+
+    result = _preflight({".import/save/user/80000001/slot0.dat": b"x"}, rom=rom)
+
+    assert result.refusals == ()
+    assert [str(p.dest) for p in result.placements] == [f"{_TITLE_DIR}/user/80000001/slot0.dat"]
+
+
+@pytest.mark.usefixtures("save_dir")
+@pytest.mark.parametrize(
+    "title_id",
+    ["0005000E101C9400", "00050002101C9400", "not a title id", "1010EC0"],
+    ids=["update title", "demo title", "not hex", "too short"],
+)
+def test_a_title_id_that_names_no_save_folder_leaves_the_session_unnamed(title_id: str) -> None:
+    """Only `00050000` titles keep a save, so any other id is refused rather than guessed at.
+
+    Args:
+        title_id: The id the activate body carries.
+    """
+    rom = imports.RomRef(1, "Game", "wiiu", title_id=title_id)
+
+    result = _preflight({".import/save/user/80000001/slot0.dat": b"x"}, rom=rom)
+
+    assert [r.reason for r in result.refusals] == ["identity_unknown"]
+    assert result.placements == ()
+
+
+@pytest.mark.usefixtures("save_dir")
 def test_an_anchorless_save_needs_a_game_to_sit_under() -> None:
     """With no title folder in the path and no game named by RomM, there is nowhere to place it."""
     result = _preflight({".import/save/user/80000001/slot0.dat": b"x"}, rom=None)
@@ -755,7 +795,7 @@ def test_cemu_declares_a_save_kind_only() -> None:
     assert spec.protected == ("usr/save/system/*",)
     assert spec.case_insensitive_dest is False
     assert cemu.DEFAULT_PERSISTENT_ID == "80000001"
-    assert emu.identity_source() == imports.IdentitySource("hex8")
+    assert emu.identity_source() == imports.IdentitySource("hex8", romm_family="wiiu_title")
 
 
 def test_the_donor_accounts_are_collected_once_per_preflight(monkeypatch: pytest.MonkeyPatch) -> None:

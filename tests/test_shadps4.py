@@ -3,6 +3,7 @@
 import fnmatch
 import json
 import os
+import struct
 import subprocess
 import threading
 import time
@@ -2459,17 +2460,63 @@ _SAVE = "home/1000/savedata/CUSA12345/SAVE00"
 """Where the placement tests' save lands, relative to the data directory."""
 
 
-def _preflight(members: dict[str, bytes], v1: Optional[dict[str, bytes]] = None) -> imports.PreflightResult:
+def _preflight(
+    members: dict[str, bytes],
+    v1: Optional[dict[str, bytes]] = None,
+    *,
+    rom_file: Optional[Path] = None,
+    rom: Optional[imports.RomRef] = None,
+) -> imports.PreflightResult:
     """Preflight an archive of import members against shadPS4.
 
     Args:
         members: `.import/<kind>/...` names mapped to bytes.
         v1: Ordinary archive members to carry beside them, or None.
+        rom_file: The boot target the session resolved, or None for a launch
+            whose serial cannot be read.
+        rom: The activate body's rom, or None.
 
     Returns:
         What preflight decided.
     """
-    return preflight_import(shadps4.Shadps4(), import_zip(members, v1), rom_file=None)
+    return preflight_import(shadps4.Shadps4(), import_zip(members, v1), rom_file=rom_file, rom=rom)
+
+
+def _param_sfo(title_id: str, *, key: bytes = b"TITLE_ID") -> bytes:
+    """Build a one-entry `param.sfo` carrying a title id.
+
+    Args:
+        title_id: The serial the entry holds.
+        key: The entry's key, for a file that names something else.
+
+    Returns:
+        The file's bytes.
+    """
+    keys = key + b"\0"
+    values = title_id.encode() + b"\0"
+    key_start = 0x14 + 16
+    value_start = key_start + len(keys)
+    header = struct.pack("<4sIIII", b"\x00PSF", 0x0101, key_start, value_start, 1)
+    entry = struct.pack("<HHIII", 0, 0x0204, len(values), len(values), 0)
+    return header + entry + keys + values
+
+
+def _game_folder(root: Path, serial: str = "CUSA12345") -> Path:
+    """Write an unpacked game folder whose `sce_sys/param.sfo` names a serial.
+
+    Args:
+        root: The ROM library root the folder is written under; the reader
+            refuses a `param.sfo` that resolves outside it.
+        serial: The serial `param.sfo` carries.
+
+    Returns:
+        The game folder.
+    """
+    folder = root / "Game"
+    (folder / "sce_sys").mkdir(parents=True)
+    (folder / "sce_sys" / "param.sfo").write_bytes(_param_sfo(serial))
+    (folder / "eboot.bin").write_bytes(b"boot")
+    return folder
 
 
 def _save(rel: str, data: bytes = b"x") -> dict[str, bytes]:
@@ -2735,6 +2782,217 @@ def test_the_protected_glob_matches_the_marker_shadps4_writes(savedata_root: Pat
     assert shadps4._unmounted_saves(savedata_root) == [marker.parent.parent]
 
 
-def test_shadps4_has_no_session_id() -> None:
-    """The serial is in the path of every save, so identity is `none` and nothing is read."""
-    assert shadps4.Shadps4().identity_source() is None
+def test_shadps4_reads_the_sessions_serial_off_the_game() -> None:
+    """The rom's own `param.sfo` names the session, and RomM's `title_id` stands in behind it."""
+    source = shadps4.Shadps4().identity_source()
+
+    assert source == imports.IdentitySource("ps_serial_nodash", rom_reader=shadps4._game_serial)
+
+
+@pytest.mark.parametrize("boot", ["folder", "eboot"], ids=["a game folder", "its eboot.bin"])
+def test_the_serial_is_read_from_the_boot_targets_param_sfo(rom_root: Path, boot: str) -> None:
+    """Either boot target resolves to the same folder, and so to the same `param.sfo`.
+
+    Args:
+        rom_root: The patched ROM library root.
+        boot: Which of the two spellings `resolve_rom_file` returned.
+    """
+    folder = _game_folder(rom_root, "CUSA00123")
+    rom_file = folder if boot == "folder" else folder / "eboot.bin"
+
+    assert shadps4._game_serial(rom_file) == "CUSA00123"
+
+
+def test_a_packed_rom_offers_no_serial(tmp_path: Path) -> None:
+    """A `.pkg` or a `.zar` is unreadable from here, so those launches name no title.
+
+    Args:
+        tmp_path: The per-test temporary directory.
+    """
+    packed = tmp_path / "Game.pkg"
+    packed.write_bytes(b"\x7fCNT")
+
+    assert shadps4._game_serial(packed) is None
+
+
+@pytest.mark.parametrize(
+    ("data", "why"),
+    [
+        (b"", "empty"),
+        (b"not an sfo at all, just bytes", "not an sfo"),
+        (_param_sfo("CUSA00123", key=b"TITLE"), "names no title id"),
+        (_param_sfo(""), "holds an empty title id"),
+        (_param_sfo("CUSA00123")[: 0x14 + 16 + 9], "value table cut off"),
+        (
+            struct.pack("<4sIIII", b"\x00PSF", 0x0101, 0x24, 0x2D, 0xFFFFFFFF)
+            + struct.pack("<HHIII", 0, 0x0204, 10, 10, 0)
+            + b"TITLE_ID\0",
+            "a count nothing backs",
+        ),
+        (
+            struct.pack("<4sIIII", b"\x00PSF", 0x0101, 0xFFFF, 0xFFFF, 1) + b"\x00" * 16,
+            "offsets past the end",
+        ),
+    ],
+    ids=[
+        "empty",
+        "not an sfo",
+        "no title id key",
+        "an empty title id",
+        "a value table cut off",
+        "a count nothing backs",
+        "offsets past the end",
+    ],
+)
+def test_a_param_sfo_the_reader_cannot_trust_names_no_serial(tmp_path: Path, data: bytes, why: str) -> None:
+    """A file that is not a readable SFO reads as no id rather than as an error.
+
+    Args:
+        tmp_path: The per-test temporary directory.
+        data: The file's bytes.
+        why: What is wrong with it, for the test id.
+    """
+    sfo = tmp_path / "param.sfo"
+    sfo.write_bytes(data)
+
+    assert shadps4._sfo_title_id(sfo) is None
+
+
+def test_a_param_sfo_that_is_not_there_names_no_serial(rom_root: Path) -> None:
+    """A game folder with no `sce_sys/param.sfo` is a launch with no serial to compare.
+
+    Args:
+        rom_root: The patched ROM library root.
+    """
+    folder = rom_root / "Game"
+    folder.mkdir()
+
+    assert shadps4._game_serial(folder) is None
+
+
+def test_a_param_sfo_that_is_a_fifo_is_never_opened(
+    rom_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A FIFO would block the activate thread forever, so the guard stops short of opening it.
+
+    The reader is replaced rather than the answer asserted alone: if the
+    guard were dropped, this test would have to hang to fail.
+
+    Args:
+        rom_root: The patched ROM library root.
+        monkeypatch: Pytest's attribute patcher.
+    """
+    opened: list[Path] = []
+
+    def spy(sfo: Path) -> Optional[str]:
+        """Record the read that should never happen.
+
+        Args:
+            sfo: The file the guard let through.
+
+        Returns:
+            None, always.
+        """
+        opened.append(sfo)
+        return None
+
+    monkeypatch.setattr(shadps4, "_sfo_title_id", spy)
+    folder = rom_root / "Game"
+    (folder / "sce_sys").mkdir(parents=True)
+    os.mkfifo(folder / "sce_sys" / "param.sfo")
+
+    assert shadps4._game_serial(folder) is None
+    assert opened == []
+
+
+@pytest.mark.parametrize("link", ["param.sfo", "sce_sys"], ids=["the file", "the folder"])
+def test_a_param_sfo_that_leads_out_of_the_rom_root_names_no_serial(
+    rom_root: Path, tmp_path: Path, link: str
+) -> None:
+    """A library symlink out of the tree would read a host file, so it names nothing.
+
+    Args:
+        rom_root: The patched ROM library root.
+        tmp_path: The per-test temporary directory.
+        link: Which of the two path components the archive planted as a link.
+    """
+    outside = tmp_path / "outside"
+    (outside / "sce_sys").mkdir(parents=True)
+    (outside / "sce_sys" / "param.sfo").write_bytes(_param_sfo("CUSA00123"))
+    folder = rom_root / "Game"
+    if link == "param.sfo":
+        (folder / "sce_sys").mkdir(parents=True)
+        (folder / "sce_sys" / "param.sfo").symlink_to(outside / "sce_sys" / "param.sfo")
+    else:
+        folder.mkdir()
+        (folder / "sce_sys").symlink_to(outside / "sce_sys", target_is_directory=True)
+
+    assert shadps4._game_serial(folder) is None
+
+
+@pytest.mark.usefixtures("savedata_root")
+def test_a_save_for_the_launched_game_is_placed(rom_root: Path) -> None:
+    """The member's serial is the game's, so the save is this rom's and is taken.
+
+    Args:
+        rom_root: The patched ROM library root.
+    """
+    folder = _game_folder(rom_root, "CUSA12345")
+
+    result = _preflight(_save("CUSA12345/SAVE00/data.bin"), rom_file=folder)
+
+    assert result.refusals == ()
+    assert [str(p.dest) for p in result.placements] == [f"{_SAVE}/data.bin"]
+
+
+@pytest.mark.usefixtures("savedata_root")
+def test_another_titles_save_is_refused_against_the_launched_game(rom_root: Path) -> None:
+    """The exit dump ships the whole savedata subtree, so a foreign serial is never placed.
+
+    Left in, it would leave in this rom's archive and come back on every
+    later session of this rom.
+
+    Args:
+        rom_root: The patched ROM library root.
+    """
+    folder = _game_folder(rom_root, "CUSA12345")
+
+    result = _preflight(_save("CUSA99999/SAVE00/data.bin"), rom_file=folder)
+
+    assert [r.reason for r in result.refusals] == ["identity_mismatch"]
+    assert result.placements == ()
+
+
+@pytest.mark.usefixtures("savedata_root")
+def test_a_launch_that_names_no_serial_at_all_still_takes_any_save(tmp_path: Path) -> None:
+    """A packed rom RomM has no serial for names no title, so nothing is compared.
+
+    Args:
+        tmp_path: The per-test temporary directory.
+    """
+    packed = tmp_path / "Game.pkg"
+    packed.write_bytes(b"\x7fCNT")
+
+    result = _preflight(_save("CUSA99999/SAVE00/data.bin"), rom_file=packed)
+
+    assert result.refusals == ()
+    assert [str(p.dest) for p in result.placements] == ["home/1000/savedata/CUSA99999/SAVE00/data.bin"]
+
+
+@pytest.mark.usefixtures("savedata_root")
+def test_romms_title_id_names_the_session_when_the_rom_cannot(tmp_path: Path) -> None:
+    """A packed rom offers no serial, so RomM's `title_id` is read in its place.
+
+    Args:
+        tmp_path: The per-test temporary directory.
+    """
+    packed = tmp_path / "Game.pkg"
+    packed.write_bytes(b"\x7fCNT")
+    rom = imports.RomRef(1, "Game", "ps4", title_id="CUSA12345")
+
+    foreign = _preflight(_save("CUSA99999/SAVE00/data.bin"), rom_file=packed, rom=rom)
+    own = _preflight(_save("CUSA12345/SAVE00/data.bin"), rom_file=packed, rom=rom)
+
+    assert [r.reason for r in foreign.refusals] == ["identity_mismatch"]
+    assert foreign.placements == ()
+    assert [str(p.dest) for p in own.placements] == [f"{_SAVE}/data.bin"]

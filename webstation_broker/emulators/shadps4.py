@@ -87,6 +87,24 @@ _NOT_SAVES = frozenset({"config.json", "extracted", "sys_modules"})
 
 None of them is save data, so a member under one is refused as such rather than as a save with no serial.
 """
+_BOOT_NAME = "eboot.bin"
+"""The file a PS4 game folder boots from, and the one `resolve_rom_file` names inside a folder."""
+_PARAM_SFO_REL = ("sce_sys", "param.sfo")
+"""Where a PS4 game folder keeps the metadata naming its serial, relative to the folder."""
+_SFO_MAGIC = b"\x00PSF"
+"""The four bytes an SFO starts with."""
+_SFO_HEADER_BYTES = 0x14
+"""The fixed header before an SFO's index: magic, version, the two table offsets and the entry count."""
+_SFO_ENTRY_BYTES = 16
+"""One SFO index entry: the key offset, the value's format and length, and the value offset."""
+_SFO_MAX_BYTES = 64 * 1024
+"""Most of a `param.sfo` that is read. A real one is a few kilobytes; the file comes from the library."""
+_SFO_KEY_MAX_BYTES = 32
+"""Most of a key name that is compared, since keys are NUL-terminated rather than sized."""
+_SFO_VALUE_MAX_BYTES = 64
+"""Most of a value that is read: a serial is nine characters, and the length field is the file's word."""
+_TITLE_ID_KEY = b"TITLE_ID"
+"""The SFO key holding a PS4 game's serial, such as `CUSA12345`."""
 
 SHADPS4_CONFIG_PATH = DATA_DIR / "config.json"
 """shadPS4's own config file, `config.json` under `DATA_DIR`.
@@ -1199,6 +1217,86 @@ def _clear_stale_save_data(savedata_root: Path) -> None:
         log.info("shadps4: cleared %d stale save entries before the restore", cleared)
 
 
+def _sfo_title_id(sfo: Path) -> Optional[str]:
+    """Read the `TITLE_ID` out of a PS4 `param.sfo`.
+
+    An SFO is a fixed header, then an index of fixed-size entries, then a key
+    table and a value table the entries give offsets into. Only the first
+    `_SFO_MAX_BYTES` are read and every offset is treated as a hint: a short
+    or overlong slice reads as no id rather than as an error, since this file
+    is whatever the library holds.
+
+    Args:
+        sfo: The `param.sfo` to read.
+
+    Returns:
+        The id as the file spells it, or None when the file cannot be read,
+        is not an SFO, names no title id, or holds an empty one.
+    """
+    try:
+        with open(sfo, "rb") as fh:
+            data = fh.read(_SFO_MAX_BYTES)
+    except OSError as exc:
+        log.debug("shadps4: could not read %s for the game serial: %s", sfo, exc)
+        return None
+    if len(data) < _SFO_HEADER_BYTES or data[:4] != _SFO_MAGIC:
+        return None
+    key_start = int.from_bytes(data[0x08:0x0C], "little")
+    value_start = int.from_bytes(data[0x0C:0x10], "little")
+    declared = int.from_bytes(data[0x10:0x14], "little")
+    for index in range(min(declared, (len(data) - _SFO_HEADER_BYTES) // _SFO_ENTRY_BYTES)):
+        off = _SFO_HEADER_BYTES + index * _SFO_ENTRY_BYTES
+        entry = data[off : off + _SFO_ENTRY_BYTES]
+        key_off = key_start + int.from_bytes(entry[0:2], "little")
+        value_len = int.from_bytes(entry[4:8], "little")
+        value_off = value_start + int.from_bytes(entry[12:16], "little")
+        if data[key_off : key_off + _SFO_KEY_MAX_BYTES].split(b"\0", 1)[0] != _TITLE_ID_KEY:
+            continue
+        value = data[value_off : value_off + min(value_len, _SFO_VALUE_MAX_BYTES)]
+        # An offset past the slice leaves nothing, which is no id rather than "".
+        return value.split(b"\0", 1)[0].decode("ascii", "replace") or None
+    return None
+
+
+def _game_serial(rom_file: Path) -> Optional[str]:
+    """The serial of the game this launch boots, from the game's own metadata.
+
+    shadPS4 names a save folder for the serial in `sce_sys/param.sfo`, so that
+    file is what says which title a session's saves belong to. A `.pkg` or an
+    archive is still packed at preflight and a `.zar` holds nothing readable
+    from here, so those launches have no serial to offer.
+
+    The file is held to the same rule as every other path this module opens
+    off a ROM: a regular file resolving inside the library root. A library
+    that carries a FIFO, a device or a symlink out of the tree would
+    otherwise block the activate thread or read a host file, and either
+    `sce_sys` or `param.sfo` could be the link.
+
+    Args:
+        rom_file: The boot target `resolve_rom_file` returned: a game folder,
+            its `eboot.bin`, or a packed format.
+
+    Returns:
+        The serial as `param.sfo` spells it, or None.
+    """
+    if rom_file.is_dir():
+        folder = rom_file
+    elif rom_file.name.lower() == _BOOT_NAME:
+        folder = rom_file.parent
+    else:
+        return None
+    sfo = folder.joinpath(*_PARAM_SFO_REL)
+    try:
+        root_real = settings.rom_root()
+    except OSError as exc:
+        log.debug("shadps4: could not resolve the ROM root to check %s: %s", sfo, exc)
+        return None
+    if not _is_safe_extracted_member(sfo, root_real):
+        log.debug("shadps4: %s is not a regular file inside %s, so no serial is read", sfo, root_real)
+        return None
+    return _sfo_title_id(sfo)
+
+
 def _refuse(member: imports.ImportMember, reason: str, detail: str) -> imports.ImportRefusal:
     """Refuse a member with the shadPS4 shape in the message.
 
@@ -1266,7 +1364,7 @@ def _unmatched(member: imports.ImportMember, below: tuple[str, ...]) -> imports.
 
 
 def _place_save(
-    member: imports.ImportMember, *, max_component_bytes: int
+    member: imports.ImportMember, session: imports.SessionIdentity, *, max_component_bytes: int
 ) -> Union[imports.Placement, imports.ImportRefusal]:
     """File a save under the default user, whatever user it was collected from.
 
@@ -1274,8 +1372,15 @@ def _place_save(
     save may not. Everything below it keeps the member's spelling: the filesystem is case
     sensitive, and so is `SAVE00`.
 
+    A save names the title it belongs to, so it is held to the session's when
+    the session has one: the exit dump ships the whole savedata subtree, and
+    another title's folder placed here would leave in this rom's archive and
+    come back with it. A session whose serial is unknown compares nothing, as
+    it always has.
+
     Args:
         member: The member.
+        session: The session's identity.
         max_component_bytes: The longest name the filesystem stores.
 
     Returns:
@@ -1285,6 +1390,16 @@ def _place_save(
     found = imports.match_anchored(below, wrappers=((),), levels=(_SERIAL,), min_tail=2)
     if found is None:
         return _unmatched(member, below)
+    refusal = imports.check_member_identity(
+        member,
+        imports.NORMALISERS["ps_serial_nodash"](found.ids[0]),
+        session,
+        family="ps_serial_nodash",
+        policy="strict",
+        expected=_EXPECTED,
+    )
+    if refusal is not None:
+        return refusal
     dest = imports.build_dest(
         SAVEDATA_SUBTREE,
         (found.ids[0].upper(),),
@@ -1411,12 +1526,23 @@ class Shadps4(Emulator):
         Args:
             member: The member, already past the kind gate.
             spec: This emulator's spec.
-            ctx: The launch context, which this hook does not need: the serial is in the path.
+            ctx: The launch context, for the session's serial.
 
         Returns:
             The placement, or a refusal.
         """
-        return _place_save(member, max_component_bytes=spec.max_component_bytes)
+        return _place_save(
+            member, imports.identity_for(self, ctx), max_component_bytes=spec.max_component_bytes
+        )
+
+    def identity_source(self) -> Optional[imports.IdentitySource]:
+        """Take the session's serial from the game's `param.sfo`, then from RomM's title id.
+
+        Returns:
+            A `ps_serial_nodash` source reading the boot target's metadata,
+            which is the shape RomM writes a PS4 id in as well.
+        """
+        return imports.IdentitySource("ps_serial_nodash", rom_reader=_game_serial)
 
     def resolve_rom_file(self, path: Path) -> Optional[Path]:
         """The path shadPS4 should boot for `path`.
