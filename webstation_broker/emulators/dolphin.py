@@ -19,6 +19,7 @@ from threading import Thread
 from typing import Any, Optional, Union
 
 from .. import imports
+from . import wii_nand
 from .base import Emulator, base_launch_env, xdg_config_dir, xdg_data_dir
 
 log = logging.getLogger(__name__)
@@ -148,9 +149,6 @@ _STATE_EXPECTED = "one Dolphin state, <game id>.sNN, opening with the id of the 
 _GCI_EXPECTED = "a GameCube save, <USA|EUR|JAP>/Card A/<name>.gci"
 """What a GameCube `save` or `memcard` member must look like, for refusals."""
 
-_NAND_EXPECTED = "a Wii save, title/<00010000|00010001|00010004>/<title id>/data/..."
-"""What a Wii `save` member must look like, for refusals."""
-
 _GC_WRAPPERS: tuple[tuple[str, ...], ...] = (("saves", "dolphin-emu", "User", "GC"), ("GC",), ())
 """Leading folders a GCI may arrive under, longest first: a user-folder copy's `GC`, `GC`, or none."""
 
@@ -177,15 +175,6 @@ _GCI_CODE_LEN = 4
 
 _CARD_IMAGE_SUFFIXES = (".raw", ".mcd", ".gcp")
 """Whole memory card images, whose saves have to be exported as GCIs before a folder card reads them."""
-
-_NAND_TITLE_RE = re.compile(r"title", re.ASCII)
-"""The NAND folder every installed title's data sits under."""
-
-_NAND_HIGH_RE = re.compile(r"0001000[014]", re.ASCII)
-"""A title id's high half for a title with player saves: a disc, a channel, or a disc with a channel."""
-
-_NAND_LOW_RE = re.compile(r"[0-9A-Fa-f]{8}", re.ASCII)
-"""A title id's low half: the four-character game code, in hex."""
 
 _PROTECTED = (
     f"{STATE_DIR.name}/{_UNDO_BUFFER_NAME}",
@@ -782,87 +771,6 @@ def _restamp_slot(filename: str, slot: int) -> Optional[str]:
     return f"{match.group('game')}.s{slot:02d}"
 
 
-def _unwrap(parts: tuple[str, ...], wrappers: tuple[tuple[str, ...], ...]) -> tuple[str, ...]:
-    """Strip the first wrapper a member path arrived under.
-
-    A wrapper is only stripped when something is left below it, so a file
-    named like a wrapper folder is not emptied away.
-
-    Args:
-        parts: The member's components.
-        wrappers: Candidate leading folders, longest first.
-
-    Returns:
-        The components below the wrapper, or `parts` when none matched.
-    """
-    for wrapper in wrappers:
-        if len(parts) > len(wrapper) and parts[: len(wrapper)] == wrapper:
-            return parts[len(wrapper):]
-    return parts
-
-
-def _is_nand_system(rest: tuple[str, ...]) -> bool:
-    """Tell whether a NAND path is system or install data rather than a title's save.
-
-    Such a path is placed as named, so the plan check refuses it against
-    `_PROTECTED` as emulator configuration, which tells the player more
-    than a layout refusal would.
-
-    Args:
-        rest: The path's components below `Wii`.
-
-    Returns:
-        True under `sys` or `ticket`, a system title (`title/00000001`), or a title's `content`.
-    """
-    if rest[0] in ("sys", "ticket") and len(rest) > 1:
-        return True
-    if rest[:2] == ("title", "00000001") and len(rest) > 2:
-        return True
-    return (
-        rest[0] == "title"
-        and len(rest) > 4
-        and rest[3] == "content"
-        and all(_NAND_LOW_RE.fullmatch(p) for p in rest[1:3])
-    )
-
-
-def _nand_leaf_refusal(member: imports.ImportMember) -> imports.ImportRefusal:
-    """Refuse a Wii member that is not under a title's `data` folder, naming what it looks like.
-
-    Args:
-        member: The member.
-
-    Returns:
-        A conversion refusal for an SD-card export, a source refusal for a
-        whole NAND dump, and a layout refusal for anything else.
-    """
-    leaf = member.parts[-1].lower()
-    if leaf == "data.bin":
-        return imports.ImportRefusal(
-            "needs_conversion",
-            member.name,
-            _NAND_EXPECTED,
-            detail=(
-                "a Wii SD-card export; import it with Dolphin's Import Wii Save, then send the title folder"
-            ),
-        )
-    if leaf == "nand.bin":
-        return imports.ImportRefusal(
-            "source_incompatible",
-            member.name,
-            _NAND_EXPECTED,
-            detail="a whole NAND dump; send the title folder from it instead",
-        )
-    if leaf.endswith(".gci"):
-        return imports.ImportRefusal(
-            "unrecognised_layout",
-            member.name,
-            _NAND_EXPECTED,
-            detail="a GameCube save; a Wii session takes NAND title saves",
-        )
-    return imports.ImportRefusal("unrecognised_layout", member.name, _NAND_EXPECTED)
-
-
 def _place_state(
     member: imports.ImportMember, session: imports.SessionIdentity, rom_file: Optional[Path]
 ) -> Union[imports.Placement, imports.ImportRefusal]:
@@ -943,11 +851,9 @@ def _place_nand(
 ) -> Union[imports.Placement, imports.ImportRefusal]:
     """Place a file of a Wii title's save under `Wii/title/<high>/<low>/data`.
 
+    The rules are `wii_nand.place_nand`'s, which RetroArch's Wii platform shares.
     The path is found below at most one wrapper: a user-folder copy's
-    `saves/dolphin-emu/User/Wii`, `Wii`, or nothing. A title reads its
-    save from the folder named for its own id, so the title is held strictly
-    to the session's game. System and install data is placed as named, for
-    the plan check to refuse as protected.
+    `saves/dolphin-emu/User/Wii`, `Wii`, or nothing.
 
     Args:
         member: The member.
@@ -956,38 +862,7 @@ def _place_nand(
     Returns:
         The placement, or a refusal.
     """
-    rest = _unwrap(member.parts, _WII_WRAPPERS)
-    if _is_nand_system(rest):
-        dest = imports.build_dest("Wii", (), rest, member=member, expected=_NAND_EXPECTED)
-        if isinstance(dest, imports.ImportRefusal):
-            return dest
-        return imports.Placement(member, dest)
-    found = imports.match_anchored(
-        rest, wrappers=((),), levels=(_NAND_TITLE_RE, _NAND_HIGH_RE, _NAND_LOW_RE), min_tail=2
-    )
-    if found is None or found.tail[0] != "data":
-        return _nand_leaf_refusal(member)
-    refusal = imports.check_member_identity(
-        member,
-        imports.NORMALISERS["gc_wii_disc"](found.ids[2]),
-        session,
-        family="gc_wii_disc",
-        policy="strict",
-        expected=_NAND_EXPECTED,
-    )
-    if refusal is not None:
-        return refusal
-    # Dolphin writes the NAND's id folders in lower case.
-    dest = imports.build_dest(
-        "Wii",
-        ("title", found.ids[1], found.ids[2].lower()),
-        found.tail,
-        member=member,
-        expected=_NAND_EXPECTED,
-    )
-    if isinstance(dest, imports.ImportRefusal):
-        return dest
-    return imports.Placement(member, dest)
+    return wii_nand.place_nand(member, session, subtree="Wii", wrappers=_WII_WRAPPERS)
 
 
 def _place_gci(
@@ -1507,10 +1382,7 @@ class Dolphin(Emulator):
             )
         if self.platform == _WII_PLATFORM:
             return imports.ImportSpec(
-                kinds=(
-                    imports.KindSpec("save", ("title/<00010000|00010001|00010004>/<title id>/data/...",)),
-                    state,
-                ),
+                kinds=(imports.KindSpec("save", (wii_nand.SAVE_SHAPE,)), state),
                 state_channel="archive",
                 protected=_PROTECTED,
             )
