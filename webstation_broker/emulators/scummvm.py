@@ -219,7 +219,7 @@ OpenGL renderer mis-scales the pointer, explained in the module docstring.
 ScummVM's own fullscreen would cost, so `_pins` adds them on top of these.
 """
 
-_SAVE_NAME_RE = re.compile(r"^(?P<stem>[^/\\.]+)\.(?P<ext>s\d{2,3}|\d{3})$")
+_SAVE_NAME_RE = re.compile(r"(?P<stem>[^/\\.]+)\.(?P<ext>s\d{2,3}|\d{3})", re.ASCII)
 """A ScummVM save filename: the target, then the slot as `.sNN` or `.NNN`.
 
 Which of the two forms an engine writes is the engine's business, so both are
@@ -1395,7 +1395,7 @@ class Scummvm(Emulator):
             The path to write to, or None when the name is not a ScummVM save
             name or nothing has booted to name it after.
         """
-        match = _SAVE_NAME_RE.match(filename)
+        match = _SAVE_NAME_RE.fullmatch(filename)
         if match is None:
             return None
         if self._target is None:

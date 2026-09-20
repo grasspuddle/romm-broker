@@ -15,11 +15,11 @@ import socket as _socket
 import struct
 import time
 from collections.abc import Iterable
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from threading import Thread
-from typing import Any, Optional
+from typing import Any, Optional, Union
 
-from .. import memcard
+from .. import imports, memcard
 from .base import Emulator, base_launch_env, xdg_config_dir
 
 log = logging.getLogger(__name__)
@@ -80,7 +80,7 @@ MEMCARD_DIR = DATA_DIR / "memcards"
 """Directory PCSX2 keeps its memory cards in, `memcards` under `DATA_DIR`."""
 _DEFAULT_SLOT1_CARD = "romm-slot1"
 """Card name used when the environment names none, or names one the broker will not carry."""
-_CARD_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 ._-]{0,63}$")
+_CARD_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9 ._-]{0,63}", re.ASCII)
 """Card names the broker accepts: one path component, and safe as an ini value."""
 
 
@@ -99,7 +99,7 @@ def _slot1_card_name(raw: str) -> str:
     Returns:
         `raw` when it is a single safe path component, otherwise `_DEFAULT_SLOT1_CARD`.
     """
-    if _CARD_NAME_RE.match(raw):
+    if _CARD_NAME_RE.fullmatch(raw):
         return raw
     log.warning(
         "PCSX2_SLOT1_CARD %r is not a usable card name, falling back to %s",
@@ -123,6 +123,21 @@ PCSX2 only counts a directory as a folder card once this file is inside it,
 and skips the directory entirely otherwise, which leaves the slot reading as
 missing with nowhere for the game to save.
 """
+
+_CARD_EXPECTED = f"a folder memory card: <card>/{SLOT1_MARKER} and its game folders"
+"""The `expected` text on the refusals PCSX2's own hooks give a card member."""
+
+_CARD_IMAGE_SUFFIXES = (".ps2", ".mc2", ".mcd", ".mcr", ".bin", ".max", ".psu", ".cbs", ".xps", ".sps")
+"""Suffixes of a lone file that is a card image or a single-save export, never a folder card.
+
+`.ps2`, `.mc2`, `.mcd`, `.mcr` and `.bin` hold a whole card as one image;
+`.max`, `.psu`, `.cbs`, `.xps` and `.sps` hold one game's save, as a save
+manager exports it. Either has to be made into a folder card before it can
+be the slot-1 card.
+"""
+
+_ONE_CARD = "one folder card per archive"
+"""The `expected` text on a refusal for a second card, or for one beside the archive's own."""
 
 PINE_WAIT = float(os.environ.get("PINE_WAIT", "20.0"))
 """Seconds a save state has to land on disk after the PINE save command (env `PINE_WAIT`, default 20)."""
@@ -415,7 +430,7 @@ def _matches_slot(p: Path, slot: int) -> bool:
     return p.name.endswith(f".{slot:02d}.p2s") or p.name.endswith(f".{slot}.p2s")
 
 
-_STATE_NAME_RE = re.compile(r"^(?P<serial>[^/]+)\.\d{1,2}\.p2s$")
+_STATE_NAME_RE = re.compile(r"(?P<serial>[^/]+)\.\d{1,2}\.p2s", re.ASCII)
 """Matches `<serial> (<crc>).<slot>.p2s`, the name PCSX2 builds for a save state.
 
 The serial is what ties the file to a disc, the slot is just which of the ten
@@ -424,7 +439,7 @@ directories is not a state name here whatever else checks it.
 """
 
 
-_STATE_CRC_RE = re.compile(r"\s*\([0-9A-Fa-f]+\)$")
+_STATE_CRC_RE = re.compile(r"\s*\([0-9A-Fa-f]+\)$", re.ASCII)
 """The `(<crc>)` suffix PCSX2 appends to the serial in a state name."""
 
 
@@ -438,7 +453,7 @@ def _state_serial(filename: str) -> Optional[str]:
         The serial with PCSX2's CRC suffix stripped, or None when `filename` is
         not a state name or names no serial.
     """
-    match = _STATE_NAME_RE.match(filename)
+    match = _STATE_NAME_RE.fullmatch(filename)
     if match is None:
         return None
     return _STATE_CRC_RE.sub("", match.group("serial")).strip() or None
@@ -459,10 +474,63 @@ def _restamp_slot(filename: str, slot: int) -> Optional[str]:
     Returns:
         The same state named for `slot`, or None if `filename` is not a state name.
     """
-    match = _STATE_NAME_RE.match(filename)
+    match = _STATE_NAME_RE.fullmatch(filename)
     if match is None:
         return None
     return f"{match.group('serial')}.{slot:02d}.p2s"
+
+
+def _card_parts(parts: tuple[str, ...]) -> tuple[str, ...]:
+    """Drop the `memcards/` wrapper a copy of PCSX2's data folder leaves around a card.
+
+    A lone file named `memcards` is no wrapper and is kept. After the drop,
+    `memcards/x.ps2` is the single file `x.ps2`, a card image, not a card
+    folder named `memcards`.
+
+    Args:
+        parts: A member's path components below `.import/<kind>/`.
+
+    Returns:
+        The components from the card's own folder down.
+    """
+    return parts[1:] if len(parts) > 1 and parts[0] == MEMCARD_DIR.name else parts
+
+
+def _place_card(member: imports.ImportMember) -> Union[imports.Placement, imports.ImportRefusal]:
+    """Place one file of a folder memory card inside the broker's slot-1 card.
+
+    The card's own folder, whatever it was called, is replaced by
+    `SLOT1_CARD_NAME`, so the card lands where PCSX2 mounts Slot 1. A lone
+    file has no card folder above it: a known suffix makes it a card image or
+    a single-save export, and anything else is no card at all.
+
+    Args:
+        member: The member.
+
+    Returns:
+        The placement, or a refusal.
+    """
+    card_parts = _card_parts(member.parts)
+    if len(card_parts) == 1:
+        if card_parts[0].lower().endswith(_CARD_IMAGE_SUFFIXES):
+            return imports.ImportRefusal(
+                "needs_conversion",
+                member.name,
+                _CARD_EXPECTED,
+                detail="a card image or a single-save export; send the folder card instead",
+            )
+        return imports.ImportRefusal(
+            "unrecognised_layout",
+            member.name,
+            _CARD_EXPECTED,
+            detail=f"expected a folder card: <card>/{SLOT1_MARKER} and its game folders",
+        )
+    dest = imports.build_dest(
+        MEMCARD_DIR.name, (SLOT1_CARD_NAME,), card_parts[1:], member=member, expected=_CARD_EXPECTED
+    )
+    if isinstance(dest, imports.ImportRefusal):
+        return dest
+    return imports.Placement(member, dest)
 
 
 def _holds_open(pid: Optional[int], path: Path) -> bool:
@@ -760,10 +828,13 @@ class Pcsx2(Emulator):
     into the broker's slot and the working slot is cleared before a boot, to
     stop the previous session's state being served as this one's.
 
+    Declared imports take one folder memory card, under `save` or
+    `memcard`; states go to the push route. See `import_spec`.
+
     Attributes:
         name: RomM platform key, `pcsx2`.
         display_name: Human-readable name shown in the UI.
-        save_root: The PCSX2 config root the save subtrees hang off.
+        save_root: PCSX2's data root (`DATA_DIR`), which the save subtrees hang off.
         save_subtrees: `memcards` and `sstates`, the directories the save archive carries.
         memory_card_subtree: Subtree the whole-card routes operate on.
         memory_card_marker: File whose presence makes PCSX2 treat a directory as a folder card.
@@ -780,7 +851,7 @@ class Pcsx2(Emulator):
     name = "pcsx2"
     display_name = "PCSX2"
     clears_stale_saves = True
-    save_root = Path("/config/.config/PCSX2")
+    save_root = DATA_DIR
     save_subtrees = ("memcards", "sstates")
     state_subtrees = ("sstates",)
     memory_card_subtree = "memcards"
@@ -1071,18 +1142,130 @@ class Pcsx2(Emulator):
             filename: The basename RomM is pushing.
 
         Returns:
-            The path to write to, or None when the name is not a state name, carries a path
-            component, or does not match the state already in the slot.
+            The path to write to, or None when the name is not a plain, printable basename, is not
+            a state name, names another game than the session's, or does not match the state
+            already in the slot.
         """
-        if "/" in filename or filename in ("", ".", ".."):
+        if not imports.check_state_basename(filename):
             return None
         restamped = _restamp_slot(filename, self.state_slot)
         if restamped is None:
+            return None
+        foreign = imports.foreign_id(_state_serial(restamped), self.import_identity, "ps_serial_dashed")
+        if foreign is not None and self.import_identity is not None:
+            log.warning(
+                "pcsx2: refusing pushed state %s, which names another game:"
+                " member %s, session %s (from %s)%s",
+                filename,
+                foreign,
+                self.import_identity.value,
+                self.import_identity.source,
+                imports.override_hint(self.import_identity),
+            )
             return None
         existing = self.state_path()
         if existing is not None:
             return existing if restamped == existing.name else None
         return SSTATE_DIR / restamped
+
+    def import_spec(self) -> imports.ImportSpec:
+        """Declare what PCSX2 takes: one folder memory card, as kind `save` or `memcard`.
+
+        Players call the card either, so both kinds take the same shape, and
+        the card lands as the broker's slot-1 card. States stay on the push
+        route, which restamps them into `state_slot`. A folder card holds
+        every game's saves, so no member is held to the session's serial.
+
+        Returns:
+            The spec.
+        """
+        card = (f"<card>/{SLOT1_MARKER} and its game folders",)
+        return imports.ImportSpec(
+            kinds=(imports.KindSpec("save", card), imports.KindSpec("memcard", card)),
+            state_channel="push",
+            card_subtree=self.memory_card_subtree,
+        )
+
+    def place_import(
+        self, member: imports.ImportMember, spec: imports.ImportSpec, ctx: imports.ImportCtx
+    ) -> Union[imports.Placement, imports.ImportRefusal]:
+        """Place one file of the declared folder card inside the broker's slot-1 card.
+
+        No member is held to the session's serial: one card holds many
+        games' saves, and a player's card rightly carries the others.
+
+        Args:
+            member: The member, already past the kind gate.
+            spec: This emulator's spec.
+            ctx: The launch context.
+
+        Returns:
+            The placement, or a refusal.
+        """
+        return _place_card(member)
+
+    def validate_import_plan(
+        self, plan: list[imports.Placement], ctx: imports.ImportCtx
+    ) -> list[imports.ImportRefusal]:
+        """Refuse an imported card that is not one whole folder card, alone in the archive.
+
+        Slot 1 mounts one card, so every member must come from one card
+        folder. The archive must not carry a `memcards/` card of its own: the
+        import would be merged into it, or leave it beside the slot-1 card,
+        mounted nowhere, with its saves out of play. PCSX2 skips a folder
+        with no `_pcsx2_superblock`, and an empty one is a card cut short.
+
+        The first of those checks that fails refuses every member the shared
+        one-member-per-destination check has not already refused. A member it
+        did refuse still counts toward the facts: two cards' superblocks
+        clash with each other, and are still two cards. With the card on its
+        own routes this session, `check_plan` has already refused every
+        member as `memcard_synced_separately`.
+
+        Args:
+            plan: The placements that passed every per-member check.
+            ctx: The launch context; its `archive_paths` are the archive's ordinary members.
+
+        Returns:
+            One refusal per card member the shared check left alone, or none.
+        """
+        if not plan or self.memory_card_subtree in ctx.excluded:
+            return []
+        conflicted = imports.destination_conflicts(plan, ctx.archive_paths, False)
+        live = [p for p in plan if p.member.name not in conflicted]
+        if not live:
+            return []
+        cards = MEMCARD_DIR.name
+        roots = sorted({_card_parts(p.member.parts)[0] for p in plan})
+        superblock = PurePosixPath(cards, SLOT1_CARD_NAME, SLOT1_MARKER)
+        sizes = [p.member.size for p in plan if p.dest == superblock]
+        problem: Optional[tuple[str, str, str]] = None
+        if len(roots) > 1:
+            problem = ("destination_conflict", _ONE_CARD, f"cards declared: {', '.join(roots)}")
+        elif any(PurePosixPath(rel).parts[:1] == (cards,) for rel in ctx.archive_paths):
+            # Keyed the way the shared check keys them: PurePosixPath drops `.`
+            # and empty components, so `./memcards/x` is under `memcards/`.
+            problem = ("destination_conflict", _ONE_CARD, f"the archive already carries a {cards}/ card")
+        elif not sizes:
+            problem = ("shape_unverified", _CARD_EXPECTED, f"no {SLOT1_MARKER}: not a whole folder card")
+        elif 0 in sizes:
+            problem = ("incomplete_unit", _CARD_EXPECTED, f"the card's {SLOT1_MARKER} is empty")
+        if problem is None:
+            return []
+        reason, expected, detail = problem
+        return [imports.ImportRefusal(reason, p.member.name, expected, detail=detail) for p in live]
+
+    def identity_source(self) -> Optional[imports.IdentitySource]:
+        """Take the session's serial from RomM, for the push route's check.
+
+        The broker never reads a serial off the disc, so RomM's `title_id` is
+        the only source. No imported member is held to it; a pushed state
+        named for another serial is refused.
+
+        Returns:
+            A PlayStation serial source with no rom reader.
+        """
+        return imports.IdentitySource("ps_serial_dashed")
 
     def save_and_exit(self, slot: Optional[int]) -> dict[str, Any]:
         """Save a state if asked, then stop the emulator.

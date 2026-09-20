@@ -14,7 +14,9 @@ import subprocess
 import time
 from collections.abc import Callable, Collection
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Optional, Union
+
+from .. import imports
 
 log = logging.getLogger(__name__)
 
@@ -80,6 +82,9 @@ X_DISPLAY = ":0"
 The container's own `DISPLAY` names the Xvfb server of the X11 image
 variant, which never starts in Wayland mode.
 """
+
+STATE_HEAD_BYTES = 64
+"""Bytes of a pushed state the push route hands `check_state_bytes`."""
 
 
 def _xdg_dir(app: str, var: str, fallback: str) -> Path:
@@ -836,7 +841,13 @@ class Emulator:
         by the next one, so it never outlives the state it was taken with.
         """
 
-    def _spawn(self, cmd: list[str], env: dict[str, str], stdin_pipe: bool = False) -> None:
+    def _spawn(
+        self,
+        cmd: list[str],
+        env: dict[str, str],
+        stdin_pipe: bool = False,
+        stdin_tty: bool = False,
+    ) -> None:
         """Start the app in its own process group with output captured.
 
         A launch banner and then the child's stdout and stderr are appended to
@@ -848,13 +859,19 @@ class Emulator:
             env: The environment to run it in, normally `base_launch_env()`.
             stdin_pipe: Keep the child's stdin as a pipe so emulators with a
                 stdin control protocol (shadPS4 IPC) can be driven headlessly.
+            stdin_tty: Give the child a pseudo-terminal for stdin, for apps
+                that print an error to stdout and exit when stdin is a
+                terminal but raise a blocking dialog when it is not (Xenia).
 
         Raises:
+            ValueError: When both `stdin_pipe` and `stdin_tty` are set.
             OSError: When the process started but its pid could not be
                 recorded. The process is killed first: an emulator no record
                 names outlives the next broker restart with nothing able to
                 find it, so the launch fails rather than leaving one behind.
         """
+        if stdin_pipe and stdin_tty:
+            raise ValueError("stdin_pipe and stdin_tty are mutually exclusive")
         try:
             log_fh = open(self.log_path, "ab", buffering=0)
             log_fh.write(
@@ -868,18 +885,30 @@ class Emulator:
                 exc,
             )
             log_fh = None
+        tty_fds: tuple[int, ...] = ()
         try:
+            stdin: Optional[int] = subprocess.PIPE if stdin_pipe else None
+            if stdin_tty:
+                tty_fds = os.openpty()
+                stdin = tty_fds[1]
             self._proc = subprocess.Popen(
                 cmd,
                 env=env,
-                stdin=subprocess.PIPE if stdin_pipe else None,
+                stdin=stdin,
                 stdout=log_fh if log_fh else subprocess.DEVNULL,
                 stderr=subprocess.STDOUT if log_fh else subprocess.DEVNULL,
+                # The child keeps the pty master open itself. Closing the last
+                # copy of a master hangs its terminal up, and isatty() on a
+                # hung-up terminal is false, so the broker dropping its copy
+                # below would otherwise undo the terminal it just handed over.
+                pass_fds=tty_fds[:1],
                 start_new_session=True,
             )
         finally:
             if log_fh:
                 log_fh.close()
+            for fd in tty_fds:
+                os.close(fd)
         try:
             _record_pid(
                 self.name, self._proc.pid, cmd, self.term_timeout, env.get(SESSION_TAG_ENV)
@@ -1249,6 +1278,72 @@ class Emulator:
         """
         return False
 
+    import_identity: Optional[imports.SessionIdentity] = None
+    """The game id this session runs as, set on every activate.
+
+    Preflight sets it when the archive has imports; `resolve_activate_identity`
+    sets it when it has none. The push route's identity checks read it.
+    """
+
+    def import_spec(self) -> imports.ImportSpec:
+        """What this emulator accepts as a declared import, on `self.platform`.
+
+        Returns:
+            The spec. The default accepts nothing, so every import member is
+            refused with `kind_not_accepted` before `place_import` is called.
+        """
+        return imports.ImportSpec()
+
+    def place_import(
+        self, member: imports.ImportMember, spec: imports.ImportSpec, ctx: imports.ImportCtx
+    ) -> Union[imports.Placement, imports.ImportRefusal]:
+        """Place one member that passed hygiene and the kind gate.
+
+        Must be pure: nothing is written, nothing is deleted, and the only
+        reads allowed are `member.head()` and the rom through `ctx`.
+
+        Args:
+            member: The member.
+            spec: This emulator's spec, as `import_spec` answered it.
+            ctx: The launch context.
+
+        Returns:
+            Where the member lands, or why it cannot. The default refuses.
+        """
+        return imports.ImportRefusal("kind_not_accepted", member.name, "no imports")
+
+    def validate_import_plan(
+        self, plan: list[imports.Placement], ctx: imports.ImportCtx
+    ) -> list[imports.ImportRefusal]:
+        """Check the placements together, after the shared checks.
+
+        Args:
+            plan: Every placement.
+            ctx: The launch context.
+
+        Returns:
+            Any refusals. The default has none.
+        """
+        return []
+
+    def identity_source(self) -> Optional[imports.IdentitySource]:
+        """Where this emulator's session identity comes from.
+
+        Returns:
+            The source, or None when the emulator checks no identity.
+        """
+        return None
+
+    @property
+    def restore_subtrees(self) -> tuple[str, ...]:
+        """The subtrees an archive may restore into, read before the working slot is cleared.
+
+        Returns:
+            `save_subtrees` by default. An emulator whose `save_subtrees`
+            depends on state the clear sets overrides this.
+        """
+        return self.save_subtrees
+
     def state_target(self, filename: str) -> Optional[Path]:
         """Where a pushed state called `filename` belongs.
 
@@ -1267,6 +1362,21 @@ class Emulator:
             nothing.
         """
         return None
+
+    def check_state_bytes(self, head: bytes) -> bool:
+        """Tell whether a pushed state may be written for this session, going by its first bytes.
+
+        The push route calls this once the whole body is in, before the state
+        replaces the slot's. The base takes every state: only an emulator
+        whose states open with the id of the game they belong to can tell.
+
+        Args:
+            head: Up to `STATE_HEAD_BYTES` bytes from the start of the pushed state.
+
+        Returns:
+            False when the state provably belongs to another game.
+        """
+        return True
 
     def wait_for_state(self, deadline: float, poll: float = 0.5) -> bool:
         """Block until the working slot holds a state file, or `deadline` passes.

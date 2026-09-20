@@ -8,17 +8,20 @@ import os
 import struct
 import time
 from collections.abc import Callable
-from pathlib import Path
-from typing import Optional
+from pathlib import Path, PurePosixPath
+from typing import Any, Optional
 
 import pytest
 
+from webstation_broker import imports
 from webstation_broker.emulators import pcsx2
+
+from .conftest import import_zip, preflight_import, restore_import
 
 
 @pytest.fixture
 def sstate_dir(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
-    """Point the PCSX2 state directory at a fresh directory under tmp_path.
+    """Point the PCSX2 state and memcard directories under tmp_path.
 
     Args:
         monkeypatch: The pytest monkeypatch fixture.
@@ -30,8 +33,9 @@ def sstate_dir(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
     d = tmp_path / "sstates"
     d.mkdir()
     monkeypatch.setattr(pcsx2, "SSTATE_DIR", d)
-    # The save subtrees hang off the config root, which the class resolves once
-    # at import, so the clear would reach outside tmp_path without this.
+    monkeypatch.setattr(pcsx2, "MEMCARD_DIR", tmp_path / "memcards")
+    # The save subtrees hang off the data root, which the class reads once at
+    # import, so the clear would reach outside tmp_path without this.
     monkeypatch.setattr(pcsx2.Pcsx2, "save_root", tmp_path)
     return d
 
@@ -153,10 +157,40 @@ def test_state_target_refuses_another_disc_over_the_state_in_the_slot(
     assert pcsx2.Pcsx2().state_target("SLES-51234 (00000000).01.p2s") is None
 
 
-@pytest.mark.parametrize("filename", ["../escape.01.p2s", "", ".", "..", "card.bin"])
+@pytest.mark.parametrize(
+    "filename",
+    [
+        "../escape.01.p2s",
+        "",
+        ".",
+        "..",
+        "card.bin",
+        "SLUS-20946.\u0660\u0661.p2s",
+        "SLUS-20946.01.p2s\n",
+        " .01.p2s",
+    ],
+)
 def test_state_target_refuses_a_name_pcsx2_would_never_write(sstate_dir: Path, filename: str) -> None:
-    """A push whose name PCSX2 would never write is refused."""
+    """A push whose name PCSX2 would never write is refused.
+
+    Args:
+        sstate_dir: The patched state directory.
+        filename: The pushed name.
+    """
     assert pcsx2.Pcsx2().state_target(filename) is None
+
+
+@pytest.mark.parametrize("raw", ["card\n", "card\nSlot2_Filename=x", "c\u0430rd"])
+def test_a_card_name_with_a_line_break_or_non_ascii_falls_back(raw: str) -> None:
+    """`$` matched before a trailing newline, which would have reached the ini as a new line.
+
+    The non-ASCII case already fell back, because the character class is spelled out as ASCII; it
+    pins that behaviour.
+
+    Args:
+        raw: The `PCSX2_SLOT1_CARD` value.
+    """
+    assert pcsx2._slot1_card_name(raw) == "romm-slot1"
 
 
 def test_clearing_the_slot_takes_every_state_not_just_the_broker_slot(
@@ -545,6 +579,12 @@ def test_the_broker_directories_all_sit_under_the_data_root() -> None:
     assert pcsx2.MEMCARD_DIR == pcsx2.DATA_DIR / "memcards"
 
 
+def test_the_save_root_is_the_data_root_the_subtrees_hang_off() -> None:
+    """Restore and imports aim at the tree PCSX2 reads, wherever `XDG_CONFIG_HOME` puts it."""
+    assert pcsx2.Pcsx2.save_root == pcsx2.DATA_DIR
+    assert pcsx2.MEMCARD_DIR.parent == pcsx2.SSTATE_DIR.parent == pcsx2.Pcsx2.save_root
+
+
 def test_a_launch_sends_pcsx2_to_the_data_root_the_broker_uses(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -781,3 +821,406 @@ def test_a_state_that_cannot_be_stated_is_logged_not_swallowed(
         assert pcsx2.newest_state_for_slot(10) is None
 
     assert any("could not stat the state" in r.message for r in caplog.records)
+
+
+# -- declared imports --
+
+_ROMM_ID = imports.RomRef(1, "Game", "ps2", title_id="SLUS-20312")
+"""An activate's rom, carrying the serial RomM holds for it."""
+
+_SLOT1 = PurePosixPath("memcards", pcsx2.SLOT1_CARD_NAME)
+"""Where an imported card lands, relative to `save_root`: the broker's slot-1 card."""
+
+
+def _preflight(members: dict[str, bytes], **kwargs: Any) -> imports.PreflightResult:
+    """Preflight an archive of import members on a fresh PCSX2, with no rom file.
+
+    Args:
+        members: `.import/<kind>/...` names mapped to bytes.
+        **kwargs: Extra `preflight_import` arguments, such as `rom` or `excluded`.
+
+    Returns:
+        What preflight decided.
+    """
+    return preflight_import(pcsx2.Pcsx2(), import_zip(members), rom_file=None, **kwargs)
+
+
+@pytest.mark.parametrize(
+    "member",
+    [
+        ".import/save/mycard/_pcsx2_superblock",
+        ".import/memcard/mycard/_pcsx2_superblock",
+        ".import/save/memcards/mycard/_pcsx2_superblock",
+        ".import/memcard/Mcd001.ps2/_pcsx2_superblock",
+    ],
+)
+def test_a_folder_card_lands_as_the_slot_1_card(sstate_dir: Path, member: str) -> None:
+    """A card's own folder, whatever its name, becomes the broker's slot-1 card.
+
+    Either kind takes it, a `memcards/` wrapper is dropped, and a folder that
+    keeps PCSX2's `.ps2` card name is still a folder.
+
+    Args:
+        sstate_dir: The patched state directory; its fixture also points the save root at tmp_path.
+        member: The member's zip name.
+    """
+    result = _preflight({member: b"sb"})
+
+    assert result.refusals == ()
+    assert [p.dest for p in result.placements] == [_SLOT1 / pcsx2.SLOT1_MARKER]
+
+
+def test_a_card_lands_with_its_game_folders(sstate_dir: Path) -> None:
+    """Every file of the card keeps its place below the card's folder.
+
+    Args:
+        sstate_dir: The patched state directory; its fixture also points the save root at tmp_path.
+    """
+    result = _preflight(
+        {
+            ".import/save/mycard/_pcsx2_superblock": b"sb",
+            ".import/save/mycard/BASLUS-20312/BASLUS-20312": b"save",
+            ".import/save/mycard/BASLUS-20312/icon.sys": b"icon",
+        }
+    )
+
+    assert result.refusals == ()
+    assert sorted(p.dest for p in result.placements) == [
+        _SLOT1 / "BASLUS-20312" / "BASLUS-20312",
+        _SLOT1 / "BASLUS-20312" / "icon.sys",
+        _SLOT1 / pcsx2.SLOT1_MARKER,
+    ]
+
+
+def test_a_card_holding_another_games_saves_is_taken(sstate_dir: Path) -> None:
+    """One card holds every game's saves, so a folder for another serial is no mismatch.
+
+    Args:
+        sstate_dir: The patched state directory; its fixture also points the save root at tmp_path.
+    """
+    result = _preflight(
+        {
+            ".import/save/mycard/_pcsx2_superblock": b"sb",
+            ".import/save/mycard/BESLES-50000/BESLES-50000": b"save",
+        },
+        rom=_ROMM_ID,
+    )
+
+    assert result.refusals == ()
+
+
+@pytest.mark.parametrize(
+    "member",
+    [
+        ".import/save/card.ps2",
+        ".import/save/Card.PS2",
+        ".import/memcard/Mcd001.mcd",
+        ".import/save/x.max",
+        ".import/save/x.psu",
+        ".import/memcard/memcards/x.ps2",
+    ],
+)
+def test_a_card_image_or_a_single_save_export_needs_converting(sstate_dir: Path, member: str) -> None:
+    """A lone file is a whole card as one image, or one game's export, and the slot-1 card is a folder.
+
+    Args:
+        sstate_dir: The patched state directory; its fixture also points the save root at tmp_path.
+        member: The member's zip name.
+    """
+    result = _preflight({member: b"card"})
+
+    assert [(r.reason, r.detail) for r in result.refusals] == [
+        ("needs_conversion", "a card image or a single-save export; send the folder card instead")
+    ]
+
+
+@pytest.mark.parametrize(
+    "member",
+    [
+        ".import/save/_pcsx2_superblock",
+        ".import/memcard/notes.txt",
+        ".import/save/memcards/_pcsx2_superblock",
+    ],
+)
+def test_a_lone_file_that_is_no_card_is_not_recognised(sstate_dir: Path, member: str) -> None:
+    """A single file with no card folder above it is no card, and no known card image either.
+
+    A card folder named `memcards` reads as the wrapper around one, so its
+    superblock is a lone file too.
+
+    Args:
+        sstate_dir: The patched state directory; its fixture also points the save root at tmp_path.
+        member: The member's zip name.
+    """
+    result = _preflight({member: b"sb"})
+
+    assert [(r.reason, r.detail) for r in result.refusals] == [
+        ("unrecognised_layout", "expected a folder card: <card>/_pcsx2_superblock and its game folders")
+    ]
+
+
+def test_two_cards_in_one_archive_are_refused(sstate_dir: Path) -> None:
+    """Slot 1 mounts one card, so members from two card folders cannot all land in it.
+
+    Args:
+        sstate_dir: The patched state directory; its fixture also points the save root at tmp_path.
+    """
+    result = _preflight(
+        {
+            ".import/save/cardA/_pcsx2_superblock": b"sb",
+            ".import/memcard/cardB/BASLUS-20312/BASLUS-20312": b"save",
+        }
+    )
+
+    detail = "cards declared: cardA, cardB"
+    assert sorted((r.member, r.reason, r.detail) for r in result.refusals) == [
+        (".import/memcard/cardB/BASLUS-20312/BASLUS-20312", "destination_conflict", detail),
+        (".import/save/cardA/_pcsx2_superblock", "destination_conflict", detail),
+    ]
+
+
+def test_two_whole_cards_refuse_each_member_once(sstate_dir: Path) -> None:
+    """Two superblocks land on one file, which the shared check refuses; the card check skips them.
+
+    The game folders are still refused as a second card: a superblock
+    refused as a clash still counts toward the cards declared.
+
+    Args:
+        sstate_dir: The patched state directory; its fixture also points the save root at tmp_path.
+    """
+    result = _preflight(
+        {
+            ".import/save/cardA/_pcsx2_superblock": b"sb",
+            ".import/save/cardA/BASLUS-20312/BASLUS-20312": b"save",
+            ".import/save/cardB/_pcsx2_superblock": b"sb",
+            ".import/save/cardB/BESLES-50000/BESLES-50000": b"save",
+        }
+    )
+
+    same = ("destination_conflict", "another member lands on the same file")
+    two = ("destination_conflict", "cards declared: cardA, cardB")
+    assert sorted((r.member, r.reason, r.detail) for r in result.refusals) == [
+        (".import/save/cardA/BASLUS-20312/BASLUS-20312", *two),
+        (".import/save/cardA/_pcsx2_superblock", *same),
+        (".import/save/cardB/BESLES-50000/BESLES-50000", *two),
+        (".import/save/cardB/_pcsx2_superblock", *same),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("archived", "detail"),
+    [
+        ("memcards/othercard/_pcsx2_superblock", "the archive already carries a memcards/ card"),
+        (f"memcards/{pcsx2.SLOT1_CARD_NAME}/_pcsx2_superblock", "another member lands on the same file"),
+    ],
+)
+def test_a_card_beside_the_archives_own_is_refused_once(sstate_dir: Path, archived: str, detail: str) -> None:
+    """An archive that already carries a card takes no imported one.
+
+    A card elsewhere under `memcards/` would sit beside the import, mounted
+    nowhere. The slot-1 card's own superblock is the same file as the
+    import's, which the shared check refuses, so the card check adds nothing.
+
+    Args:
+        sstate_dir: The patched state directory; its fixture also points the save root at tmp_path.
+        archived: The archive's own card member.
+        detail: The refusal's detail.
+    """
+    body = import_zip({".import/save/mycard/_pcsx2_superblock": b"sb"}, v1={archived: b"old"})
+
+    result = preflight_import(pcsx2.Pcsx2(), body, rom_file=None)
+
+    assert [(r.reason, r.detail) for r in result.refusals] == [("destination_conflict", detail)]
+
+
+def test_a_card_without_its_superblock_is_not_a_whole_card(sstate_dir: Path) -> None:
+    """PCSX2 skips a folder with no `_pcsx2_superblock`, so game folders alone are no card.
+
+    Args:
+        sstate_dir: The patched state directory; its fixture also points the save root at tmp_path.
+    """
+    result = _preflight({".import/save/mycard/BASLUS-20312/BASLUS-20312": b"save"})
+
+    assert [(r.reason, r.detail) for r in result.refusals] == [
+        ("shape_unverified", "no _pcsx2_superblock: not a whole folder card")
+    ]
+
+
+def test_a_card_with_an_empty_superblock_is_incomplete(sstate_dir: Path) -> None:
+    """An empty superblock is a card cut short in the copy.
+
+    Args:
+        sstate_dir: The patched state directory; its fixture also points the save root at tmp_path.
+    """
+    result = _preflight({".import/save/mycard/_pcsx2_superblock": b""})
+
+    assert [(r.reason, r.detail) for r in result.refusals] == [
+        ("incomplete_unit", "the card's _pcsx2_superblock is empty")
+    ]
+
+
+def test_a_card_synced_on_its_own_routes_is_refused_for_that_alone(sstate_dir: Path) -> None:
+    """With the card on the whole-card routes, an imported one is refused, and its shape is moot.
+
+    This card has no superblock, which would otherwise be `shape_unverified`.
+
+    Args:
+        sstate_dir: The patched state directory; its fixture also points the save root at tmp_path.
+    """
+    result = _preflight(
+        {".import/memcard/mycard/BASLUS-20312/BASLUS-20312": b"save"},
+        excluded=("memcards",),
+        memory_card_synced=True,
+    )
+
+    assert [(r.reason, r.detail) for r in result.refusals] == [
+        ("memcard_synced_separately", "the card travels on its own routes this session")
+    ]
+
+
+def test_a_declared_state_is_pointed_at_the_push_route(sstate_dir: Path) -> None:
+    """PCSX2 takes states on the push route only, so a declared one is sent there.
+
+    Args:
+        sstate_dir: The patched state directory; its fixture also points the save root at tmp_path.
+    """
+    result = _preflight({".import/state/SLUS-20312 (ABCDEF12).01.p2s": b"progress"})
+
+    assert [(r.reason, r.detail) for r in result.refusals] == [("state_uses_push", None)]
+
+
+def test_the_spec_takes_one_card_shape_under_either_kind_and_pushes_states() -> None:
+    """A player calls the card a save or a memory card, so both kinds take the same shape."""
+    spec = pcsx2.Pcsx2().import_spec()
+
+    assert [k.kind for k in spec.kinds] == ["save", "memcard"]
+    assert spec.kinds[0].shapes == spec.kinds[1].shapes
+    assert (spec.state_channel, spec.card_subtree) == ("push", "memcards")
+
+
+def test_a_push_after_an_import_is_held_to_the_sessions_serial(sstate_dir: Path) -> None:
+    """Preflight records the session's serial, and the push route refuses a state named for another.
+
+    A name whose serial does not normalise is taken on trust, as every push
+    was before.
+
+    Args:
+        sstate_dir: The patched state directory.
+    """
+    emu = pcsx2.Pcsx2()
+    body = import_zip({".import/save/mycard/_pcsx2_superblock": b"sb"})
+
+    result = preflight_import(emu, body, rom_file=None, rom=_ROMM_ID)
+
+    assert result.refusals == ()
+    assert emu.import_identity == imports.SessionIdentity("SLUS-20312", "romm")
+    assert emu.state_target("SLES-50000 (12345678).03.p2s") is None
+    slot = f"{emu.state_slot:02d}"
+    for stem in ("SLUS-20312 (ABCDEF12)", "HOMEBREW (1234ABCD)"):
+        assert emu.state_target(f"{stem}.03.p2s") == sstate_dir / f"{stem}.{slot}.p2s"
+
+
+@pytest.mark.parametrize("suffix", [".mc2", ".mcr", ".bin", ".cbs", ".xps", ".sps"])
+def test_every_card_image_and_export_suffix_needs_converting(sstate_dir: Path, suffix: str) -> None:
+    """Each suffix the spec names for a card image or a single-save export is refused the same way.
+
+    Args:
+        sstate_dir: The patched state directory; its fixture also points the save root at tmp_path.
+        suffix: The lone file's suffix.
+    """
+    result = _preflight({f".import/save/card{suffix}": b"card"})
+
+    assert [r.reason for r in result.refusals] == ["needs_conversion"]
+
+
+def test_a_card_image_suffix_inside_a_folder_card_is_the_cards_own_data(sstate_dir: Path) -> None:
+    """A file below the card's folder lands with the card, whatever its suffix.
+
+    Args:
+        sstate_dir: The patched state directory; its fixture also points the save root at tmp_path.
+    """
+    result = _preflight(
+        {
+            ".import/save/mycard/_pcsx2_superblock": b"sb",
+            ".import/save/mycard/BASLUS-20312/backup.ps2": b"save",
+        }
+    )
+
+    assert result.refusals == ()
+    assert sorted(p.dest for p in result.placements) == [
+        _SLOT1 / "BASLUS-20312" / "backup.ps2",
+        _SLOT1 / pcsx2.SLOT1_MARKER,
+    ]
+
+
+def test_an_archive_card_is_refused_before_a_missing_superblock(sstate_dir: Path) -> None:
+    """The plan checks run in order, so a card beside the archive's own is refused for that first.
+
+    Args:
+        sstate_dir: The patched state directory; its fixture also points the save root at tmp_path.
+    """
+    body = import_zip(
+        {".import/save/mycard/BASLUS-20312/BASLUS-20312": b"save"},
+        v1={"memcards/othercard/_pcsx2_superblock": b"old"},
+    )
+
+    result = preflight_import(pcsx2.Pcsx2(), body, rom_file=None)
+
+    assert [(r.reason, r.detail) for r in result.refusals] == [
+        ("destination_conflict", "the archive already carries a memcards/ card")
+    ]
+
+
+def test_a_push_after_an_imported_card_keeps_the_occupied_slot_rule(sstate_dir: Path) -> None:
+    """An imported card leaves the push route as it was: the state in the slot is the name to match.
+
+    PCSX2 takes no imported state, so the slot's state is the first push
+    after the import. A later push of the same capture under another slot
+    restamps onto it, and another stem or another serial is refused.
+
+    Args:
+        sstate_dir: The patched state directory.
+    """
+    emu = pcsx2.Pcsx2()
+    members = {
+        ".import/save/mycard/_pcsx2_superblock": b"sb",
+        ".import/save/mycard/BASLUS-20312/BASLUS-20312": b"save",
+    }
+    result = _preflight(members, rom=_ROMM_ID)
+
+    report = restore_import(emu, import_zip(members), result)
+    emu.import_identity = result.identity
+
+    card = pcsx2.MEMCARD_DIR / pcsx2.SLOT1_CARD_NAME
+    assert (report["imported"], report["failed"]) == (2, 0)
+    assert (card / pcsx2.SLOT1_MARKER).read_bytes() == b"sb"
+    assert (card / "BASLUS-20312" / "BASLUS-20312").read_bytes() == b"save"
+    first = emu.state_target("SLUS-20312 (ABCDEF12).03.p2s")
+    assert first == sstate_dir / f"SLUS-20312 (ABCDEF12).{emu.state_slot:02d}.p2s"
+    first.write_bytes(b"progress")
+    assert emu.state_target("SLUS-20312 (ABCDEF12).07.p2s") == first
+    assert emu.state_target("SLUS-20312 (12345678).07.p2s") is None
+    assert emu.state_target("HOMEBREW (1234ABCD).07.p2s") is None
+    assert emu.state_target("SLES-50000 (12345678).07.p2s") is None
+
+
+def test_a_push_refused_for_another_serial_logs_both_ids_and_the_override(
+    sstate_dir: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The log line tells an identity refusal from a bad name: both serials, RomM as the source, and the fix.
+
+    Args:
+        sstate_dir: The patched state directory.
+        caplog: The pytest log capture fixture.
+    """
+    emu = pcsx2.Pcsx2()
+    emu.import_identity = imports.SessionIdentity("SLUS-20312", "romm")
+
+    with caplog.at_level("WARNING"):
+        assert emu.state_target("SLES-50000 (12345678).03.p2s") is None
+
+    assert (
+        "pcsx2: refusing pushed state SLES-50000 (12345678).03.p2s, which names another game:"
+        " member SLES-50000, session SLUS-20312 (from romm)"
+        " - fix via PUT /api/roms/{id}/identity if RomM is wrong"
+    ) in caplog.text
