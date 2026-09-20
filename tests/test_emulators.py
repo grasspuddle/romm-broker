@@ -648,7 +648,7 @@ def test_the_launch_env_points_at_the_labwc_session(monkeypatch: pytest.MonkeyPa
 
 
 _IMPORTING: frozenset[str] = frozenset(
-    {"cemu", "dolphin", "duckstation", "eden", "flycast", "pcsx2", "ppsspp", "retroarch", "xenia"}
+    {"azahar", "cemu", "dolphin", "duckstation", "eden", "flycast", "pcsx2", "ppsspp", "retroarch", "xenia"}
 )
 """The emulators that accept declared imports; every other one inherits the refusing base hooks."""
 
@@ -914,6 +914,7 @@ def test_a_flat_card_is_an_ordinary_save(name: str) -> None:
 
 
 _EXAMPLE_PLATFORM: dict[str, str] = {
+    "azahar": "3ds",
     "cemu": "wiiu",
     "dolphin": "ngc",
     "duckstation": "psx",
@@ -926,10 +927,16 @@ _EXAMPLE_PLATFORM: dict[str, str] = {
 }
 """The platform each importing emulator's examples below are placed on."""
 
+_AZAHAR_SAVE = (
+    f".import/save/sdmc/Nintendo 3DS/{'0' * 32}/{'0' * 32}/title/00040000/00033500/data/00000001.sav"
+)
+"""A title save on an SD card, in Azahar's own layout."""
+
 _EDEN_DEVICE_SAVE = f".import/save/nand/user/save/{'0' * 16}/{'0' * 32}/0100000000010000/save.bin"
 """A device save unit's file, the one Eden shape that needs no profile store beside it."""
 
 _EXAMPLES: list[tuple[str, str, bytes]] = [
+    ("azahar", _AZAHAR_SAVE, b"progress"),
     ("cemu", ".import/save/usr/save/00050000/1010EC00/user/80000001/slot0.dat", b"save"),
     ("dolphin", ".import/save/USA/Card A/01-GZLE-zelda.gci", b"GZLE01" + bytes(0x40 - 6 + 0x2000)),
     ("dolphin", ".import/memcard/USA/Card A/01-GZLE-zelda.gci", b"GZLE01" + bytes(0x40 - 6 + 0x2000)),
@@ -964,6 +971,7 @@ def _seed_xenia(emu: base.Emulator) -> None:
 
 
 _EXAMPLE_ROM: dict[str, imports.RomRef] = {
+    "azahar": imports.RomRef(1, "Game", "3ds", title_id="0004000000033500", save_target="00040000/00033500"),
     "cemu": imports.RomRef(1, "Game", "wiiu", title_id="1010EC00"),
     "eden": imports.RomRef(1, "Game", "switch", title_id="0100000000010000"),
     "xenia": imports.RomRef(1, "Game", "xbox360", title_id="4D5307E6"),
