@@ -51,8 +51,8 @@ checking imports answers 500 with
 `{"detail": {"error": "import_preflight_failed"}}`, still before anything is
 cleared.
 
-**Six emulators accept imports so far.** RetroArch, Flycast, DuckStation,
-PPSSPP, Dolphin and PCSX2 take the kinds listed under
+**Eight emulators accept imports so far.** RetroArch, Flycast, DuckStation,
+PPSSPP, Dolphin, PCSX2, RPCS3 and ScummVM take the kinds listed under
 [What each emulator takes](#what-each-emulator-takes), and every other
 emulator refuses each import member with `kind_not_accepted`. The structural
 checks run first either way: a bad manifest answers `manifest_invalid` and a
@@ -129,13 +129,15 @@ through a symlink, or the member is refused.
 
 | `emulator` | `save` | `memcard` | `state` |
 | --- | --- | --- | --- |
-| `retroarch` | one `.srm`, on a platform whose core loads one | not taken; `expected` names `save` | `PUT /api/session/state-file` after activate |
+| `retroarch` | one `.srm`, on a platform whose core loads one; on `wii`, title folders, `title/<type>/<title id>/data/`; on `3ds`, folders inside Azahar's `sdmc/Nintendo 3DS/` or `nand/data/` | not taken; `expected` names `save` | `PUT /api/session/state-file` after activate |
 | `flycast` | raw 131072-byte `vmu_save_<A-D><1-2>.bin` images, and `dc_nvmem.bin` | a raw 131072-byte VMU image | one `.state`; needs `save.resume_slot` |
 | `duckstation` | a raw 131072-byte `.mcd`, `.mcr`, `.mc` or `.srm` card | the same as `save` | one `<serial>_resume.sav` or `<serial>_<n>.sav`; needs `save.resume_slot` |
 | `ppsspp` | PSP save folders, `SAVEDATA/<product code><suffix>/`, each holding `PARAM.SFO` | not taken | one `<game id>_<version>_<n>.ppst`, with its `.jpg` screenshot if sent; needs `save.resume_slot` |
 | `dolphin` on `ngc` | GameCube `.gci` saves, each in `<region>/Card A/` | the same as `save` | one `<game id>.sNN` that opens with the game's id; needs `save.resume_slot` |
 | `dolphin` on `wii` | Wii title saves, `title/<type>/<title id>/data/` | not taken | one `<game id>.sNN` that opens with the game's id; needs `save.resume_slot` |
 | `pcsx2` | one folder memory card: `<card>/_pcsx2_superblock` and its game folders | the same as `save` | `PUT /api/session/state-file` after activate |
+| `rpcs3` | PS3 save folders, `home/00000001/savedata/<SAVEDIR>/` and `game/<DIR>/`, each holding `PARAM.SFO` | not taken | one `.SAVESTAT`, `.SAVESTAT.zst` or `.SAVESTAT.gz`; needs `save.resume_slot` |
+| `scummvm` | `<game>.NNN` and `<game>.sNN` save files | not taken | one `<game>.sNN` or `<game>.NNN` file; needs `save.resume_slot` |
 
 Dolphin takes nothing on any other platform, and every other emulator takes
 nothing yet.
@@ -145,14 +147,17 @@ in `saves/<library_name>/`, where the core loads it. `library_name` is the
 name the core reports about itself, such as `mGBA` or `Genesis Plus GX`, not
 the manifest's `core` (see
 [RetroArch cores](/docs/emulators/retroarch-cores#saves-states-and-imports)).
-It takes one `.srm` per archive: a second one, or a save the archive already
-carries at the same path, is a `destination_conflict`. It refuses these:
+On a platform that takes a `.srm`, it takes one per archive: a second one, or a
+save the archive already carries at the same path, is a `destination_conflict`.
+`wii` and `3ds` take folders instead, described below the list. It refuses these:
 
 - On `psp`: `destination_unresolvable`, with `suggest_emulator: "ppsspp"`.
   The PPSSPP core keeps SAVEDATA folders, not a `.srm`.
-- On `ngc`, `wii` and `3ds`: `shape_unverified`. These cores keep saves in
-  their own folders, which imports don't place yet. On `ngc` and `wii`,
-  import through `dolphin` instead; this refusal names no `suggest_emulator`.
+- On `ngc`: `shape_unverified`. The Dolphin core keeps GameCube saves as GCI
+  files in its own folders, which imports don't place yet. Import through
+  `dolphin` instead; this refusal names no `suggest_emulator`.
+- A `.srm` on `wii` or `3ds`: `unrecognised_layout`, whatever its name. The
+  detail names the kind of folder that platform takes.
 - On any other platform whose core loads no `.srm`, such as `nds`, `dc` or
   `arcade`: `destination_unresolvable`. The core keeps its save in a file of
   its own, or has none. Discovery lists no `save` shapes there, and
@@ -161,11 +166,46 @@ carries at the same path, is a `destination_conflict`. It refuses these:
   its save.
 - On a platform RetroArch has no core for: `destination_unresolvable`.
 - A `.sav`, `.rtc`, `.nv`, `.eep` or `.mpk` file: `needs_conversion`, until
-  each core's name for that file has been checked.
+  each core's name for that file has been checked. On `wii` and `3ds` a file
+  with one of those names is judged as part of a save folder, so it gets the
+  folder refusals instead.
 - A `memcard` member: `kind_not_accepted`, with `expected` naming `save`.
   On a platform that takes a `.srm`, send the core's `.srm` as a save instead.
 - A `state` member: `state_uses_push`. On `jaguar`, whose core has no states,
   and on a platform RetroArch has no core for, it is `kind_not_accepted`.
+
+On `wii`, the Dolphin core keeps the same emulated NAND as standalone Dolphin,
+and a save is a game's title folder, under `save`:
+
+- Its path is `title/<type>/<title id>/data/...`, where the type is
+  `00010000`, `00010001` or `00010004`. It can sit under `Wii/`, under
+  `saves/dolphin-emu/User/Wii/` or directly under `.import/save/`. It lands
+  in `saves/dolphin-emu/User/Wii/title/`, with the title id lower-cased.
+- The title id must be RomM's `title_id`, or it is `identity_mismatch`.
+  RetroArch reads no id off the rom, so with no `title_id` the title is taken
+  on trust.
+- A loose `data.bin` is `needs_conversion` and a `nand.bin` is
+  `source_incompatible`, as under Dolphin. `title/00000001/` and a title's
+  `content/` folder are `protected_destination`. `sys/` and `ticket/` are
+  `unrecognised_layout` here, since the core's save folders leave them out, and
+  so is anything else, a `.gci` included.
+
+On `3ds`, the Azahar core's SD card and NAND are placed exactly as named, and
+nothing is renamed:
+
+- A member must already sit under `saves/Azahar/`, and then inside
+  `sdmc/Nintendo 3DS/<id0>/<id1>/title/<high>/<low>/...`,
+  `sdmc/Nintendo 3DS/<id0>/<id1>/extdata/<high>/<low>/...` or
+  `nand/data/<id0>/...`. Every id0 and id1 is 32 hexadecimal digits.
+- A title's id, its high and low halves together, must be RomM's `title_id`, or
+  it is `identity_mismatch`. Extdata and NAND data carry no title id and are
+  not held to one, and with no `title_id` a title is taken on trust.
+- `nand/data/<id0>/sysdata/` and a title's `content/` folder are
+  `protected_destination`.
+- Anything else, including a member that does not already sit under
+  `saves/Azahar/`, is `shape_unverified`. Azahar's layout has not been checked
+  against a running core beyond these paths, so the broker refuses rather than
+  guess.
 
 **Flycast** places every file loose in its data folder, `flycast/`, under the
 name Flycast reads:
@@ -304,10 +344,67 @@ default):
   [state-file PUT](/docs/api/state#move-a-state-file-in-or-out) after
   activate, which refuses a state named for another game's serial.
 
-Flycast and DuckStation have no mid-session save states, but each boots
+**RPCS3** places PS3 save folders in its `dev_hdd0` and one state in its
+savestates folder:
+
+- A save folder holds `PARAM.SFO` at its root. Save data goes to
+  `home/00000001/savedata/<SAVEDIR>/` and can arrive under
+  `dev_hdd0/home/<user>/savedata/`, `home/<user>/savedata/`, `PS3/SAVEDATA/`
+  or `SAVEDATA/`. The user is eight digits and is rewritten to `00000001`, the
+  only user the broker's layout has, so two users' folders of one name are a
+  `destination_conflict`. Game data goes to `game/<DIR>/` and can arrive under
+  `dev_hdd0/game/` or `game/`.
+- A folder with none of those around it is `unrecognised_layout`: RPCS3 keeps
+  save data and game data apart, and a bare folder does not say which it is.
+  So is a folder name of anything but letters, digits, `_` and `-`, up to 32
+  of them, a single file where a folder belongs, and a state sent as a save.
+- A folder without `PARAM.SFO` at its root is `incomplete_unit`, detail
+  `missing PARAM.SFO`. One further down does not count.
+- A folder named for another game's serial is placed and only logged: a
+  sequel or DLC writes its predecessor's folders.
+- `home/<user>/exdata/` and `home/<user>/trophy/`, a game's `USRDIR/EBOOT.*`,
+  RPCS3's lock folders under `game/` (a name starting with `$` or its
+  full-width form) and the game folder of the installed title being booted are
+  `protected_destination`. An installed title
+  is an `EBOOT.BIN` under the game folder, or a `.pkg`.
+- The state is one `.SAVESTAT`, `.SAVESTAT.zst` or `.SAVESTAT.gz`, in exactly
+  that case, alone or in one folder named for the game's serial. It is renamed
+  `<serial>_import.SAVESTAT` and filed under the serial the launch will look
+  in. The serial is the one the boot target holds; RomM's `title_id` is not
+  used. A boot target with none, a bare `.iso`, refuses a state as
+  `identity_unknown`, and a folder named for another serial is
+  `identity_mismatch`. An empty state is `incomplete_unit`, and a RetroArch
+  state is `source_incompatible`.
+
+**ScummVM** names every save after a target, the name `scummvm --add`
+registers a game folder under in `scummvm.ini`, and keeps saves and states in
+one folder:
+
+- A save is one file, `<game>.NNN` or `<game>.sNN`, directly under
+  `.import/save/` or under `saves/`. Its `<game>` must be a name of the game
+  in the rom folder, in any case: a target, the game id or the engine id. It
+  lands as `saves/<name>.<ext>` with the name as `scummvm.ini` spells it. A
+  save for another target of the same folder, such as another language, keeps
+  that target's name, and only shows in a session that boots that target.
+- A name that is none of the folder's is `identity_mismatch`, listing the
+  ones that are. A folder ScummVM detects no game in is `identity_unknown`. A
+  generic `SAVEGAME` name, a `.srm`, a `.state` and `scummvm.ini` are
+  `unrecognised_layout`.
+- A save in the working slot under the session target's own name is a
+  `destination_conflict`, whose detail says to declare it as a state. The same
+  slot under another name is an ordinary save.
+- The state is one `<game>.sNN` or `<game>.NNN` file naming any target of the
+  folder. It is renamed onto the session's target in the working slot, keeping
+  its spelling. It counts every save the archive already carries in that slot
+  under the session target's name, so leave the old one out.
+- The first import into a folder ScummVM has not seen registers it, which runs
+  `scummvm --add` and can take up to two minutes. The registration stays even
+  if the import is then refused.
+
+Flycast, DuckStation and RPCS3 have no mid-session save states, but each boots
 straight into a state the archive carries, the same way it resumes the one
-it writes on exit. PPSSPP and Dolphin do have them, and resume a state the
-archive carries the way they resume one pushed after activate. So all four
+it writes on exit. PPSSPP, Dolphin and ScummVM do have them, and resume a state the
+archive carries the way they resume one pushed after activate. So all six
 answer `state_channel: "archive"`, take at most one state counting any the
 archive already holds, and need discovery's `state_slot` sent as
 `save.resume_slot`. An archive that already holds a state of its own refuses
@@ -319,7 +416,7 @@ core has states.
 
 Flycast and DuckStation name no `card_subtree`: their cards are ordinary
 save files, restored with the rest of the archive. PPSSPP has no memory card
-and names none, and neither does Dolphin on `wii`. Dolphin on `ngc` names
+and names none, and neither do Dolphin on `wii`, RPCS3, ScummVM or RetroArch. Dolphin on `ngc` names
 `GC`, and PCSX2 names `memcards`. When the session syncs that card on the
 memory-card routes, a member that would land on it answers
 `memcard_synced_separately`. Otherwise an imported card, or a GCI, in an
@@ -387,11 +484,13 @@ The shape is recognised, but loading it is unproven or blocked by a known
 broker limit, so the broker refuses rather than place a file that silently
 won't load.
 
-A PCSX2 folder card without `_pcsx2_superblock` is refused this way.
+A PCSX2 folder card without `_pcsx2_superblock` is refused this way. So is a
+RetroArch GameCube save, and a RetroArch 3DS member that is not in one of
+Azahar's save folders.
 
 ### `incomplete_unit` [#incomplete-unit]
 A save that spans several files is missing one, or a file is empty: a PSP
-save folder without its `PARAM.SFO`, a PPSSPP screenshot sent without its
+or PS3 save folder without its `PARAM.SFO`, a PPSSPP screenshot sent without its
 `.ppst`, or a PCSX2 card whose `_pcsx2_superblock` is empty. When other
 members were also refused, a missing-file detail says this may be a knock-on
 effect of those refusals.
@@ -401,14 +500,16 @@ The emulator cannot work out where this member belongs for this rom.
 
 ### `identity_unknown` [#identity-unknown]
 The emulator needs to know which game this is, and neither the rom nor
-RomM says.
+RomM says. ScummVM refuses a save this way when it detects no game in the rom
+folder, and RPCS3 a state when the boot target carries no title id.
 
 ### `identity_mismatch` [#identity-mismatch]
 The member belongs to a different game than the one being launched. When
 RomM supplied the session's id, the detail says how to correct it.
 
 ### `protected_destination` [#protected-destination]
-The member would overwrite emulator configuration, not save data.
+The member would overwrite emulator configuration, not save data, or data the
+console owns: an RPCS3 licence, trophy or `EBOOT`, or a Wii system title.
 
 ### `destination_conflict` [#destination-conflict]
 Two members land on the same file, a member lands where a restored save
