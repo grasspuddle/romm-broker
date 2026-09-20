@@ -658,6 +658,7 @@ _IMPORTING: frozenset[str] = frozenset(
         "pcsx2",
         "ppsspp",
         "retroarch",
+        "shadps4",
         "xemu",
         "xenia",
     }
@@ -935,6 +936,7 @@ _EXAMPLE_PLATFORM: dict[str, str] = {
     "pcsx2": "ps2",
     "ppsspp": "psp",
     "retroarch": "gb",
+    "shadps4": "ps4",
     "xemu": "xbox",
     "xenia": "xbox360",
 }
@@ -967,6 +969,7 @@ _EXAMPLES: list[tuple[str, str, bytes]] = [
     ("ppsspp", ".import/save/ULUS10041DATA00/PARAM.SFO", b"sfo"),
     ("ppsspp", ".import/state/ULUS10041_1.00_1.ppst", b"progress"),
     ("retroarch", ".import/save/Game.srm", b"sram"),
+    ("shadps4", ".import/save/CUSA12345/SAVE00/data.bin", b"progress"),
     ("xemu", ".import/save/UDATA/4D530064/TitleMeta.xbx", b"meta"),
     ("xenia", ".import/save/content/E0FFFFFFFFFFFFFF/4D5307E6/00000001/SAVEGAME/savedata.bin", b"save"),
     ("xenia", ".import/save/content/E0FFFFFFFFFFFFFF/4D5307E6/Headers/00000001/SAVEGAME", b"header"),
