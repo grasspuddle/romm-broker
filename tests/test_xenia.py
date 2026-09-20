@@ -1171,12 +1171,9 @@ def test_an_imported_save_beside_an_archived_one_is_refused(data_dir: Path) -> N
     assert [r.reason for r in result.refusals] == ["destination_conflict"]
 
 
-def test_xenia_declares_a_save_kind_only(data_dir: Path) -> None:
-    """The spec names the save kind alone, with no state channel, and protects the profile package.
-
-    Args:
-        data_dir: The patched storage root.
-    """
+@pytest.mark.usefixtures("data_dir")
+def test_xenia_declares_a_save_kind_only() -> None:
+    """The spec names the save kind alone, with no state channel, and protects the profile package."""
     spec = xenia.Xenia().import_spec()
 
     assert [k.kind for k in spec.kinds] == ["save"]

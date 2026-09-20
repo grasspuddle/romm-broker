@@ -19,9 +19,21 @@ from typing import Optional
 import pytest
 
 from webstation_broker import emulators, imports, saves
-from webstation_broker.emulators import base, retroarch, xenia
+from webstation_broker.emulators import base, retroarch, xemu, xenia
 
 from .conftest import DETACHED_CMD, SLEEPER_CMD, await_cmdline, await_gone, import_zip, preflight_import
+
+
+@pytest.fixture(autouse=True)
+def _xemu_off_config(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Keep the registry's xemu instance off /config, which tests never touch.
+
+    Args:
+        monkeypatch: Pytest's attribute patcher.
+        tmp_path: The per-test temporary directory.
+    """
+    monkeypatch.setattr(xemu, "XEMU_TOML", tmp_path / "xemu.toml")
+    monkeypatch.setattr(xemu, "FALLBACK_HDD_IMAGE", tmp_path / "xemu" / "xbox_hdd.qcow2")
 
 
 def test_an_unknown_name_resolves_to_nothing() -> None:

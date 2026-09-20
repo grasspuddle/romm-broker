@@ -401,9 +401,9 @@ and the launch then writes it into the hard drive image:
   read, the import is accepted, but that session clears and dumps nothing.
 - A folder above `UDATA` or `TDATA`, such as a drive letter, a partition
   folder or `saves/`, is `unrecognised_layout`. A whole hard drive image,
-  named `.qcow2`, `.img` or `.raw` or opening with the qcow2 header, is
-  `source_incompatible`. A file under a title folder is a save whatever its
-  name.
+  named `.qcow2`, `.img`, `.raw`, `.vhd`, `.vhdx` or `.vmdk` or opening with
+  the qcow2 header, is `source_incompatible`. A file under a title folder is
+  a save whatever its name.
 - FATX stores names of 42 bytes at most, so a longer one is `unsafe_path`.
   Names compare without regard to case: `Save.dat` and `save.dat` are one
   file, so they are a `destination_conflict`, and so is a save that differs
@@ -562,8 +562,8 @@ member's path names no serial.
 ### `identity_mismatch` [#identity-mismatch]
 The member belongs to a different game than the one being launched. When
 RomM supplied the session's id, the detail says how to correct it. Cemu,
-Eden, Azahar, xemu and Xenia check a save's title this way; Eden checks
-only when RomM sends a `title_id`, and Azahar only when it sends a
+Eden, Azahar, xemu and Xenia check a save's title this way; Cemu and Eden
+check only when RomM sends a `title_id`, and Azahar only when it sends a
 `save_target`. shadPS4 does not compare a save's serial with the game.
 
 ### `protected_destination` [#protected-destination]
