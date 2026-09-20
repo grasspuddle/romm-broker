@@ -19,7 +19,7 @@ from typing import Optional
 import pytest
 
 from webstation_broker import emulators, imports, saves
-from webstation_broker.emulators import base, retroarch
+from webstation_broker.emulators import base, retroarch, xenia
 
 from .conftest import DETACHED_CMD, SLEEPER_CMD, await_cmdline, await_gone, import_zip, preflight_import
 
@@ -647,7 +647,9 @@ def test_the_launch_env_points_at_the_labwc_session(monkeypatch: pytest.MonkeyPa
     assert env["DISPLAY"] == ":0"
 
 
-_IMPORTING: frozenset[str] = frozenset({"dolphin", "duckstation", "flycast", "pcsx2", "ppsspp", "retroarch"})
+_IMPORTING: frozenset[str] = frozenset(
+    {"dolphin", "duckstation", "flycast", "pcsx2", "ppsspp", "retroarch", "xenia"}
+)
 """The emulators that accept declared imports; every other one inherits the refusing base hooks."""
 
 
@@ -918,6 +920,7 @@ _EXAMPLE_PLATFORM: dict[str, str] = {
     "pcsx2": "ps2",
     "ppsspp": "psp",
     "retroarch": "gb",
+    "xenia": "xbox360",
 }
 """The platform each importing emulator's examples below are placed on."""
 
@@ -937,13 +940,28 @@ _EXAMPLES: list[tuple[str, str, bytes]] = [
     ("ppsspp", ".import/save/ULUS10041DATA00/PARAM.SFO", b"sfo"),
     ("ppsspp", ".import/state/ULUS10041_1.00_1.ppst", b"progress"),
     ("retroarch", ".import/save/Game.srm", b"sram"),
+    ("xenia", ".import/save/content/E0FFFFFFFFFFFFFF/4D5307E6/00000001/SAVEGAME/savedata.bin", b"save"),
+    ("xenia", ".import/save/content/E0FFFFFFFFFFFFFF/4D5307E6/Headers/00000001/SAVEGAME", b"header"),
 ]
 """One member each importing emulator accepts, for every kind it accepts on its example platform."""
 
-_EXAMPLE_ROM: dict[str, imports.RomRef] = {}
+
+def _seed_xenia(emu: base.Emulator) -> None:
+    """Sign a profile into the emulator's patched storage root, as the desktop launcher does.
+
+    Args:
+        emu: The Xenia instance whose `save_root` the test patched.
+    """
+    emu.save_root.mkdir(parents=True, exist_ok=True)
+    (emu.save_root / xenia.CONFIG_NAME).write_text('logged_profile_slot_0_xuid = "E000123456789ABC"\n')
+
+
+_EXAMPLE_ROM: dict[str, imports.RomRef] = {
+    "xenia": imports.RomRef(1, "Game", "xbox360", title_id="4D5307E6"),
+}
 """The rom RomM would name for an emulator's examples, where the emulator needs a session id."""
 
-_EXAMPLE_SEED: dict[str, Callable[[base.Emulator], None]] = {}
+_EXAMPLE_SEED: dict[str, Callable[[base.Emulator], None]] = {"xenia": _seed_xenia}
 """What an emulator's hook reads before launch, written into the emulator's patched `save_root`."""
 
 
