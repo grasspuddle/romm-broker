@@ -105,13 +105,6 @@ Dolphin maps its window before the core is running, and a load that early is
 dropped. Defaults to 5 seconds.
 """
 
-VIDEO_BACKEND = os.environ.get("DOLPHIN_VIDEO_BACKEND", "OGL")
-"""Video backend passed with `-v` (env `DOLPHIN_VIDEO_BACKEND`, default `OGL`).
-
-OGL over Vulkan by default: RADV on the integrated AMD parts these containers
-run on has been the less reliable of the two.
-"""
-
 ROM_EXTENSIONS = (".rvz", ".wia", ".gcz", ".iso", ".gcm", ".ciso", ".wbfs", ".wad", ".dol", ".elf")
 """Discs Dolphin boots, best first.
 
@@ -924,11 +917,13 @@ def _place_gci(
 class Dolphin(Emulator):
     """GameCube and Wii sessions on dolphin-emu.
 
-    The broker launches `dolphin-emu -b` with every setting on the command
-    line: `-u` for the user directory, `-v` for the video backend, and a run
-    of `-C` overrides for fullscreen, no stop confirmation, no panic dialogs,
-    analytics consent already answered, and slot A pinned to a GCI folder
-    card. Qt is forced onto xcb so the window lives on Xwayland, where
+    The broker launches `dolphin-emu -b`, with `XDG_DATA_HOME`/`XDG_CONFIG_HOME`
+    pinning the user and config directories, and a run of `-C` overrides for
+    fullscreen, no stop confirmation, no panic dialogs, analytics consent
+    already answered, and slot A pinned to a GCI folder card. The video
+    backend is left to whatever Dolphin's own layered config already has, so
+    a player's choice in the UI is never clobbered on the next launch. Qt is
+    forced onto xcb so the window lives on Xwayland, where
     xdotool can reach it. A resume whose state is already on disk, and whose
     game id matches the disc booting, loads at boot with `-s`, which is both
     more reliable than the hotkey and invisible to the player; a resume whose
@@ -1155,7 +1150,6 @@ class Dolphin(Emulator):
         cmd = [
             binary,
             "-b",
-            "-v", VIDEO_BACKEND,
             "-C", "Dolphin.Display.Fullscreen=True",
             "-C", "Dolphin.Interface.ConfirmStop=False",
             # A modal panic dialog in a container nobody can click is a hang.
