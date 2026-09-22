@@ -142,8 +142,8 @@ platforms take one:
 
 On `psx`, the `.srm` is the SwanStation core's first memory card. The core
 loads it only while its `swanstation_MemoryCards_Card1Type` option stays at
-the default, `Libretro`. The broker doesn't set core options, so an imported
-save won't load if that option has been changed in RetroArch.
+the default, `Libretro`. The broker doesn't pin this particular option, so an
+imported save won't load if it has been changed in RetroArch.
 
 The other platforms refuse a `.srm`:
 
@@ -164,7 +164,7 @@ The other platforms refuse a `.srm`:
 | Core (platforms) | Where the save is |
 | --- | --- |
 | `melonds` (nds) | `<game>.sav` |
-| `flycast` (dc) | VMU files in the system folder, `dc/vmu_save_<port>.bin`, shared by every game |
+| `flycast` (dc) | VMU files in the system folder, `dc/vmu_save_<port>.bin`, per game — the broker pins `flycast_per_content_vmus` to `All VMUs`; its shared-by-default setting would leak saves between games |
 | `fbneo` (arcade, cps1, cps2, cps3, neogeoaes, neogeomvs) | `fbneo/<driver>.fs` or `.nv`, named for the driver |
 | `mednafen_ngp` (neo-geo-pocket, neo-geo-pocket-color) | `<game>.flash` |
 | `handy` (lynx) | `<game>.eeprom` |
@@ -175,7 +175,8 @@ The other platforms refuse a `.srm`:
 | `yabasanshiro` (saturn) | `yabasanshiro/backup.bin`, shared by every game |
 | `genesis_plus_gx` (segacd) | `scd_<region>.brm`, shared by every game of that region |
 | `mesen` (fds) | `<game>.ips`, a patch against the disk |
-| `puae`, `vice_x64`, `hatari` (amiga, c64, atari-st) | written into the disk image |
+| `puae` (amiga) | written to a substitute disk under `saves/`, not the mounted image — the broker pins `puae_floppy_write_redirect` to `enabled` |
+| `vice_x64`, `hatari` (c64, atari-st) | written into the disk image by default; see the write-protection note below |
 | `a5200`, `prosystem`, `freeintv`, `vecx`, `o2em`, `fuse` | no battery save |
 
 The broker renames an imported save after the game being launched, whatever
@@ -184,10 +185,35 @@ file as needing conversion until each core's name for that file has been
 checked. A save state isn't imported as a save: send it to
 `PUT /api/session/state-file` after activate.
 
+NeoCD's backup RAM has a similar problem even though `neo-geo-cd` takes a
+`.srm` import: the core reads and writes its `neocd/neocd.srm` in the system
+directory, shared across every game, before it applies the option that would
+scope it per game. The broker symlinks that fixed path into `SAVE_DIR`
+(`save_links` in the platform table), which brings it under the same
+per-game archive isolation as everything else.
+
+### VICE and Hatari floppy write protection
+
+Unlike PUAE, neither VICE (`c64`) nor Hatari (`atari-st`) has a
+write-redirect option; they can only be told to refuse writes to the mounted
+disk outright (`vice_floppy_write_protection`,
+`vice_easyflash_write_protection`, `hatari_floppy_write_protection`). Pinning
+that on every launch would permanently block in-game floppy/cartridge saves,
+so the broker only *seeds* it: the first time a game on either platform
+launches with no options file on disk yet, write protection is turned on to
+protect the ROM library by default. After that, whatever value is already on
+disk is left alone, including a value a player changed from RetroArch's own
+Quick Menu, so choosing to re-enable in-game saves (at the cost of the ROM
+being writable) sticks on later launches. This is `core_option_seeds` in the
+platform table, resolved against the broker's own options file by
+`_resolve_core_options`, as opposed to `core_options`, which is pinned on
+every launch and always wins over a same-named seed.
+
 ## Source
 
 Generated from `webstation_broker/emulators/retroarch_platforms.json` and
 `webstation_broker/emulators/retroarch.py`, cross-referenced against
 libretro's BIOS Information Hub. Update this table if platform mappings,
 `core_source` overrides, `assets`, `save_subtrees`, `library_name`,
-`save_ram`, or `savestate` fields change in `retroarch_platforms.json`.
+`save_ram`, `savestate`, `core_options`, `core_option_seeds`, or `save_links`
+fields change in `retroarch_platforms.json`.
