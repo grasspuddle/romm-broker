@@ -140,7 +140,8 @@
     "core": "flycast",
     "library_name": "Flycast",
     "save_ram": false,
-    "extensions": [".m3u", ".gdi", ".cdi", ".chd", ".cue", ".iso", ".bin"]
+    "extensions": [".m3u", ".gdi", ".cdi", ".chd", ".cue", ".iso", ".bin"],
+    "core_options": {"flycast_per_content_vmus": "All VMUs"}
   },
   "saturn": {
     "core": "yabasanshiro",
@@ -197,7 +198,8 @@
     "core": "neocd",
     "library_name": "NeoCD",
     "save_ram": true,
-    "extensions": [".cue", ".chd"]
+    "extensions": [".cue", ".chd"],
+    "save_links": {"neocd/neocd.srm": "NeoCD/neocd.srm"}
   },
   "neo-geo-pocket": {
     "core": "mednafen_ngp",
@@ -294,13 +296,18 @@
     "core": "puae",
     "library_name": "PUAE",
     "save_ram": false,
-    "extensions": [".adf", ".adz", ".dms", ".ipf", ".hdf", ".hdz", ".lha", ".m3u"]
+    "extensions": [".adf", ".adz", ".dms", ".ipf", ".hdf", ".hdz", ".lha", ".m3u"],
+    "core_options": {"puae_floppy_write_redirect": "enabled"}
   },
   "c64": {
     "core": "vice_x64",
     "library_name": "VICE x64",
     "save_ram": false,
-    "extensions": [".d64", ".t64", ".tap", ".prg", ".crt", ".g64", ".m3u"]
+    "extensions": [".d64", ".t64", ".tap", ".prg", ".crt", ".g64", ".m3u"],
+    "core_option_seeds": {
+      "vice_floppy_write_protection": "enabled",
+      "vice_easyflash_write_protection": "enabled"
+    }
   },
   "msx": {
     "core": "bluemsx",
@@ -324,7 +331,8 @@
     "core": "hatari",
     "library_name": "hatari",
     "save_ram": false,
-    "extensions": [".st", ".msa", ".stx", ".dim", ".ipf", ".m3u"]
+    "extensions": [".st", ".msa", ".stx", ".dim", ".ipf", ".m3u"],
+    "core_option_seeds": {"hatari_floppy_write_protection": "on"}
   },
   "arcade": {
     "core": "fbneo",
