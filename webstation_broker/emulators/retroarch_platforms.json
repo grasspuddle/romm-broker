@@ -442,7 +442,7 @@
   },
   "pokemon-mini": {
     "core": "pokemini",
-    "save_ram": true,
+    "save_ram": false,
     "extensions": [".min"]
   },
   "amiga-cd32": {
