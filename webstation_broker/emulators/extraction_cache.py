@@ -13,7 +13,7 @@ import logging
 import os
 import shutil
 import subprocess
-import tempfile  # noqa: F401
+import tempfile
 import threading
 import time
 import zipfile
@@ -476,3 +476,96 @@ class ExtractionCache:
         )
         needed = int(compressed * factor)
         return (needed, needed)
+
+    def extract(self, rom: Path, emulator: Emulator) -> Path:
+        """Get `rom` booting from the cache, extracting it if not already cached.
+
+        Reuses a prior extraction keyed by `_cache_key` when one already
+        holds a bootable target. `rom` is staged under a scratch dir and only
+        renamed to the persistent game_dir once a boot target is confirmed,
+        so game_dir either does not exist or holds a complete extraction.
+
+        Holds this instance's lock for the whole call: eviction, extraction,
+        and the boot-target lookup all touch the same cache tree, so a
+        second call racing in here must wait rather than potentially
+        evicting the directory this one is mid-extracting into or about to
+        boot from.
+
+        Args:
+            rom: The archive or package to extract.
+            emulator: The launching emulator; `emulator.extraction_phase` is
+                set while this runs, cleared again before returning or raising.
+
+        Raises:
+            RuntimeError: If `rom` cannot be read to key it, the extraction
+                cannot fit in the cache or on the disk, `stage` fails, the
+                extraction holds no boot target, or the finished extraction
+                cannot be moved to its cache key.
+            OSError: If the cache dir or a scratch dir cannot be created at all.
+        """
+        with self._locked(rom.name):
+            key = _cache_key(rom)
+            game_dir = self._cache_dir() / key
+
+            if game_dir.is_dir():
+                boot = self._find_boot_target(game_dir)
+                if boot is not None:
+                    log.info("%s cache hit: %s (boot target: %s)", self._name, rom.name, boot.name)
+                    _touch_last_accessed(game_dir)
+                    return boot
+                log.warning("%s cache: %s has no boot target, re-extracting", self._name, rom.name)
+                shutil.rmtree(game_dir, ignore_errors=True)
+
+            # Set before eviction, not after: eviction can rmtree tens of GB
+            # under the lock, and a caller polling extraction_phase should
+            # see that stall rather than an idle-looking None.
+            emulator.extraction_phase = self._phase_name(rom)
+            try:
+                # Resolved here, not in __init__: __init__ runs before
+                # _default_budget/_default_stage exist as methods on this
+                # class (they're added after __init__ in the source), so
+                # None is stored as-is at construction and only resolved
+                # to the default implementation at first use.
+                budget = self._budget if self._budget is not None else self._default_budget
+                stage = self._stage if self._stage is not None else self._default_stage
+                peak_bytes, kept_bytes = budget(rom)
+                cache_dir = self._cache_dir()
+                cache_dir.mkdir(parents=True, exist_ok=True)
+                # Orphaned scratch is un-evictable but still counts toward
+                # the cap, so reclaim it before sizing the cache rather than
+                # letting it push real entries out.
+                self._clear_scratch()
+                self._evict_lru(kept_bytes, key)
+                self._require_room(peak_bytes, kept_bytes, rom.name)
+
+                scratch_root = cache_dir / _SCRATCH_DIR_NAME
+                scratch_root.mkdir(parents=True, exist_ok=True)
+                with tempfile.TemporaryDirectory(prefix=f"{key}-", dir=str(scratch_root)) as scratch:
+                    staged = Path(scratch) / "extracted"
+                    staged.mkdir()
+                    stage(rom, staged, Path(scratch), emulator, kept_bytes)
+                    if self._find_boot_target(staged) is None:
+                        raise RuntimeError(f"{rom.name} extracted but {self._missing_target_error}")
+                    # rmtree above uses ignore_errors, so game_dir can still
+                    # be sitting there non-empty and the rename then fails.
+                    try:
+                        staged.replace(game_dir)
+                    except OSError as exc:
+                        log.error(
+                            "%s cache: could not move the extraction of %s into %s: %s",
+                            self._name, rom.name, game_dir, exc,
+                        )
+                        raise RuntimeError(f"could not cache the extraction of {rom.name}: {exc}") from exc
+            finally:
+                emulator.extraction_phase = None
+
+            # Re-looked up under game_dir rather than carried over from
+            # staged: a relative symlink resolves against wherever it now
+            # sits, so a member contained inside scratch can point outside
+            # this one once renamed.
+            boot = self._find_boot_target(game_dir)
+            if boot is None:
+                raise RuntimeError(f"{rom.name} extracted but {self._missing_target_error}")
+            _touch_last_accessed(game_dir)
+            log.info("%s: extracted %s, booting %s", self._name, rom.name, boot)
+        return boot

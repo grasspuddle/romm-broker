@@ -463,3 +463,139 @@ def test_default_budget_falls_back_to_the_expansion_factor_when_unreadable(tmp_p
     archive.write_bytes(b"not actually a zip")
     peak, kept = cache._default_budget(archive)
     assert peak == kept == int(len(b"not actually a zip") * 3.0)
+
+
+def test_extract_reuses_an_existing_bootable_extraction(tmp_path: Path) -> None:
+    """A cache hit returns the existing boot target without re-extracting."""
+    cache = _cache(tmp_path)
+    archive = _make_zip(tmp_path / "Game.zip", {"EBOOT.BIN": b"boot"})
+    key = extraction_cache._cache_key(archive)
+    game_dir = cache.root() / key
+    _touch(game_dir / "EBOOT.BIN")
+    before = (game_dir / "EBOOT.BIN").read_bytes()
+    boot = cache.extract(archive, _FakeEmulator())
+    assert boot == game_dir / "EBOOT.BIN"
+    assert (game_dir / "EBOOT.BIN").read_bytes() == before
+    assert (game_dir / extraction_cache._LAST_ACCESSED_MARKER).exists()
+
+
+def test_extract_extracts_and_returns_the_boot_target_on_a_miss(tmp_path: Path) -> None:
+    """A cache miss extracts the archive and returns its boot target."""
+    cache = _cache(tmp_path, max_gb=10.0)
+    archive = _make_zip(tmp_path / "Game.zip", {"EBOOT.BIN": b"boot"})
+    emulator = _FakeEmulator()
+    boot = cache.extract(archive, emulator)
+    assert boot.read_bytes() == b"boot"
+    assert emulator.extraction_phase is None
+
+
+def test_extract_sets_and_clears_the_extraction_phase(tmp_path: Path) -> None:
+    """extraction_phase is set to phase_name(rom) during extraction and cleared after."""
+    cache = ExtractionCache(
+        name="test", cache_dir=lambda: tmp_path / "cache", enabled=lambda: True,
+        max_gb=lambda: 10.0, find_boot_target=_find_eboot,
+        phase_name=lambda rom: "extracting_archive",
+    )
+    archive = _make_zip(tmp_path / "Game.zip", {"EBOOT.BIN": b"boot"})
+    seen: list[Optional[str]] = []
+
+    def spying_stage(rom: Path, staged: Path, scratch: Path, emulator: Emulator, kept: int) -> None:
+        seen.append(emulator.extraction_phase)
+        extraction_cache._extract_archive(rom, staged, 30.0)
+
+    cache._stage = spying_stage
+    emulator = _FakeEmulator()
+    cache.extract(archive, emulator)
+    assert seen == ["extracting_archive"]
+    assert emulator.extraction_phase is None
+
+
+def test_extract_clears_the_phase_when_extraction_fails(tmp_path: Path) -> None:
+    """extraction_phase is cleared even when the stage callback raises."""
+    cache = _cache(tmp_path, max_gb=10.0)
+    archive = _make_zip(tmp_path / "Game.zip", {"EBOOT.BIN": b"boot"})
+
+    def failing_stage(rom: Path, staged: Path, scratch: Path, emulator: Emulator, kept: int) -> None:
+        raise RuntimeError("boom")
+
+    cache._stage = failing_stage
+    emulator = _FakeEmulator()
+    with pytest.raises(RuntimeError, match="boom"):
+        cache.extract(archive, emulator)
+    assert emulator.extraction_phase is None
+
+
+def test_extract_cleans_up_and_raises_when_nothing_bootable_was_extracted(tmp_path: Path) -> None:
+    """A stage that leaves no boot target raises missing_target_error and cleans up."""
+    cache = ExtractionCache(
+        name="test", cache_dir=lambda: tmp_path / "cache", enabled=lambda: True,
+        max_gb=lambda: 10.0, find_boot_target=_find_eboot,
+        missing_target_error="held no EBOOT.BIN",
+    )
+    archive = _make_zip(tmp_path / "Game.zip", {"readme.txt": b"nope"})
+
+    def empty_stage(rom: Path, staged: Path, scratch: Path, emulator: Emulator, kept: int) -> None:
+        extraction_cache._extract_archive(rom, staged, 30.0)
+
+    cache._stage = empty_stage
+    with pytest.raises(RuntimeError, match="held no EBOOT.BIN"):
+        cache.extract(archive, _FakeEmulator())
+    key = extraction_cache._cache_key(archive)
+    assert not (cache.root() / key).exists()
+
+
+def test_extract_does_not_reuse_a_stale_entry_with_no_boot_target(tmp_path: Path) -> None:
+    """A pre-existing cache dir with no boot target is discarded and re-extracted."""
+    cache = _cache(tmp_path, max_gb=10.0)
+    archive = _make_zip(tmp_path / "Game.zip", {"EBOOT.BIN": b"boot"})
+    key = extraction_cache._cache_key(archive)
+    stale = cache.root() / key
+    _touch(stale / "readme.txt")
+    boot = cache.extract(archive, _FakeEmulator())
+    assert boot.read_bytes() == b"boot"
+
+
+def test_extract_re_checks_the_boot_target_after_the_rename(tmp_path: Path) -> None:
+    """find_boot_target is called again on game_dir after rename, not just on staged."""
+    calls: list[Path] = []
+    real_find = _find_eboot
+
+    def spying_find(root: Path) -> Optional[Path]:
+        calls.append(root)
+        return real_find(root)
+
+    cache = ExtractionCache(
+        name="test", cache_dir=lambda: tmp_path / "cache", enabled=lambda: True,
+        max_gb=lambda: 10.0, find_boot_target=spying_find,
+    )
+    archive = _make_zip(tmp_path / "Game.zip", {"EBOOT.BIN": b"boot"})
+    cache.extract(archive, _FakeEmulator())
+    # First call is against the staged tree (pre-rename), second against game_dir (post-rename).
+    assert len(calls) == 2
+    assert calls[0] != calls[1]
+
+
+def test_extract_evicts_before_refusing_room(tmp_path: Path) -> None:
+    """Eviction runs before the space guard, so a full-but-evictable cache still accepts a new entry."""
+    cache = ExtractionCache(
+        name="test", cache_dir=lambda: tmp_path / "cache", enabled=lambda: True,
+        max_gb=lambda: 20 / 1024**3, find_boot_target=_find_eboot,
+    )
+    old = cache.root() / "Old"
+    _touch(old / "eboot.bin", mtime=1)
+    _touch(old / extraction_cache._LAST_ACCESSED_MARKER, mtime=1)
+    archive = _make_zip(tmp_path / "Game.zip", {"EBOOT.BIN": b"1234567890"})
+    boot = cache.extract(archive, _FakeEmulator())
+    assert boot.read_bytes() == b"1234567890"
+    assert not old.exists()
+
+
+def test_extract_refuses_and_raises_when_nothing_fits(tmp_path: Path) -> None:
+    """require_room's failure propagates out of extract() as a RuntimeError."""
+    cache = ExtractionCache(
+        name="test", cache_dir=lambda: tmp_path / "cache", enabled=lambda: True,
+        max_gb=lambda: 1 / 1024**3, find_boot_target=_find_eboot,
+    )
+    archive = _make_zip(tmp_path / "Game.zip", {"EBOOT.BIN": b"x" * 5000})
+    with pytest.raises(RuntimeError, match="max_gb"):
+        cache.extract(archive, _FakeEmulator())
