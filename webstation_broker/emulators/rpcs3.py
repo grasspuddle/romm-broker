@@ -43,7 +43,6 @@ The emulator is expected to be brought to a working state in desktop mode
 (firmware, GPU settings, controllers) before automated launching.
 """
 
-import hashlib
 import logging
 import os
 import re
@@ -57,11 +56,13 @@ import time
 import zipfile
 from collections.abc import Iterable
 from pathlib import Path
-from threading import Lock, Thread
+from threading import Thread
 from typing import Optional, Union
 
 from .. import imports, settings
+from . import extraction_cache
 from .base import Emulator, base_launch_env, xdg_config_dir
+from .extraction_cache import ExtractionCache
 
 log = logging.getLogger(__name__)
 
@@ -99,8 +100,8 @@ _ROM_SEARCH_GLOBS = ("*", "*/*", "*/*/*")
 # Only executables named EBOOT.* are bootable; other .bin/.self files in a
 # rip (licenses, sdata) are not.
 _EBOOT_EXTS = (".bin", ".self", ".elf")
-_ARCHIVE_EXTS = (".7z", ".zip", ".rar")
-_GB = 1024**3
+_ARCHIVE_EXTS = extraction_cache._ARCHIVE_EXTS
+_GB = extraction_cache._GB
 _LICENSE_EXTS = (".rap", ".edat")
 # Title ids are alphanumeric (BLUS30443, NPUB30638). Everything parsed out of
 # a PKG header or a PARAM.SFO is attacker-supplied and gets joined onto
@@ -130,8 +131,8 @@ CACHE_MAX_GB = float(os.environ.get("RPCS3_CACHE_MAX_GB", "30"))
 # dump expands several-fold, so budgeting the archive's own size would wave
 # through exactly the extractions the space guard exists to stop.
 EXPANSION_FACTOR = float(os.environ.get("RPCS3_ARCHIVE_EXPANSION", "4.0"))
-_LAST_ACCESSED_MARKER = ".last_accessed"
-_SCRATCH_DIR_NAME = ".scratch"
+_LAST_ACCESSED_MARKER = extraction_cache._LAST_ACCESSED_MARKER
+_SCRATCH_DIR_NAME = extraction_cache._SCRATCH_DIR_NAME
 """Subdirectory of CACHE_DIR every in-progress extraction is staged under.
 
 Staging keeps a partial extraction out of CACHE_DIR's top level, so a game
@@ -139,12 +140,6 @@ dir either does not exist or is complete: a process killed mid-extraction
 leaves scratch to be reclaimed rather than a truncated EBOOT.BIN the next
 launch would cache-hit on forever.
 """
-
-# Serializes cache-dir mutation: eviction picking a victim, extraction of a
-# new one, and the boot-target lookup that follows all touch the same
-# CACHE_DIR tree, so one launch's eviction can't rmtree a directory another
-# launch is mid-extracting into or about to boot from.
-_CACHE_LOCK = Lock()
 
 # config.yml values forced before every launch. RPCS3 fills missing keys
 # with defaults, so a partial file is a valid config. Keyed ("section", key);
@@ -521,142 +516,6 @@ def _sfo_title_id(sfo: Path) -> Optional[str]:
     return None
 
 
-def _archive_dir_size(path: Path) -> int:
-    total = 0
-    for f in path.rglob("*"):
-        if f.name == _LAST_ACCESSED_MARKER:
-            continue
-        try:
-            if f.is_file():
-                total += f.stat().st_size
-        except OSError as exc:
-            log.debug("rpcs3 cache: skipping unreadable %s while sizing %s: %s", f, path, exc)
-            continue
-    return total
-
-
-def _cache_size_bytes() -> int:
-    if not CACHE_DIR.is_dir():
-        return 0
-    return sum(_archive_dir_size(d) for d in CACHE_DIR.iterdir() if d.is_dir())
-
-
-def _touch_last_accessed(game_dir: Path) -> None:
-    try:
-        (game_dir / _LAST_ACCESSED_MARKER).write_text(str(time.time()))
-    except OSError as exc:
-        log.warning("rpcs3 cache: could not update last-accessed marker for %s: %s", game_dir, exc)
-
-
-def _require_room(needed_bytes: int, archive_name: str) -> None:
-    """Refuse an extraction that cannot fit before any of it is written.
-
-    Eviction leaves two ceilings standing: an empty cache still cannot hold a
-    title larger than CACHE_MAX_GB, and the cap counts only the cache's own
-    contents, not the free space on the filesystem it shares with the rest of
-    /config. Without this the unpack starts anyway, spends minutes filling the
-    disk, and dies on a write error from inside the extractor, having taken
-    the free space every other service on that filesystem needs with it.
-
-    One figure covers both ceilings here: the staged tree is renamed into
-    place rather than copied, so what is on disk at the peak is what stays.
-
-    Args:
-        needed_bytes: Bytes the finished extraction takes, on disk and in the cache.
-        archive_name: The archive being extracted, named in the error.
-
-    Raises:
-        RuntimeError: If the cache cap or the filesystem cannot hold it.
-    """
-    max_bytes = int(CACHE_MAX_GB * _GB)
-    current = _cache_size_bytes()
-    if current + needed_bytes > max_bytes:
-        raise RuntimeError(
-            f"{archive_name} would leave about {needed_bytes / _GB:.1f} GB cached, more than "
-            f"RPCS3_CACHE_MAX_GB ({CACHE_MAX_GB:.0f} GB) allows with "
-            f"{current / _GB:.1f} GB already there"
-        )
-    try:
-        free = shutil.disk_usage(CACHE_DIR).free
-    except OSError as exc:
-        log.warning("rpcs3 cache: could not read free space on %s: %s", CACHE_DIR, exc)
-        return
-    if free < needed_bytes:
-        raise RuntimeError(
-            f"{archive_name} needs about {needed_bytes / _GB:.1f} GB to extract, but only "
-            f"{free / _GB:.1f} GB is free on {CACHE_DIR}"
-        )
-
-
-def _clear_scratch() -> None:
-    """Remove every staged extraction under CACHE_DIR. Callers must hold _CACHE_LOCK.
-
-    The lock is what makes this safe: no extraction can be mid-flight while
-    it is held, so anything still sitting here was orphaned by a process
-    that died.
-    """
-    scratch_root = CACHE_DIR / _SCRATCH_DIR_NAME
-    if not scratch_root.is_dir():
-        return
-    for entry in scratch_root.iterdir():
-        log.warning("rpcs3 cache: removing orphaned scratch dir %s", entry.name)
-        shutil.rmtree(entry, ignore_errors=True)
-
-
-def sweep_stale_extractions() -> None:
-    """Remove extraction scratch dirs orphaned by a crashed broker process.
-
-    `tempfile.TemporaryDirectory` cleans up on normal exit, but a killed
-    process leaves its scratch dir behind forever. Call once at broker
-    startup: the only other caller is an extraction, which a library of
-    already-extracted (or never-archived) games may never run again.
-    """
-    with _CACHE_LOCK:
-        _clear_scratch()
-
-
-def _evict_lru(needed_bytes: int, keep: str) -> None:
-    """Evict least-recently-used extracted games until `needed_bytes` fits within CACHE_MAX_GB.
-
-    Args:
-        needed_bytes: Additional bytes that must fit under the cache cap.
-        keep: The cache key currently being (re-)extracted, so a stale
-            entry for it already removed by the caller is never chosen.
-    """
-    if not CACHE_ENABLED or not CACHE_DIR.is_dir():
-        return
-    max_bytes = int(CACHE_MAX_GB * _GB)
-    current = _cache_size_bytes()
-    while current + needed_bytes > max_bytes:
-        candidates = []
-        for game_dir in CACHE_DIR.iterdir():
-            if not game_dir.is_dir() or game_dir.name in (keep, _SCRATCH_DIR_NAME):
-                continue
-            marker = game_dir / _LAST_ACCESSED_MARKER
-            try:
-                mtime = marker.stat().st_mtime if marker.exists() else 0.0
-            except OSError as exc:
-                log.debug(
-                    "rpcs3 cache: could not read last-accessed marker for %s, treating as oldest: %s",
-                    game_dir, exc,
-                )
-                mtime = 0.0
-            candidates.append((mtime, game_dir))
-        if not candidates:
-            log.warning("rpcs3 cache: nothing left to evict under the %.0f GB cap", CACHE_MAX_GB)
-            return
-        candidates.sort(key=lambda c: c[0])
-        victim = candidates[0][1]
-        victim_size = _archive_dir_size(victim)
-        log.info("rpcs3 cache: evicting %s (least recently used)", victim.name)
-        try:
-            shutil.rmtree(victim)
-        except OSError as exc:
-            log.warning("rpcs3 cache: could not evict %s: %s", victim, exc)
-            return
-        current -= victim_size
-
-
 def _is_safe_boot_candidate(candidate: Path, root_real: Path) -> bool:
     """Check that `candidate` is safe to boot.
 
@@ -800,39 +659,6 @@ def _extract_archive(archive: Path, dest: Path) -> None:
         _reject_escaped_tree(dest)
 
 
-def _cache_key(archive: Path) -> str:
-    """Cache dir name for archive: its stem plus a short hash of the file's identity.
-
-    A bare stem collides two archives that share a name but differ in
-    extension, and survives a same-named re-upload with different content,
-    either of which would otherwise serve up whatever is sitting in the old
-    cache dir as if it were the new ROM. The hash therefore covers the
-    resolved path, the size, and the nanosecond mtime: same-second rewrites
-    are exactly how a library sync replaces a dump, so second granularity
-    would let a replacement keep the old key.
-
-    Args:
-        archive: The archive being extracted.
-
-    Returns:
-        The cache directory name for this archive.
-
-    Raises:
-        RuntimeError: If the archive cannot be read. Falling back to the
-            bare name here would hand back the collision-prone key this
-            function exists to avoid, and the extraction that follows would
-            fail on the same unreadable file anyway.
-    """
-    try:
-        st = archive.stat()
-        fingerprint = f"{archive.resolve()}:{st.st_size}:{st.st_mtime_ns}"
-    except OSError as exc:
-        log.error("rpcs3 cache: could not read %s to key its extraction: %s", archive, exc)
-        raise RuntimeError(f"could not read {archive.name} to key its extraction: {exc}") from exc
-    digest = hashlib.sha1(fingerprint.encode()).hexdigest()[:12]
-    return f"{archive.stem}-{digest}"
-
-
 def _sum_listed_sizes(listing: str, prefix: str) -> Optional[int]:
     """Total the integers on every `prefix` line of an extractor's listing.
 
@@ -916,6 +742,81 @@ def _extraction_size(archive: Path) -> int:
     return int(compressed * EXPANSION_FACTOR)
 
 
+_CACHE = ExtractionCache(
+    name="rpcs3",
+    cache_dir=lambda: CACHE_DIR,
+    enabled=lambda: CACHE_ENABLED,
+    max_gb=lambda: CACHE_MAX_GB,
+    find_boot_target=_archive_boot_target,
+    lock_wait=None,
+)
+"""Owns rpcs3's cache-dir lock and its size/eviction bookkeeping.
+
+`_extract_and_cache` calls the pieces of this instance directly rather than
+`_CACHE.extract()`: rpcs3's over-cap error names `RPCS3_CACHE_MAX_GB`
+specifically (the shared class's own message is generic), and
+`tests/test_rpcs3.py` monkeypatches `_evict_lru` by module attribute to
+assert the orchestration order, which only works when the orchestrating
+code looks that name up from this module rather than from inside
+`ExtractionCache.extract`'s own method body.
+
+Because of that, `_CACHE` is never given `budget`/`stage`/`phase_name`/
+`missing_target_error` here, and nothing in this module calls
+`_CACHE.extract()`. Calling it directly is unsupported: it would fall back
+to the shared class's generic defaults (member-listing-based size
+budgeting, a plain extract-and-check stage) instead of this module's own
+`_extraction_size`/`_require_room` accounting, and its error text would
+name `max_gb` rather than `RPCS3_CACHE_MAX_GB`.
+"""
+
+_cache_key = extraction_cache._cache_key
+_archive_dir_size = extraction_cache._dir_size
+_touch_last_accessed = extraction_cache._touch_last_accessed
+_cache_size_bytes = _CACHE._cache_size_bytes
+_evict_lru = _CACHE._evict_lru
+_clear_scratch = _CACHE._clear_scratch
+
+
+def _require_room(needed_bytes: int, archive_name: str) -> None:
+    """Refuse an extraction that cannot fit before any of it is written.
+
+    Eviction leaves two ceilings standing: an empty cache still cannot hold a
+    title larger than CACHE_MAX_GB, and the cap counts only the cache's own
+    contents, not the free space on the filesystem it shares with the rest of
+    /config. Without this the unpack starts anyway, spends minutes filling the
+    disk, and dies on a write error from inside the extractor, having taken
+    the free space every other service on that filesystem needs with it.
+
+    One figure covers both ceilings here: the staged tree is renamed into
+    place rather than copied, so what is on disk at the peak is what stays.
+
+    Args:
+        needed_bytes: Bytes the finished extraction takes, on disk and in the cache.
+        archive_name: The archive being extracted, named in the error.
+
+    Raises:
+        RuntimeError: If the cache cap or the filesystem cannot hold it.
+    """
+    max_bytes = int(CACHE_MAX_GB * _GB)
+    current = _cache_size_bytes()
+    if current + needed_bytes > max_bytes:
+        raise RuntimeError(
+            f"{archive_name} would leave about {needed_bytes / _GB:.1f} GB cached, more than "
+            f"RPCS3_CACHE_MAX_GB ({CACHE_MAX_GB:.0f} GB) allows with "
+            f"{current / _GB:.1f} GB already there"
+        )
+    try:
+        free = shutil.disk_usage(CACHE_DIR).free
+    except OSError as exc:
+        log.warning("rpcs3 cache: could not read free space on %s: %s", CACHE_DIR, exc)
+        return
+    if free < needed_bytes:
+        raise RuntimeError(
+            f"{archive_name} needs about {needed_bytes / _GB:.1f} GB to extract, but only "
+            f"{free / _GB:.1f} GB is free on {CACHE_DIR}"
+        )
+
+
 def _extract_and_cache(archive: Path, emulator: Emulator) -> Path:
     """Extract archive into CACHE_DIR, reusing a cached extraction when possible.
 
@@ -925,7 +826,7 @@ def _extract_and_cache(archive: Path, emulator: Emulator) -> Path:
     confirmed, so game_dir either does not exist or holds a complete
     extraction.
 
-    Holds _CACHE_LOCK for the whole call: eviction, extraction, and the
+    Holds `_CACHE`'s lock for the whole call: eviction, extraction, and the
     boot-target lookup all touch the same CACHE_DIR tree, so a second
     launch racing in here must wait rather than potentially evicting the
     directory this one is mid-extracting into or about to boot from.
@@ -943,7 +844,7 @@ def _extract_and_cache(archive: Path, emulator: Emulator) -> Path:
             or the finished extraction cannot be moved to its cache key.
         OSError: If CACHE_DIR or a scratch dir cannot be created at all.
     """
-    with _CACHE_LOCK:
+    with _CACHE._locked(archive.name):
         key = _cache_key(archive)
         game_dir = CACHE_DIR / key
 
@@ -1007,6 +908,11 @@ def _extract_and_cache(archive: Path, emulator: Emulator) -> Path:
         _touch_last_accessed(game_dir)
         log.info("rpcs3: extracted %s, booting %s", archive.name, boot)
     return boot
+
+
+def sweep_stale_extractions() -> None:
+    """Remove extraction scratch dirs orphaned by a crashed broker process. Call once at startup."""
+    _CACHE.sweep_stale_extractions()
 
 
 def _pkg_title_id(pkg: Path) -> Optional[str]:
