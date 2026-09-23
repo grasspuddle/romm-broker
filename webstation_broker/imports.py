@@ -572,7 +572,7 @@ _UTF8_FLAG = 0x800
 """Zip general-purpose flag bit saying the entry name is UTF-8."""
 _SAFE_EXPECTED = "a relative path of plain names: no hidden, system or oversized components"
 """The `expected` text on every hygiene `unsafe_path` refusal."""
-READABLE_EXPECTED = "an unencrypted, intact member, stored or compressed with deflate, bzip2 or lzma"
+READABLE_EXPECTED = "an unencrypted, intact member, stored or compressed with deflate"
 """The `expected` text on every `unreadable_member` refusal."""
 
 

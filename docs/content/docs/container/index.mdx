@@ -1,11 +1,11 @@
 ---
 title: "Running the container"
-description: "The taisun/random-images:webstation-romm image that ships the broker, how to start it, and what it needs from the host."
+description: "The linuxserver/webstation:romm image that ships the broker, how to start it, and what it needs from the host."
 ---
 
 You don't run the broker by itself. It ships inside
 [linuxserver/docker-webstation](https://github.com/linuxserver/docker-webstation),
-on the `romm` branch, as the image `taisun/random-images:webstation-romm`. That
+on the `romm` branch, as the image `lscr.io/linuxserver/webstation:romm`. That
 image is a full Linux desktop, streamed to your browser with software called
 selkies, with every supported emulator already installed and nginx (a web
 server) in front. The broker is registered as one of the container's
@@ -27,7 +27,7 @@ works using software rendering, but most emulators will not.
 ---
 services:
   webstation:
-    image: taisun/random-images:webstation-romm
+    image: lscr.io/linuxserver/webstation:romm
     container_name: webstation
     environment:
       - PUID=1000
@@ -64,7 +64,7 @@ docker run -d \
   -v /path/to/bios:/config/.config/retroarch/system \
   --shm-size="1gb" \
   --restart unless-stopped \
-  taisun/random-images:webstation-romm
+  lscr.io/linuxserver/webstation:romm
 ```
 
 The BIOS mount is optional. It only applies to RetroArch's shared system

@@ -9,6 +9,7 @@ import json
 import logging
 import os
 import time
+import tracemalloc
 import zipfile
 from pathlib import Path, PurePosixPath
 from typing import Any, Optional
@@ -65,9 +66,9 @@ def _zip(
 
 _CORRUPTIBLE = bytes(range(256)) * 64
 """Member data that compresses to enough bytes for `corrupt_zip_member` to damage under every method."""
-_METHODS = [zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED, zipfile.ZIP_BZIP2, zipfile.ZIP_LZMA]
-"""Every compression method `zipfile` can read."""
-_METHOD_IDS = ["stored", "deflate", "bzip2", "lzma"]
+_METHODS = [zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED]
+"""Every compression method a member may use; bzip2 and lzma are refused outright."""
+_METHOD_IDS = ["stored", "deflate"]
 """Test ids for `_METHODS`, in the same order."""
 
 
@@ -844,9 +845,17 @@ def test_plan_v1_keeps_the_legacy_messages(tmp_path: Path, name: str, message: s
     [
         ({"flags": 0x1}, "archive member is encrypted: GC/a"),
         ({"method": 99}, "archive member uses unsupported compression method 99: GC/a"),
+        (
+            {"method": zipfile.ZIP_BZIP2},
+            "archive member uses unsupported compression method 12: GC/a",
+        ),
+        (
+            {"method": zipfile.ZIP_LZMA},
+            "archive member uses unsupported compression method 14: GC/a",
+        ),
         ({"dos_date": 0}, "archive member has an invalid timestamp (1980, 0, 0, 0, 0, 0): GC/a"),
     ],
-    ids=["encrypted", "compression", "date"],
+    ids=["encrypted", "compression", "bzip2", "lzma", "date"],
 )
 def test_plan_v1_refuses_a_member_that_would_fail_to_write(
     tmp_path: Path, mangle: dict[str, int], message: str
@@ -1164,23 +1173,25 @@ def test_write_save_archive_counts_a_corrupt_lzma_member_as_failed(tmp_path: Pat
     assert list((root / "GC").iterdir()) == []
 
 
-def test_read_archive_reports_a_corrupt_lzma_manifest() -> None:
-    """A corrupt lzma manifest is an unusable manifest, not an exception out of the read."""
+def test_read_archive_refuses_a_manifest_compressed_with_bzip2_or_lzma() -> None:
+    """A manifest using either method is refused by its header, never decompressed.
+
+    `_read_manifest` runs before any per-member plan exists to gate it, so it
+    applies `member_problem` itself rather than inheriting the guard from a caller.
+    """
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w") as zf:
         zf.writestr(".import/save/a.srm", b"a")
         zf.writestr(
             zipfile.ZipInfo(saves.MANIFEST_NAME, date_time=(2020, 1, 1, 0, 0, 0)),
-            json.dumps({"version": 2, "files": [], "pad": _CORRUPTIBLE.hex()}),
+            json.dumps({"version": 2, "files": []}),
             compress_type=zipfile.ZIP_LZMA,
         )
-    body = corrupt_zip_member(buf.getvalue(), saves.MANIFEST_NAME)
 
-    view = saves.read_archive(body)
+    view = saves.read_archive(buf.getvalue())
 
     assert view.manifest is None
-    assert view.manifest_error is not None
-    assert view.manifest_error.startswith("manifest unreadable: ")
+    assert view.manifest_error == "manifest uses unsupported compression method 14"
 
 
 # -- verify_members: the pre-clear read --
@@ -1200,10 +1211,7 @@ def test_verify_members_passes_an_intact_member(method: int) -> None:
 
 @pytest.mark.parametrize("method", _METHODS, ids=_METHOD_IDS)
 def test_verify_members_reports_a_corrupt_member(method: int, caplog: pytest.LogCaptureFixture) -> None:
-    """Corrupt data fails its read under every method, however that method raises.
-
-    Stored and deflate raise `BadZipFile` on the CRC, bzip2 raises `OSError`,
-    and lzma raises `lzma.LZMAError`.
+    """Corrupt data fails its read under every readable method, both raising `BadZipFile` on the CRC.
 
     Args:
         method: The member's compression method.
@@ -1216,6 +1224,59 @@ def test_verify_members_reports_a_corrupt_member(method: int, caplog: pytest.Log
 
     assert problems == (("saves/a.srm", "archive member is corrupt: saves/a.srm"),)
     assert "saves/a.srm failed its read check" in caplog.text
+
+
+@pytest.mark.parametrize(
+    "method", [zipfile.ZIP_BZIP2, zipfile.ZIP_LZMA], ids=["bzip2", "lzma"]
+)
+def test_verify_members_refuses_a_bzip2_or_lzma_member_without_reading_it(
+    method: int, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A member using either method is refused by its header, the same as a corrupt one.
+
+    `zipfile`'s bzip2 and lzma readers have no cap on a single call's decompressed
+    output, so `verify_members` checks `member_problem` before it ever opens a
+    member, the same guard `plan_v1` and `normalise_member` apply.
+
+    Args:
+        method: The member's compression method.
+        caplog: Pytest's log capture.
+    """
+    body = _zip_with("saves/a.srm", b"intact data", method)
+
+    with caplog.at_level(logging.WARNING, logger="webstation_broker.saves"):
+        problems = saves.verify_members(body, ["saves/a.srm"])
+
+    assert problems == (
+        ("saves/a.srm", f"archive member uses unsupported compression method {method}: saves/a.srm"),
+    )
+    assert f"uses unsupported compression method {method}" in caplog.text
+
+
+def test_verify_members_refuses_a_bzip2_bomb_without_decompressing_it() -> None:
+    """A member that would balloon on decompression is refused by its header, never decompressed.
+
+    Builds a member whose real data decompresses to 24 MiB of zeros, compressed
+    down to a few hundred bytes by bzip2. Before the read-hardening this member
+    would have been decompressed in full to check its declared size; the fix
+    refuses it by its compression method instead, so peak memory during the
+    call stays near zero regardless of what the member would expand to.
+    """
+    huge = bytes(24 * 1024 * 1024)
+    body = _zip_with("saves/a.srm", huge, zipfile.ZIP_BZIP2)
+    del huge
+
+    tracemalloc.start()
+    try:
+        problems = saves.verify_members(body, ["saves/a.srm"])
+        _current, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+
+    assert problems == (
+        ("saves/a.srm", "archive member uses unsupported compression method 12: saves/a.srm"),
+    )
+    assert peak < 4 * 1024 * 1024
 
 
 def test_verify_members_reads_only_the_names_it_is_given() -> None:
@@ -1237,7 +1298,7 @@ def test_verify_members_reads_a_repeated_name_once() -> None:
 def test_verify_members_reports_a_name_the_archive_lacks() -> None:
     """A planned name missing from the archive is a problem, not a `KeyError`."""
     assert saves.verify_members(_zip({"saves/a": b"a"}), ["saves/b"]) == (
-        ("saves/b", "archive member is corrupt: saves/b"),
+        ("saves/b", "archive member is missing: saves/b"),
     )
 
 
