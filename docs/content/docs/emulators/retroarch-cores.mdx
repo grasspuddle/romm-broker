@@ -132,13 +132,18 @@ keeps them. The platform table records each core's reported name as
 
 A [declared import](/docs/api/imports) can bring one `.srm` save into a
 session only on a platform whose core loads one. The platform table records
-this as `save_ram`, taken from a check of each core's source. These 23
+this as `save_ram`, taken from a check of each core's source. These 24
 platforms take one:
 
 `nes`, `famicom`, `snes`, `sfam`, `n64`, `gb`, `gbc`, `gba`, `virtualboy`,
-`genesis`, `sms`, `gamegear`, `sg1000`, `sega32`, `tg16`, `turbografx-cd`,
-`supergrafx`, `neo-geo-cd`, `wonderswan`, `wonderswan-color`, `jaguar`,
-`colecovision` and `psx`.
+`nds`, `genesis`, `sms`, `gamegear`, `sg1000`, `sega32`, `tg16`,
+`turbografx-cd`, `supergrafx`, `neo-geo-cd`, `wonderswan`, `wonderswan-color`,
+`jaguar`, `colecovision` and `psx`.
+
+On `nds`, the `.srm` is the melondsds core's NDS cart SRAM, exposed through
+the standard `RETRO_MEMORY_SAVE_RAM` libretro call. The older, unmaintained
+`melonds` core did not expose this — it managed its own `.sav` file instead,
+which is why this platform used to refuse a `.srm` import.
 
 On `psx`, the `.srm` is the SwanStation core's first memory card. The core
 loads it only while its `swanstation_MemoryCards_Card1Type` option stays at
@@ -163,7 +168,6 @@ The other platforms refuse a `.srm`:
 
 | Core (platforms) | Where the save is |
 | --- | --- |
-| `melondsds` (nds) | `<game>.sav` |
 | `flycast` (dc) | VMU files in the system folder, `dc/vmu_save_<port>.bin`, per game — the broker pins `flycast_per_content_vmus` to `All VMUs`; its shared-by-default setting would leak saves between games |
 | `fbneo` (arcade, cps1, cps2, cps3, neogeoaes, neogeomvs) | `fbneo/<driver>.fs` or `.nv`, named for the driver |
 | `mednafen_ngp` (neo-geo-pocket, neo-geo-pocket-color) | `<game>.flash` |

@@ -86,7 +86,7 @@
   "nds": {
     "core": "melondsds",
     "library_name": "melonDS DS",
-    "save_ram": false,
+    "save_ram": true,
     "extensions": [".nds", ".srl"]
   },
   "3ds": {

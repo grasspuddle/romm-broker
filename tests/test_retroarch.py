@@ -609,16 +609,17 @@ def test_a_scoped_platform_s_saves_sit_in_its_core_s_sorted_dir() -> None:
 
 _SRM_PLATFORMS = frozenset(
     {
-        "nes", "famicom", "snes", "sfam", "n64", "gb", "gbc", "gba", "virtualboy", "genesis", "sms",
+        "nes", "famicom", "snes", "sfam", "n64", "gb", "gbc", "gba", "virtualboy", "nds", "genesis", "sms",
         "gamegear", "sg1000", "sega32", "tg16", "turbografx-cd", "supergrafx", "neo-geo-cd",
         "wonderswan", "wonderswan-color", "jaguar", "colecovision", "psx",
     }
 )  # fmt: skip
-"""The 23 platforms whose core exposes `RETRO_MEMORY_SAVE_RAM`, per the 2026-09-18 source check."""
+"""The 24 platforms whose core exposes `RETRO_MEMORY_SAVE_RAM`, per the 2026-09-18 source check
+(updated 2026-09-23: nds moved from `melonds` to `melondsds`, which does expose it)."""
 
 
 def test_a_srm_is_taken_on_exactly_the_platforms_whose_core_loads_one() -> None:
-    """The `.srm` predicate answers yes on the 23 checked platforms, and the table's flags agree.
+    """The `.srm` predicate answers yes on the 24 checked platforms, and the table's flags agree.
 
     The second check keeps `save_ram` false on psp, dolphin and azahar too,
     though the predicate refuses those for reasons of their own.
@@ -2994,6 +2995,7 @@ def test_the_import_spec_follows_the_platform(
         ("gb", "Game.gb", "Game.srm", "saves/Gambatte/Game.srm"),
         ("psx", "Game (USA).m3u", "Game (USA) (Disc 1).srm", "saves/SwanStation/Game (USA).srm"),
         ("genesis", "Sonic.md", "Sonic.srm", "saves/Genesis Plus GX/Sonic.srm"),
+        ("nds", "Game.nds", "Game.srm", "saves/melonDS DS/Game.srm"),
     ],
 )
 def test_a_srm_lands_where_the_core_loads_sram_for_the_booted_content(
@@ -3068,7 +3070,6 @@ def test_a_save_that_is_not_one_srm_is_refused(
         ("ngc", "shape_unverified", None, _NGC_UNVERIFIED, None),
         ("dc", "destination_unresolvable", None, _no_srm("flycast", "dc"), None),
         ("arcade", "destination_unresolvable", None, _no_srm("fbneo", "arcade"), None),
-        ("nds", "destination_unresolvable", None, _no_srm("melondsds", "nds"), None),
         ("fds", "destination_unresolvable", None, _no_srm("mesen", "fds"), None),
         ("segacd", "destination_unresolvable", None, _no_srm("genesis_plus_gx", "segacd"), None),
         ("atari5200", "destination_unresolvable", None, _no_srm("a5200", "atari5200"), None),
