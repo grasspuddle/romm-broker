@@ -198,6 +198,43 @@ def _extract_archive(archive: Path, dest: Path, timeout: float) -> None:
         _reject_escaped_tree(dest)
 
 
+def _sum_listed_sizes(listing: str, prefix: str) -> Optional[int]:
+    """Total the integers on every `prefix` line of an extractor's listing."""
+    total = 0
+    found = False
+    for line in listing.splitlines():
+        stripped = line.strip()
+        if not stripped.startswith(prefix):
+            continue
+        value = stripped[len(prefix) :].strip()
+        if value.isdigit():
+            total += int(value)
+            found = True
+    return total if found else None
+
+
+def _listed_extracted_size(archive: Path, timeout: float) -> Optional[int]:
+    """Uncompressed total the archive's own member listing reports, or None if unreadable."""
+    ext = archive.suffix.lower()
+    try:
+        if ext == ".zip":
+            with zipfile.ZipFile(archive) as zf:
+                return sum(i.file_size for i in zf.infolist()) or None
+        if ext == ".rar":
+            listing = _run_extractor(
+                ["unrar", "lt", "-y", str(archive)], f"unrar sizes ({archive.name})", timeout,
+            )
+            return _sum_listed_sizes(listing, "Size:")
+        listing = _run_extractor(
+            ["7z", "l", "-slt", str(archive)], f"7z sizes ({archive.name})", timeout,
+        )
+        _, _, body = listing.partition("----------\n")
+        return _sum_listed_sizes(body, "Size =")
+    except (RuntimeError, OSError, zipfile.BadZipFile) as exc:
+        log.warning("extraction cache: could not read the member sizes of %s: %s", archive.name, exc)
+        return None
+
+
 class ExtractionCache:
     """A per-instance, opt-in archive/pkg extraction cache.
 
@@ -418,3 +455,24 @@ class ExtractionCache:
     ) -> None:
         """The default `stage`: extract `archive` directly into `staged`."""
         _extract_archive(archive, staged, self._extract_timeout())
+
+    def _default_budget(self, rom: Path) -> tuple[int, int]:
+        """The default `budget`: the archive's own listed size, or a compressed-size fallback."""
+        listed = _listed_extracted_size(rom, self._extract_timeout())
+        if listed is not None:
+            return (listed, listed)
+        try:
+            compressed = rom.stat().st_size
+        except OSError as exc:
+            log.warning(
+                "%s extraction cache: could not size %s for the space guard: %s",
+                self._name, rom.name, exc,
+            )
+            return (0, 0)
+        factor = self._expansion_factor()
+        log.warning(
+            "%s extraction cache: %s has no readable member listing, budgeting %.1fx its compressed size",
+            self._name, rom.name, factor,
+        )
+        needed = int(compressed * factor)
+        return (needed, needed)

@@ -442,3 +442,24 @@ def test_default_stage_extracts_a_zip_directly_into_staged(tmp_path: Path) -> No
     staged.mkdir()
     cache._default_stage(archive, staged, tmp_path / "scratch", _FakeEmulator(), 0)
     assert (staged / "EBOOT.BIN").read_bytes() == b"boot"
+
+
+def test_default_budget_reads_the_zip_members_own_sizes(tmp_path: Path) -> None:
+    """The default budget sums a zip's own member sizes rather than guessing."""
+    cache = _cache(tmp_path)
+    archive = _make_zip(tmp_path / "Game.zip", {"a.bin": b"1234", "b.bin": b"56"})
+    peak, kept = cache._default_budget(archive)
+    assert peak == kept == 6
+
+
+def test_default_budget_falls_back_to_the_expansion_factor_when_unreadable(tmp_path: Path) -> None:
+    """An archive with no readable listing falls back to compressed_size * expansion_factor."""
+    cache_dir = tmp_path / "cache"
+    cache = ExtractionCache(
+        name="test", cache_dir=lambda: cache_dir, enabled=lambda: True,
+        max_gb=lambda: 10.0, find_boot_target=_find_eboot, expansion_factor=lambda: 3.0,
+    )
+    archive = tmp_path / "Corrupt.zip"
+    archive.write_bytes(b"not actually a zip")
+    peak, kept = cache._default_budget(archive)
+    assert peak == kept == int(len(b"not actually a zip") * 3.0)
