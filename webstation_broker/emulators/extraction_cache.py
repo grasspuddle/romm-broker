@@ -8,10 +8,17 @@ no-op.
 """
 from __future__ import annotations
 
+import hashlib  # noqa: F401
 import logging
+import os  # noqa: F401
+import shutil  # noqa: F401
+import subprocess  # noqa: F401
+import tempfile  # noqa: F401
 import threading
+import zipfile  # noqa: F401
+from contextlib import contextmanager  # noqa: F401
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable, Iterator, Optional  # noqa: F401
 
 from .base import Emulator
 
