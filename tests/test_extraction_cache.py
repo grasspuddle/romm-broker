@@ -579,7 +579,7 @@ def test_extract_evicts_before_refusing_room(tmp_path: Path) -> None:
     """Eviction runs before the space guard, so a full-but-evictable cache still accepts a new entry."""
     cache = ExtractionCache(
         name="test", cache_dir=lambda: tmp_path / "cache", enabled=lambda: True,
-        max_gb=lambda: 20 / 1024**3, find_boot_target=_find_eboot,
+        max_gb=lambda: 12 / 1024**3, find_boot_target=_find_eboot,
     )
     old = cache.root() / "Old"
     _touch(old / "eboot.bin", mtime=1)
