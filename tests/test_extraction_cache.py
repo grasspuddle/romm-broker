@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import zipfile
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 import pytest
 
@@ -35,6 +35,15 @@ def _find_eboot(root: Path) -> Optional[Path]:
     for candidate in root.rglob("EBOOT.BIN"):
         return candidate
     return None
+
+
+def _cache(tmp_path: Path, *, enabled: bool = True, max_gb: float = 8 / 1024**3,
+           on_evict: Optional[Callable[[Path], None]] = None) -> ExtractionCache:
+    cache_dir = tmp_path / "cache"
+    return ExtractionCache(
+        name="test", cache_dir=lambda: cache_dir, enabled=lambda: enabled,
+        max_gb=lambda: max_gb, find_boot_target=_find_eboot, on_evict=on_evict,
+    )
 
 
 def test_root_returns_the_configured_cache_dir(tmp_path: Path) -> None:
@@ -136,3 +145,48 @@ def test_cache_size_bytes_is_zero_without_a_cache_dir(tmp_path: Path) -> None:
         max_gb=lambda: 10.0, find_boot_target=_find_eboot,
     )
     assert cache._cache_size_bytes() == 0
+
+
+def test_evict_lru_is_a_noop_when_disabled(tmp_path: Path) -> None:
+    """Evict LRU is a no-op when the cache is disabled."""
+    cache = _cache(tmp_path, enabled=False)
+    game_dir = cache.root() / "GameA"
+    _touch(game_dir / "eboot.bin")
+    cache._evict_lru(10**9, "SomethingElse")
+    assert game_dir.exists()
+
+
+def test_evict_lru_removes_the_least_recently_used_entry_first(tmp_path: Path) -> None:
+    """Evict LRU removes the least recently used entry first."""
+    cache = _cache(tmp_path)
+    old = cache.root() / "Old"
+    new = cache.root() / "New"
+    _touch(old / "eboot.bin")
+    _touch(new / "eboot.bin")
+    _touch(old / extraction_cache._LAST_ACCESSED_MARKER, mtime=1000)
+    _touch(new / extraction_cache._LAST_ACCESSED_MARKER, mtime=2000)
+    cache._evict_lru(2, "Incoming")
+    assert not old.exists()
+    assert new.exists()
+
+
+def test_evict_lru_never_removes_the_entry_being_extracted(tmp_path: Path) -> None:
+    """Evict LRU never removes the entry currently being (re-)extracted."""
+    cache = _cache(tmp_path, max_gb=1 / 1024**3)
+    keep = cache.root() / "Incoming"
+    _touch(keep / "eboot.bin")
+    _touch(keep / extraction_cache._LAST_ACCESSED_MARKER, mtime=1)
+    cache._evict_lru(50, "Incoming")
+    assert keep.exists()
+
+
+def test_evict_lru_calls_on_evict_once_per_evicted_dir(tmp_path: Path) -> None:
+    """on_evict fires once per successfully evicted dir, after the rmtree."""
+    evicted: list[Path] = []
+    cache = _cache(tmp_path, max_gb=6 / 1024**3, on_evict=evicted.append)
+    old = cache.root() / "Old"
+    _touch(old / "eboot.bin")
+    _touch(old / extraction_cache._LAST_ACCESSED_MARKER, mtime=1)
+    cache._evict_lru(2, "Incoming")
+    assert evicted == [old]
+    assert not old.exists()

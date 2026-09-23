@@ -190,3 +190,50 @@ class ExtractionCache:
         if not cache_dir.is_dir():
             return 0
         return sum(_dir_size(d) for d in cache_dir.iterdir() if d.is_dir())
+
+    def _evict_lru(self, needed_bytes: int, keep: str) -> None:
+        """Evict least-recently-used cache entries until `needed_bytes` fits within max_gb.
+
+        Args:
+            needed_bytes: Additional bytes that must fit under the cache cap.
+            keep: The cache key currently being (re-)extracted, so a stale
+                entry for it already removed by the caller is never chosen.
+        """
+        cache_dir = self._cache_dir()
+        if not self._enabled() or not cache_dir.is_dir():
+            return
+        max_bytes = int(self._max_gb() * _GB)
+        current = self._cache_size_bytes()
+        while current + needed_bytes > max_bytes:
+            candidates = []
+            for game_dir in cache_dir.iterdir():
+                if not game_dir.is_dir() or game_dir.name in (keep, _SCRATCH_DIR_NAME):
+                    continue
+                marker = game_dir / _LAST_ACCESSED_MARKER
+                try:
+                    mtime = marker.stat().st_mtime if marker.exists() else 0.0
+                except OSError as exc:
+                    log.debug(
+                        "%s extraction cache: could not read last-accessed marker for %s: %s",
+                        self._name, game_dir, exc,
+                    )
+                    mtime = 0.0
+                candidates.append((mtime, game_dir))
+            if not candidates:
+                log.warning(
+                    "%s extraction cache: nothing left to evict under the %.0f GB cap",
+                    self._name, self._max_gb(),
+                )
+                return
+            candidates.sort(key=lambda c: c[0])
+            victim = candidates[0][1]
+            victim_size = _dir_size(victim)
+            log.info("%s extraction cache: evicting %s (least recently used)", self._name, victim.name)
+            try:
+                shutil.rmtree(victim)
+            except OSError as exc:
+                log.warning("%s extraction cache: could not evict %s: %s", self._name, victim, exc)
+                return
+            current -= victim_size
+            if self._on_evict is not None:
+                self._on_evict(victim)
