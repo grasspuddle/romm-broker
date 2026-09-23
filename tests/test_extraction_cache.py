@@ -224,3 +224,137 @@ def test_require_room_charges_the_cap_on_kept_and_the_disk_on_peak(tmp_path: Pat
     cache._require_room(1, 1, "Game.zip")  # both tiny: passes without raising
     with pytest.raises(RuntimeError, match="needs about"):
         cache._require_room(free + 10**12, 1, "Game.zip")
+
+
+def test_locked_serializes_a_second_call_on_the_same_instance(tmp_path: Path) -> None:
+    """A second _locked() call on the same instance blocks until the first releases."""
+    import threading as _threading
+    cache = _cache(tmp_path)
+    entered = _threading.Event()
+    release = _threading.Event()
+    order: list[str] = []
+
+    def first() -> None:
+        with cache._locked("first"):
+            order.append("first-enter")
+            entered.set()
+            release.wait(timeout=5)
+        order.append("first-exit")
+
+    t = _threading.Thread(target=first)
+    t.start()
+    assert entered.wait(timeout=5)
+    with cache._locked("second"):
+        order.append("second-enter")
+    release.set()
+    t.join(timeout=5)
+    assert order == ["first-enter", "first-exit", "second-enter"]
+
+
+def test_locked_on_a_different_instance_does_not_block(tmp_path: Path) -> None:
+    """A second, independent ExtractionCache instance never waits on the first one's lock."""
+    import threading as _threading
+    first_cache = _cache(tmp_path / "one")
+    second_cache = _cache(tmp_path / "two")
+    entered = _threading.Event()
+    release = _threading.Event()
+
+    def hold_first() -> None:
+        with first_cache._locked("first"):
+            entered.set()
+            release.wait(timeout=5)
+
+    t = _threading.Thread(target=hold_first)
+    t.start()
+    assert entered.wait(timeout=5)
+    with second_cache._locked("second"):
+        pass  # must not block
+    release.set()
+    t.join(timeout=5)
+
+
+def test_locked_with_a_bounded_wait_raises_on_timeout(tmp_path: Path) -> None:
+    """A bounded lock_wait raises rather than parking the caller forever."""
+    import threading as _threading
+    cache = ExtractionCache(
+        name="test", cache_dir=lambda: tmp_path / "cache", enabled=lambda: True,
+        max_gb=lambda: 10.0, find_boot_target=_find_eboot, lock_wait=lambda: 0.05,
+    )
+    entered = _threading.Event()
+    release = _threading.Event()
+
+    def hold() -> None:
+        with cache._locked("first"):
+            entered.set()
+            release.wait(timeout=5)
+
+    t = _threading.Thread(target=hold)
+    t.start()
+    assert entered.wait(timeout=5)
+    with pytest.raises(RuntimeError, match="still running"):
+        with cache._locked("second"):
+            pass
+    release.set()
+    t.join(timeout=5)
+
+
+def test_locked_with_no_wait_configured_blocks_until_available(tmp_path: Path) -> None:
+    """lock_wait=None blocks with no timeout, matching rpcs3's original bare `with lock:`."""
+    import threading as _threading
+    import time
+    cache = ExtractionCache(
+        name="test", cache_dir=lambda: tmp_path / "cache", enabled=lambda: True,
+        max_gb=lambda: 10.0, find_boot_target=_find_eboot, lock_wait=None,
+    )
+    entered = _threading.Event()
+    order: list[str] = []
+
+    def hold() -> None:
+        with cache._locked("first"):
+            entered.set()
+            time.sleep(0.2)
+            order.append("first-exit")
+
+    t = _threading.Thread(target=hold)
+    t.start()
+    assert entered.wait(timeout=5)
+    with cache._locked("second"):
+        order.append("second-enter")
+    t.join(timeout=5)
+    assert order == ["first-exit", "second-enter"]
+
+
+def test_locked_releases_when_the_block_raises(tmp_path: Path) -> None:
+    """A failed block inside _locked does not leave the lock held forever."""
+    cache = _cache(tmp_path)
+    with pytest.raises(ValueError):
+        with cache._locked("boom"):
+            raise ValueError("extraction failed")
+    assert cache._lock.acquire(timeout=0.1)
+    cache._lock.release()
+
+
+def test_clear_scratch_removes_every_entry_under_the_scratch_dir(tmp_path: Path) -> None:
+    """_clear_scratch removes everything under .scratch, leaving real entries alone."""
+    cache = _cache(tmp_path)
+    _touch(cache.root() / extraction_cache._SCRATCH_DIR_NAME / "orphaned" / "extracted" / "eboot.bin")
+    _touch(cache.root() / "RealEntry" / "eboot.bin")
+    cache._clear_scratch()
+    assert not (cache.root() / extraction_cache._SCRATCH_DIR_NAME / "orphaned").exists()
+    assert (cache.root() / "RealEntry").exists()
+
+
+def test_sweep_stale_extractions_is_a_noop_without_a_cache_dir(tmp_path: Path) -> None:
+    """sweep_stale_extractions does nothing when the cache dir was never created."""
+    cache = _cache(tmp_path)
+    cache.sweep_stale_extractions()  # must not raise
+
+
+def test_sweep_stale_extractions_removes_orphaned_scratch_dirs(tmp_path: Path) -> None:
+    """sweep_stale_extractions removes orphaned scratch but keeps real cache entries."""
+    cache = _cache(tmp_path)
+    _touch(cache.root() / extraction_cache._SCRATCH_DIR_NAME / "orphaned" / "extracted" / "eboot.bin")
+    _touch(cache.root() / "RealEntry" / "eboot.bin")
+    cache.sweep_stale_extractions()
+    assert not (cache.root() / extraction_cache._SCRATCH_DIR_NAME / "orphaned").exists()
+    assert (cache.root() / "RealEntry").exists()

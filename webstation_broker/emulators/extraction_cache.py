@@ -275,3 +275,55 @@ class ExtractionCache:
                 f"{rom_name} needs about {peak_bytes / _GB:.1f} GB to extract, but only "
                 f"{free / _GB:.1f} GB is free on {cache_dir}"
             )
+
+    @contextmanager
+    def _locked(self, what: str) -> Iterator[None]:
+        """Hold this instance's lock for the block.
+
+        Blocks with no timeout when `lock_wait` is None; otherwise gives up
+        and raises after `lock_wait()` seconds.
+
+        Args:
+            what: The operation waiting for the lock, named in the log and the error.
+
+        Raises:
+            RuntimeError: When a bounded `lock_wait` elapses before the lock is free.
+        """
+        timeout = -1.0 if self._lock_wait is None else self._lock_wait()
+        if not self._lock.acquire(timeout=timeout):
+            log.error(
+                "%s extraction cache: %s gave up after waiting %.0fs for the cache lock",
+                self._name, what, timeout,
+            )
+            raise RuntimeError(
+                f"another {self._name} extraction is still running; {what} waited "
+                f"{timeout:.0f}s for the extraction cache"
+            )
+        try:
+            yield
+        finally:
+            self._lock.release()
+
+    def _clear_scratch(self) -> None:
+        """Remove every staged extraction under the scratch dir. Callers must hold `_locked`.
+
+        The lock is what makes this safe: no extraction can be mid-flight
+        while it is held, so anything still sitting here was orphaned by a
+        process that died.
+        """
+        scratch_root = self._cache_dir() / _SCRATCH_DIR_NAME
+        if not scratch_root.is_dir():
+            return
+        for entry in scratch_root.iterdir():
+            log.warning("%s extraction cache: removing orphaned scratch dir %s", self._name, entry.name)
+            shutil.rmtree(entry, ignore_errors=True)
+
+    def sweep_stale_extractions(self) -> None:
+        """Remove extraction scratch dirs orphaned by a crashed broker process.
+
+        Call once at broker startup: the only other caller is an extraction,
+        which a library of already-extracted (or never-archived) titles may
+        never run again.
+        """
+        with self._locked(f"{self._name} startup scratch sweep"):
+            self._clear_scratch()
