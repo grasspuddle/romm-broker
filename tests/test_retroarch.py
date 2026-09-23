@@ -3068,7 +3068,7 @@ def test_a_save_that_is_not_one_srm_is_refused(
         ("ngc", "shape_unverified", None, _NGC_UNVERIFIED, None),
         ("dc", "destination_unresolvable", None, _no_srm("flycast", "dc"), None),
         ("arcade", "destination_unresolvable", None, _no_srm("fbneo", "arcade"), None),
-        ("nds", "destination_unresolvable", None, _no_srm("melonds", "nds"), None),
+        ("nds", "destination_unresolvable", None, _no_srm("melondsds", "nds"), None),
         ("fds", "destination_unresolvable", None, _no_srm("mesen", "fds"), None),
         ("segacd", "destination_unresolvable", None, _no_srm("genesis_plus_gx", "segacd"), None),
         ("atari5200", "destination_unresolvable", None, _no_srm("a5200", "atari5200"), None),

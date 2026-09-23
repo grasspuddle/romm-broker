@@ -40,7 +40,7 @@ that platform," not as settled fact.
 | Game Boy / Color | `gambatte` | Optional | A real boot ROM only changes splash timing; every game plays identically without one. |
 | Game Boy Advance | `mgba` | Optional | `gba_bios.bin` fixes a handful of titles that rely on exact BIOS timing; HLE covers the rest. |
 | Virtual Boy | `mednafen_vb` | None | |
-| Nintendo DS | `melonds` | Optional | Real firmware plus `bios7.bin`/`bios9.bin` is recommended; the core falls back to a built-in HLE BIOS. |
+| Nintendo DS | `melondsds` | Optional | Real firmware plus `bios7.bin`/`bios9.bin` is recommended; the core falls back to a built-in HLE BIOS. The original `melonds` core is unmaintained and crashes on launch on current buildbot builds - don't switch back to it. |
 
 ## Nintendo, disc and 3D
 
@@ -163,7 +163,7 @@ The other platforms refuse a `.srm`:
 
 | Core (platforms) | Where the save is |
 | --- | --- |
-| `melonds` (nds) | `<game>.sav` |
+| `melondsds` (nds) | `<game>.sav` |
 | `flycast` (dc) | VMU files in the system folder, `dc/vmu_save_<port>.bin`, per game — the broker pins `flycast_per_content_vmus` to `All VMUs`; its shared-by-default setting would leak saves between games |
 | `fbneo` (arcade, cps1, cps2, cps3, neogeoaes, neogeomvs) | `fbneo/<driver>.fs` or `.nv`, named for the driver |
 | `mednafen_ngp` (neo-geo-pocket, neo-geo-pocket-color) | `<game>.flash` |
