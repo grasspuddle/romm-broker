@@ -237,3 +237,41 @@ class ExtractionCache:
             current -= victim_size
             if self._on_evict is not None:
                 self._on_evict(victim)
+
+    def _require_room(self, peak_bytes: int, kept_bytes: int, rom_name: str) -> None:
+        """Refuse an extraction that cannot fit before any of it is written.
+
+        Two different figures cover two different ceilings: the cache cap
+        counts only what survives (`kept_bytes`), while the free-space guard
+        counts what is on disk at the extraction's worst moment (`peak_bytes`),
+        which can exceed what is kept when a consumer's staging needs scratch
+        space alongside its final output.
+
+        Args:
+            peak_bytes: Bytes on disk at the height of the extraction.
+            kept_bytes: Bytes the finished extraction leaves in the cache.
+            rom_name: The ROM being extracted, named in the error.
+
+        Raises:
+            RuntimeError: If the cache cap or the filesystem cannot hold it.
+        """
+        max_bytes = int(self._max_gb() * _GB)
+        current = self._cache_size_bytes()
+        if current + kept_bytes > max_bytes:
+            raise RuntimeError(
+                f"{rom_name} would leave about {kept_bytes / _GB:.1f} GB cached, more than "
+                f"max_gb ({self._max_gb():.0f} GB) allows with {current / _GB:.1f} GB already there"
+            )
+        cache_dir = self._cache_dir()
+        try:
+            free = shutil.disk_usage(cache_dir).free
+        except OSError as exc:
+            log.warning(
+                "%s extraction cache: could not read free space on %s: %s", self._name, cache_dir, exc,
+            )
+            return
+        if free < peak_bytes:
+            raise RuntimeError(
+                f"{rom_name} needs about {peak_bytes / _GB:.1f} GB to extract, but only "
+                f"{free / _GB:.1f} GB is free on {cache_dir}"
+            )

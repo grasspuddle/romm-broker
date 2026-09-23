@@ -1,6 +1,7 @@
 """Tests for the shared, opt-in archive/pkg extraction cache."""
 from __future__ import annotations
 
+import shutil
 import zipfile
 from pathlib import Path
 from typing import Callable, Optional
@@ -190,3 +191,36 @@ def test_evict_lru_calls_on_evict_once_per_evicted_dir(tmp_path: Path) -> None:
     cache._evict_lru(2, "Incoming")
     assert evicted == [old]
     assert not old.exists()
+
+
+def test_require_room_refuses_when_the_cache_cap_would_be_exceeded(tmp_path: Path) -> None:
+    """require_room refuses an extraction that would push the cache past max_gb."""
+    cache = _cache(tmp_path, max_gb=1 / 1024**3)
+    with pytest.raises(RuntimeError, match="max_gb"):
+        cache._require_room(2, 2, "Game.zip")
+
+
+def test_require_room_refuses_when_free_disk_is_short(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """require_room refuses an extraction whose peak would not fit on the free disk."""
+    cache = _cache(tmp_path, max_gb=100.0)
+    cache.root().mkdir(parents=True)
+    monkeypatch.setattr(
+        extraction_cache.shutil, "disk_usage",
+        lambda path: type("U", (), {"free": 1})(),
+    )
+    with pytest.raises(RuntimeError, match="free on"):
+        cache._require_room(10**9, 1, "Game.zip")
+
+
+def test_require_room_charges_the_cap_on_kept_and_the_disk_on_peak(tmp_path: Path) -> None:
+    """A budget where peak and kept differ charges each guard its own figure."""
+    cache = _cache(tmp_path, max_gb=100.0)
+    cache.root().mkdir(parents=True)
+    # kept (1 byte) fits the cap; peak (huge) must still be checked against
+    # free disk space rather than being ignored because kept passed.
+    free = shutil.disk_usage(str(cache.root())).free
+    cache._require_room(1, 1, "Game.zip")  # both tiny: passes without raising
+    with pytest.raises(RuntimeError, match="needs about"):
+        cache._require_room(free + 10**12, 1, "Game.zip")
