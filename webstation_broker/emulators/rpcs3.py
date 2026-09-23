@@ -747,17 +747,16 @@ _CACHE = ExtractionCache(
     max_gb=lambda: CACHE_MAX_GB,
     find_boot_target=_archive_boot_target,
     lock_wait=None,
-    missing_target_error="held no EBOOT.BIN or decrypted .iso",
 )
 """Owns rpcs3's cache-dir lock and its size/eviction bookkeeping.
 
 `_extract_and_cache` calls the pieces of this instance directly rather than
 `_CACHE.extract()`: rpcs3's over-cap error names `RPCS3_CACHE_MAX_GB`
 specifically (the shared class's own message is generic), and
-`tests/test_rpcs3.py` monkeypatches `_clear_scratch`/`_evict_lru` by module
-attribute to assert the orchestration order, which only works when the
-orchestrating code looks those names up from this module rather than from
-inside `ExtractionCache.extract`'s own method body.
+`tests/test_rpcs3.py` monkeypatches `_evict_lru` by module attribute to
+assert the orchestration order, which only works when the orchestrating
+code looks that name up from this module rather than from inside
+`ExtractionCache.extract`'s own method body.
 """
 
 _cache_key = extraction_cache._cache_key
