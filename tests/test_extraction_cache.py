@@ -98,3 +98,41 @@ def test_cache_key_raises_when_the_file_cannot_be_read(tmp_path: Path) -> None:
     missing = tmp_path / "Missing.zip"
     with pytest.raises(RuntimeError, match="could not read"):
         extraction_cache._cache_key(missing)
+
+
+def test_dir_size_sums_files_and_skips_the_marker(tmp_path: Path) -> None:
+    """Dir size sums files and skips the last-accessed marker."""
+    game_dir = tmp_path / "Game"
+    _touch(game_dir / "eboot.bin")
+    _touch(game_dir / "sub" / "data.bin")
+    _touch(game_dir / extraction_cache._LAST_ACCESSED_MARKER)
+    assert extraction_cache._dir_size(game_dir) == 10
+
+
+def test_touch_last_accessed_writes_a_marker_file(tmp_path: Path) -> None:
+    """Touch last accessed writes a marker file game_dir did not have before."""
+    game_dir = tmp_path / "Game"
+    _touch(game_dir / "eboot.bin")
+    extraction_cache._touch_last_accessed(game_dir)
+    assert (game_dir / extraction_cache._LAST_ACCESSED_MARKER).exists()
+
+
+def test_cache_size_bytes_sums_across_every_game_dir(tmp_path: Path) -> None:
+    """Cache size bytes sums across every game dir under root()."""
+    cache_dir = tmp_path / "cache"
+    _touch(cache_dir / "GameA" / "eboot.bin")
+    _touch(cache_dir / "GameB" / "eboot.bin")
+    cache = ExtractionCache(
+        name="test", cache_dir=lambda: cache_dir, enabled=lambda: True,
+        max_gb=lambda: 10.0, find_boot_target=_find_eboot,
+    )
+    assert cache._cache_size_bytes() == 10
+
+
+def test_cache_size_bytes_is_zero_without_a_cache_dir(tmp_path: Path) -> None:
+    """Cache size bytes is zero when the configured cache dir does not exist yet."""
+    cache = ExtractionCache(
+        name="test", cache_dir=lambda: tmp_path / "never-created", enabled=lambda: True,
+        max_gb=lambda: 10.0, find_boot_target=_find_eboot,
+    )
+    assert cache._cache_size_bytes() == 0

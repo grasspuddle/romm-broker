@@ -15,6 +15,7 @@ import shutil  # noqa: F401
 import subprocess  # noqa: F401
 import tempfile  # noqa: F401
 import threading
+import time
 import zipfile  # noqa: F401
 from contextlib import contextmanager  # noqa: F401
 from pathlib import Path
@@ -68,6 +69,48 @@ def _cache_key(rom: Path) -> str:
         raise RuntimeError(f"could not read {rom.name} to key its extraction: {exc}") from exc
     digest = hashlib.sha1(fingerprint.encode()).hexdigest()[:12]
     return f"{rom.stem}-{digest}"
+
+
+def _dir_size(path: Path) -> int:
+    """Sum all file sizes under path, skipping the last-accessed marker.
+
+    The marker file is skipped so the LRU eviction logic doesn't count it
+    toward the cache size, which would pollute the accounting with a file
+    that exists only for bookkeeping.
+
+    Args:
+        path: The directory to measure.
+
+    Returns:
+        The total size in bytes of all files under path, excluding the marker.
+    """
+    total = 0
+    for f in path.rglob("*"):
+        if f.name == _LAST_ACCESSED_MARKER:
+            continue
+        try:
+            if f.is_file():
+                total += f.stat().st_size
+        except OSError as exc:
+            log.debug("extraction cache: skipping unreadable %s while sizing %s: %s", f, path, exc)
+            continue
+    return total
+
+
+def _touch_last_accessed(game_dir: Path) -> None:
+    """Write a marker file in game_dir with the current Unix timestamp.
+
+    The marker is used by LRU eviction to identify which cache entries have
+    been recently accessed; touching it on each hit provides the eviction
+    logic with a mtime-based candidate list.
+
+    Args:
+        game_dir: The cache entry directory to mark as accessed now.
+    """
+    try:
+        (game_dir / _LAST_ACCESSED_MARKER).write_text(str(time.time()))
+    except OSError as exc:
+        log.warning("extraction cache: could not update last-accessed marker for %s: %s", game_dir, exc)
 
 
 class ExtractionCache:
@@ -135,3 +178,15 @@ class ExtractionCache:
     def root(self) -> Path:
         """The configured cache directory, read live from the `cache_dir` callable."""
         return self._cache_dir()
+
+    def _cache_size_bytes(self) -> int:
+        """Sum the sizes of all cache entries, or zero if the cache dir doesn't exist yet.
+
+        Returns:
+            The total size in bytes of all files in all cache entries under root(),
+                or 0 if root() is not a directory.
+        """
+        cache_dir = self._cache_dir()
+        if not cache_dir.is_dir():
+            return 0
+        return sum(_dir_size(d) for d in cache_dir.iterdir() if d.is_dir())
