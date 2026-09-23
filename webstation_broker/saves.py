@@ -404,6 +404,11 @@ def _read_manifest(zf: zipfile.ZipFile, info: zipfile.ZipInfo) -> tuple[Optional
     """
     if info.file_size > MANIFEST_MAX_BYTES:
         return None, f"manifest exceeds {MANIFEST_MAX_BYTES} bytes"
+    # The manifest is read before any per-member plan exists to gate it, so it
+    # needs its own member_problem check rather than inheriting one from a caller.
+    problem = member_problem(info, check_date=False)
+    if problem is not None:
+        return None, f"manifest {problem}"
     try:
         raw = zf.read(info)
     except ZIP_READ_ERRORS as exc:
@@ -505,10 +510,16 @@ class V1Plan:
         return self.problems[0][1] if self.problems else None
 
 
-_READABLE_COMPRESSION = frozenset(
-    {zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED, zipfile.ZIP_BZIP2, zipfile.ZIP_LZMA}
-)
-"""Compression methods `zipfile` can decompress; any other raises on read."""
+_READABLE_COMPRESSION = frozenset({zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED})
+"""Compression methods a member may use.
+
+`zipfile` can also decompress bzip2 and lzma, but for those two its per-call
+read has no output cap: it decompresses a whole compressed chunk before
+cutting the result to the member's declared size, so a small compressed chunk
+can expand to gigabytes before anything checks a limit. Deflate and stored are
+both bounded, and are what every save archive this broker builds or expects
+actually uses, so bzip2 and lzma members are refused outright instead of read.
+"""
 _ZIP_ENCRYPTED_FLAG = 0x1
 """Zip general-purpose flag bit marking an encrypted entry."""
 
@@ -541,7 +552,7 @@ def member_problem(info: zipfile.ZipInfo, *, check_date: bool = True) -> Optiona
 
 
 _VERIFY_CHUNK = 1024 * 1024
-"""Most bytes one `verify_members` read returns. It does not cap what bzip2 or lzma decompress to fill it."""
+"""Most bytes one `verify_members` read returns, once decompressed."""
 
 
 def verify_members(content: bytes, names: Iterable[str]) -> tuple[tuple[Optional[str], str], ...]:
@@ -551,9 +562,9 @@ def verify_members(content: bytes, names: Iterable[str]) -> tuple[tuple[Optional
     shows once the member is decompressed and its CRC checked, and the write
     that would do that runs after the clear. Each member is read in full in
     `_VERIFY_CHUNK` pieces, `zipfile` cuts its output at the declared size,
-    and every byte returned counts against `SAVE_FILE_MAX_BYTES`. For bzip2
-    and lzma, `zipfile` decompresses a whole compressed read at a time with no
-    output cap, so the budget bounds what is returned, not peak memory.
+    and every byte returned counts against `SAVE_FILE_MAX_BYTES`. `member_problem`
+    is checked again here, not just relied on from the caller's plan, so this
+    function stays safe to call with names a caller did not filter itself.
 
     Args:
         content: The zip archive body.
@@ -573,13 +584,24 @@ def verify_members(content: bytes, names: Iterable[str]) -> tuple[tuple[Optional
     with zf:
         for name in dict.fromkeys(names):
             try:
-                with zf.open(name) as fh:
+                info = zf.getinfo(name)
+            except KeyError as exc:
+                log.warning("saves: archive member %s is missing: %s", name, exc)
+                problems.append((name, f"archive member is missing: {name}"))
+                continue
+            problem = member_problem(info, check_date=False)
+            if problem is not None:
+                log.warning("saves: archive member %s failed its read check: %s", name, problem)
+                problems.append((name, f"archive member {problem}: {name}"))
+                continue
+            try:
+                with zf.open(info) as fh:
                     while chunk := fh.read(_VERIFY_CHUNK):
                         budget -= len(chunk)
                         if budget < 0:
                             problems.append((None, "archive exceeds size limit when extracted"))
                             return tuple(problems)
-            except (KeyError, *ZIP_READ_ERRORS) as exc:
+            except ZIP_READ_ERRORS as exc:
                 log.warning("saves: archive member %s failed its read check: %s", name, exc)
                 problems.append((name, f"archive member is corrupt: {name}"))
     return tuple(problems)

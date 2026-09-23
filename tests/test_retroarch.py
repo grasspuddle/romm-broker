@@ -165,6 +165,161 @@ class TestCoreAssets:
         assert not system.exists()
 
 
+@pytest.mark.parametrize(
+    ("slug", "option", "value"),
+    [
+        ("amiga", "puae_floppy_write_redirect", "enabled"),
+        ("dc", "flycast_per_content_vmus", "All VMUs"),
+    ],
+)
+def test_a_platform_whose_core_writes_saves_into_the_content_disk_pins_it_off(
+    slug: str, option: str, value: str
+) -> None:
+    """PUAE and Flycast are pinned off writing saves into the mounted content.
+
+    Each of these cores defaults to writing a game's save into its own disk
+    image or VMU file outside SAVE_DIR, so the save archive never captures it
+    and a writable ROM library mount gets its files modified underneath it.
+    """
+    info = retroarch._platform_info(slug)
+
+    assert info["core_options"][option] == value
+
+
+@pytest.mark.parametrize(
+    ("slug", "option", "value"),
+    [
+        ("c64", "vice_floppy_write_protection", "enabled"),
+        ("c64", "vice_easyflash_write_protection", "enabled"),
+        ("atari-st", "hatari_floppy_write_protection", "on"),
+    ],
+)
+def test_vice_and_hatari_seed_write_protection_instead_of_pinning_it(
+    slug: str, option: str, value: str
+) -> None:
+    """VICE and Hatari seed write protection on rather than pinning it every launch.
+
+    Neither core has a write-redirect option like PUAE's, only a write-protect
+    toggle, so hard-pinning it on would permanently block a player who wants
+    in-game floppy/cartridge saves back. Seeding it protects the ROM library
+    by default on the first launch, and leaves a later change the player
+    makes from RetroArch's own Quick Menu alone after that.
+    """
+    info = retroarch._platform_info(slug)
+
+    assert info["core_option_seeds"][option] == value
+    assert option not in info.get("core_options", {})
+
+
+def test_neocd_links_its_shared_backup_ram_into_the_save_archive() -> None:
+    """NeoCD's core-wide backup RAM is linked into SAVE_DIR/NeoCD, not left shared under SYSTEM_DIR.
+
+    The core loads and saves `neocd.srm` before its `neocd_per_content_saves`
+    option takes effect, so a game with no save of its own sees whatever the
+    last NeoCD game left there unless this path is brought under the archive.
+    """
+    info = retroarch._platform_info("neo-geo-cd")
+
+    assert info["save_links"] == {"neocd/neocd.srm": "NeoCD/neocd.srm"}
+
+
+class TestSaveLinks:
+    """Linking a core's fixed-path save file into the per-game save archive.
+
+    Some cores write a save outside every `save_subtree` at a path that never
+    changes between games (NeoCD's backup RAM, for one), so the archive never
+    captures it and every game after the first sees the last game's save. A
+    symlink from that fixed path back into `SAVE_DIR` puts the file under the
+    existing clear-then-restore-then-dump cycle, which isolates anything
+    living under `SAVE_DIR` per game regardless of filename.
+    """
+
+    def test_a_declared_link_points_the_system_path_at_the_save_dir(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The declared source under SYSTEM_DIR is symlinked at the SAVE_DIR destination."""
+        system = tmp_path / "system"
+        save = tmp_path / "saves"
+        monkeypatch.setattr(retroarch, "SYSTEM_DIR", system)
+        monkeypatch.setattr(retroarch, "SAVE_DIR", save)
+
+        retroarch._ensure_save_links({"neocd/neocd.srm": "NeoCD/neocd.srm"})
+
+        link = system / "neocd" / "neocd.srm"
+        assert link.is_symlink()
+        assert link.resolve() == (save / "NeoCD" / "neocd.srm").resolve()
+
+    def test_the_link_lets_a_write_land_under_save_dir(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A write through the linked source path lands under SAVE_DIR, where the archive sees it."""
+        system = tmp_path / "system"
+        save = tmp_path / "saves"
+        monkeypatch.setattr(retroarch, "SYSTEM_DIR", system)
+        monkeypatch.setattr(retroarch, "SAVE_DIR", save)
+
+        retroarch._ensure_save_links({"neocd/neocd.srm": "NeoCD/neocd.srm"})
+        (system / "neocd" / "neocd.srm").write_bytes(b"backup ram")
+
+        assert (save / "NeoCD" / "neocd.srm").read_bytes() == b"backup ram"
+
+    def test_linking_twice_is_a_no_op(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Linking the same map twice leaves one link pointing at the same destination."""
+        system = tmp_path / "system"
+        save = tmp_path / "saves"
+        monkeypatch.setattr(retroarch, "SYSTEM_DIR", system)
+        monkeypatch.setattr(retroarch, "SAVE_DIR", save)
+        links = {"neocd/neocd.srm": "NeoCD/neocd.srm"}
+
+        retroarch._ensure_save_links(links)
+        retroarch._ensure_save_links(links)
+
+        link = system / "neocd" / "neocd.srm"
+        assert link.resolve() == (save / "NeoCD" / "neocd.srm").resolve()
+
+    def test_a_stale_link_is_repointed(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A link left pointing at an old destination is repointed at the current one."""
+        system = tmp_path / "system"
+        save = tmp_path / "saves"
+        monkeypatch.setattr(retroarch, "SYSTEM_DIR", system)
+        monkeypatch.setattr(retroarch, "SAVE_DIR", save)
+        (system / "neocd").mkdir(parents=True)
+        (system / "neocd" / "neocd.srm").symlink_to(tmp_path / "elsewhere.srm")
+
+        retroarch._ensure_save_links({"neocd/neocd.srm": "NeoCD/neocd.srm"})
+
+        link = system / "neocd" / "neocd.srm"
+        assert link.resolve() == (save / "NeoCD" / "neocd.srm").resolve()
+
+    def test_a_real_file_already_there_is_left_alone(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A real file already at the source path is not replaced or deleted."""
+        system = tmp_path / "system"
+        save = tmp_path / "saves"
+        monkeypatch.setattr(retroarch, "SYSTEM_DIR", system)
+        monkeypatch.setattr(retroarch, "SAVE_DIR", save)
+        (system / "neocd").mkdir(parents=True)
+        theirs = system / "neocd" / "neocd.srm"
+        theirs.write_bytes(b"already here")
+
+        retroarch._ensure_save_links({"neocd/neocd.srm": "NeoCD/neocd.srm"})
+
+        assert not theirs.is_symlink()
+        assert theirs.read_bytes() == b"already here"
+
+    def test_an_empty_map_touches_nothing(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """An empty save_links map does not even create the system directory."""
+        system = tmp_path / "system"
+        save = tmp_path / "saves"
+        monkeypatch.setattr(retroarch, "SYSTEM_DIR", system)
+        monkeypatch.setattr(retroarch, "SAVE_DIR", save)
+
+        retroarch._ensure_save_links({})
+
+        assert not system.exists()
+
+
 class TestBrokerConfig:
     """The per-launch overlay written on top of the user's own retroarch.cfg."""
 
@@ -180,6 +335,7 @@ class TestBrokerConfig:
         monkeypatch.setattr(retroarch, "STATE_DIR", tmp_path / "states")
         monkeypatch.setattr(retroarch, "SAVE_DIR", tmp_path / "saves")
         monkeypatch.setattr(retroarch, "BROKER_CFG", tmp_path / "broker.cfg")
+        monkeypatch.setattr(retroarch, "CORE_OPTIONS_CFG", tmp_path / "broker-core-options.cfg")
 
     def test_the_joypad_driver_is_pinned_off_udev(self) -> None:
         """The overlay pins the joypad driver to linuxraw by default.
@@ -255,6 +411,120 @@ class TestBrokerConfig:
         cfg = retroarch._write_broker_cfg().read_text()
 
         assert 'savestate_thumbnail_enable = "false"' in cfg
+
+    def test_the_broker_s_core_options_file_always_wins(self) -> None:
+        """The overlay always points at the broker's core options file and forces it to apply.
+
+        `core_options_path` alone is not enough: RetroArch prefers a
+        pre-existing per-game or per-core options file over it unless
+        `game_specific_options` is off and `global_core_options` is on. All
+        three are stated so a stale options file on disk cannot silently
+        shadow a platform's pinned options.
+        """
+        cfg = retroarch._write_broker_cfg().read_text()
+
+        assert f'core_options_path = "{retroarch.CORE_OPTIONS_CFG}"' in cfg
+        assert 'global_core_options = "true"' in cfg
+        assert 'game_specific_options = "false"' in cfg
+
+
+class TestCoreOptions:
+    """The per-launch core options file a platform's `core_options` pins into."""
+
+    @pytest.fixture(autouse=True)
+    def _dirs(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Point the RetroArch data directory and the core options file at tmp_path.
+
+        Args:
+            tmp_path: The per-test temporary directory.
+            monkeypatch: The pytest monkeypatch fixture.
+        """
+        monkeypatch.setattr(retroarch, "RA_DATA_DIR", tmp_path)
+        monkeypatch.setattr(retroarch, "CORE_OPTIONS_CFG", tmp_path / "broker-core-options.cfg")
+
+    def test_declared_options_are_written_as_key_value_lines(self) -> None:
+        """Each declared option is written verbatim as `key = "value"`."""
+        path = retroarch._write_core_options({"hatari_floppy_write_protection": "on"})
+
+        assert 'hatari_floppy_write_protection = "on"' in path.read_text()
+
+    def test_the_written_file_is_core_options_cfg(self) -> None:
+        """The function writes, and returns, CORE_OPTIONS_CFG."""
+        path = retroarch._write_core_options({})
+
+        assert path == retroarch.CORE_OPTIONS_CFG
+        assert path.exists()
+
+    def test_an_empty_map_still_writes_the_file(self) -> None:
+        """An empty options map still writes the file RetroArch is pointed at.
+
+        `game_specific_options` is forced off for every platform, so RetroArch
+        expects this file to exist even when a platform pins nothing.
+        """
+        path = retroarch._write_core_options({})
+
+        assert path.read_text() == ""
+
+    def test_a_second_write_replaces_the_first(self) -> None:
+        """Writing again with a different map drops the previous run's options."""
+        retroarch._write_core_options({"hatari_floppy_write_protection": "on"})
+
+        path = retroarch._write_core_options({"vice_floppy_write_protection": "enabled"})
+
+        cfg = path.read_text()
+        assert "vice_floppy_write_protection" in cfg
+        assert "hatari_floppy_write_protection" not in cfg
+
+
+class TestResolveCoreOptions:
+    """Merging a platform's hard-pinned core options over its one-time seed defaults."""
+
+    @pytest.fixture(autouse=True)
+    def _dirs(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Point CORE_OPTIONS_CFG at tmp_path.
+
+        Args:
+            tmp_path: The per-test temporary directory.
+            monkeypatch: The pytest monkeypatch fixture.
+        """
+        monkeypatch.setattr(retroarch, "CORE_OPTIONS_CFG", tmp_path / "broker-core-options.cfg")
+
+    def test_a_seed_is_applied_when_no_options_file_exists_yet(self) -> None:
+        """A seed key gets its default value when CORE_OPTIONS_CFG does not exist yet."""
+        resolved = retroarch._resolve_core_options({}, {"hatari_floppy_write_protection": "on"})
+
+        assert resolved == {"hatari_floppy_write_protection": "on"}
+
+    def test_a_seed_already_on_disk_keeps_its_current_value(self) -> None:
+        """A seed key already written keeps the value on disk, not the seed default.
+
+        RetroArch persists a user's Quick Menu change back into this same
+        file, so a value already there might be the seed or the user's own
+        later choice; either way it is not reset.
+        """
+        retroarch.CORE_OPTIONS_CFG.write_text('hatari_floppy_write_protection = "off"\n')
+
+        resolved = retroarch._resolve_core_options({}, {"hatari_floppy_write_protection": "on"})
+
+        assert resolved == {"hatari_floppy_write_protection": "off"}
+
+    def test_a_hard_pinned_option_overrides_its_own_seed(self) -> None:
+        """A key pinned in core_options always wins over its own core_option_seeds entry."""
+        retroarch.CORE_OPTIONS_CFG.write_text('flycast_per_content_vmus = "disabled"\n')
+
+        resolved = retroarch._resolve_core_options(
+            {"flycast_per_content_vmus": "All VMUs"}, {"flycast_per_content_vmus": "disabled"}
+        )
+
+        assert resolved == {"flycast_per_content_vmus": "All VMUs"}
+
+    def test_a_hard_pin_and_a_seed_for_different_keys_both_come_through(self) -> None:
+        """A hard pin and a seed for two different keys are both present in the result."""
+        resolved = retroarch._resolve_core_options(
+            {"some_option": "on"}, {"hatari_floppy_write_protection": "on"}
+        )
+
+        assert resolved == {"hatari_floppy_write_protection": "on", "some_option": "on"}
 
 
 def test_extensions_and_save_subtrees_survive_the_load_as_tuples() -> None:
@@ -404,6 +674,8 @@ class TestResumeGate:
         """
         monkeypatch.setattr(retroarch, "_ensure_core", lambda name, source=None: tmp_path / f"{name}.so")
         monkeypatch.setattr(retroarch, "_ensure_core_assets", lambda assets: None)
+        monkeypatch.setattr(retroarch, "_ensure_save_links", lambda links: None)
+        monkeypatch.setattr(retroarch, "_write_core_options", lambda options: tmp_path / "core-options.cfg")
         monkeypatch.setattr(retroarch, "_write_broker_cfg", lambda *a: tmp_path / "broker.cfg")
         monkeypatch.setattr(
             retroarch.shutil, "which", lambda binary, path=None: "/usr/bin/retroarch"
@@ -2335,6 +2607,8 @@ def test_a_launch_tells_retroarch_which_config_the_broker_read(
     monkeypatch.setattr(retroarch, "RA_CONFIG_PATH", tmp_path / "ra" / "retroarch.cfg")
     monkeypatch.setattr(retroarch, "_ensure_core", lambda name, source=None: tmp_path / f"{name}.so")
     monkeypatch.setattr(retroarch, "_ensure_core_assets", lambda assets: None)
+    monkeypatch.setattr(retroarch, "_ensure_save_links", lambda links: None)
+    monkeypatch.setattr(retroarch, "_write_core_options", lambda options: tmp_path / "core-options.cfg")
     monkeypatch.setattr(retroarch, "_write_broker_cfg", lambda *a: tmp_path / "broker.cfg")
     monkeypatch.setattr(retroarch.shutil, "which", lambda binary, path=None: "/usr/bin/retroarch")
     monkeypatch.setattr(retroarch.Retroarch, "stop", lambda self: None)
@@ -2348,6 +2622,96 @@ def test_a_launch_tells_retroarch_which_config_the_broker_read(
     cmd = spawned[0]
     assert cmd[cmd.index("--config") + 1] == str(retroarch.RA_CONFIG_PATH)
 
+
+def test_a_launch_links_save_paths_and_pins_core_options(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The launch links the platform's save_links and writes its core_options.
+
+    Both need to be in place before RetroArch starts: the link so a save the
+    core writes at a fixed system path lands under the archive, the options
+    file so the core boots with the pinned values rather than its defaults.
+    """
+    linked: list[dict[str, str]] = []
+    written: list[dict[str, str]] = []
+
+    class _NullThread:
+        """A threading.Thread stand-in whose target is never run."""
+
+        def __init__(self, **kwargs: Any) -> None:
+            """Accept and discard whatever launch() builds the thread with."""
+
+        def start(self) -> None:
+            """Start nothing."""
+
+    info = dict(retroarch._platform_info("snes"))
+    info["save_links"] = {"neocd/neocd.srm": "NeoCD/neocd.srm"}
+    info["core_options"] = {"some_option": "on"}
+    monkeypatch.setattr(retroarch, "_platform_info", lambda platform: info)
+    monkeypatch.setattr(retroarch, "_ensure_core", lambda name, source=None: tmp_path / f"{name}.so")
+    monkeypatch.setattr(retroarch, "_ensure_core_assets", lambda assets: None)
+    monkeypatch.setattr(retroarch, "_ensure_save_links", lambda links: linked.append(links))
+    monkeypatch.setattr(
+        retroarch,
+        "_write_core_options",
+        lambda options: (written.append(options), tmp_path / "core-options.cfg")[1],
+    )
+    monkeypatch.setattr(retroarch, "_write_broker_cfg", lambda *a: tmp_path / "broker.cfg")
+    monkeypatch.setattr(retroarch.shutil, "which", lambda binary, path=None: "/usr/bin/retroarch")
+    monkeypatch.setattr(retroarch.Retroarch, "stop", lambda self: None)
+    monkeypatch.setattr(retroarch.Retroarch, "_spawn_ra", lambda self, cmd, env: None)
+    monkeypatch.setattr(retroarch.threading, "Thread", _NullThread)
+    emu = retroarch.Retroarch()
+    emu.platform = "snes"
+
+    emu.launch(tmp_path / "game.sfc", None)
+
+    assert linked == [{"neocd/neocd.srm": "NeoCD/neocd.srm"}]
+    assert written == [{"some_option": "on"}]
+
+
+def test_a_launch_resolves_seed_options_before_writing_them(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The launch resolves core_option_seeds against CORE_OPTIONS_CFG before writing.
+
+    A first launch has nothing on disk yet, so the seed's default value goes
+    through to _write_core_options.
+    """
+    written: list[dict[str, str]] = []
+
+    class _NullThread:
+        """A threading.Thread stand-in whose target is never run."""
+
+        def __init__(self, **kwargs: Any) -> None:
+            """Accept and discard whatever launch() builds the thread with."""
+
+        def start(self) -> None:
+            """Start nothing."""
+
+    monkeypatch.setattr(retroarch, "CORE_OPTIONS_CFG", tmp_path / "broker-core-options.cfg")
+    info = dict(retroarch._platform_info("snes"))
+    info["core_option_seeds"] = {"hatari_floppy_write_protection": "on"}
+    monkeypatch.setattr(retroarch, "_platform_info", lambda platform: info)
+    monkeypatch.setattr(retroarch, "_ensure_core", lambda name, source=None: tmp_path / f"{name}.so")
+    monkeypatch.setattr(retroarch, "_ensure_core_assets", lambda assets: None)
+    monkeypatch.setattr(retroarch, "_ensure_save_links", lambda links: None)
+    monkeypatch.setattr(
+        retroarch,
+        "_write_core_options",
+        lambda options: (written.append(options), tmp_path / "core-options.cfg")[1],
+    )
+    monkeypatch.setattr(retroarch, "_write_broker_cfg", lambda *a: tmp_path / "broker.cfg")
+    monkeypatch.setattr(retroarch.shutil, "which", lambda binary, path=None: "/usr/bin/retroarch")
+    monkeypatch.setattr(retroarch.Retroarch, "stop", lambda self: None)
+    monkeypatch.setattr(retroarch.Retroarch, "_spawn_ra", lambda self, cmd, env: None)
+    monkeypatch.setattr(retroarch.threading, "Thread", _NullThread)
+    emu = retroarch.Retroarch()
+    emu.platform = "snes"
+
+    emu.launch(tmp_path / "game.sfc", None)
+
+    assert written == [{"hatari_floppy_write_protection": "on"}]
 
 
 @pytest.mark.parametrize(

@@ -9,7 +9,7 @@ const links = [
   {
     href: '/docs/container',
     title: 'Run the container',
-    body: 'The taisun/random-images:webstation-romm image: compose file, volumes, GPU, and what happens at boot.',
+    body: 'The linuxserver/webstation:romm image: compose file, volumes, GPU, and what happens at boot.',
   },
   {
     href: '/docs/api',

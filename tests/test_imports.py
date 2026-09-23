@@ -484,8 +484,10 @@ def test_normalise_member_honours_a_tighter_component_limit() -> None:
     [
         ("flag_bits", 0x801, "the member is encrypted"),
         ("compress_type", 99, "the member uses unsupported compression method 99"),
+        ("compress_type", zipfile.ZIP_BZIP2, "the member uses unsupported compression method 12"),
+        ("compress_type", zipfile.ZIP_LZMA, "the member uses unsupported compression method 14"),
     ],
-    ids=["encrypted", "compression"],
+    ids=["encrypted", "compression", "bzip2", "lzma"],
 )
 def test_normalise_member_refuses_a_member_that_cannot_be_read(field: str, value: int, detail: str) -> None:
     """A member whose header says the write would fail is refused before the clear.
