@@ -225,6 +225,13 @@ SAVE_DIR = RA_DATA_DIR / "saves"
 """The broker-managed savefile (SRAM) directory, `saves` under `RA_DATA_DIR`."""
 BROKER_CFG = RA_DATA_DIR / "broker.cfg"
 """The append-config written per launch, `broker.cfg` under `RA_DATA_DIR`."""
+CORE_OPTIONS_CFG = RA_DATA_DIR / "broker-core-options.cfg"
+"""The per-core option pins written per launch, `broker-core-options.cfg` under `RA_DATA_DIR`.
+
+`_write_broker_cfg` points `core_options_path` at this file and forces
+`global_core_options`/`game_specific_options` so it always applies; see
+`_write_core_options`.
+"""
 RA_LOG_PATH = Path(os.environ.get("RETROARCH_LOG_PATH", "/config/retroarch.log"))
 """Where RetroArch's stderr is appended, from `RETROARCH_LOG_PATH` (default `/config/retroarch.log`)."""
 
@@ -436,6 +443,27 @@ their app-data dir.
 `resume_settle` and `state_confirm_wait` override `RESUME_LOAD_SETTLE` and
 `STATE_CONFIRM_WAIT` for cores that are slower than the defaults assume,
 such as PPSSPP's multi-megabyte state files.
+
+`core_options` pins libretro core option keys to values on every launch, via
+`_write_core_options`; for cores that default to writing a game's save into
+its own content file or disk image (PUAE) rather than `SAVE_DIR`, so the ROM
+library never gets a save mixed into it.
+
+`core_option_seeds` pins a core option key the same way, but only the first
+time it is missing from `CORE_OPTIONS_CFG`; once seeded, whatever value is
+already on disk wins, including a value the user changed from RetroArch's own
+Quick Menu, since `_write_broker_cfg` makes that file the one every core's
+option changes round-trip through. `_resolve_core_options` computes the seed,
+and a key also present in `core_options` always keeps the pinned value
+instead. Used for VICE and Hatari's floppy/cartridge write protection, which
+have no write-redirect option like PUAE's: seeding it on protects the ROM
+library by default without permanently blocking a player who wants in-game
+floppy saves back.
+
+`save_links` maps a `SYSTEM_DIR`-relative path to a `SAVE_DIR`-relative one,
+for a core that keeps a fixed-path save file outside every `save_subtree`
+(NeoCD's backup RAM); `_ensure_save_links` symlinks the source at the
+destination so the save archive's existing per-game isolation reaches it.
 """
 
 _ROM_SEARCH_GLOBS = ("*", "*/*")
@@ -676,6 +704,108 @@ def _ensure_core_assets(assets: dict[str, str]) -> None:
         log.info("retroarch: linked core assets %s -> %s", dest, src)
 
 
+def _ensure_save_links(links: dict[str, str]) -> None:
+    """Link a core's fixed-path save file into the per-game save archive.
+
+    Some cores write a save outside every `save_subtree`, at a path that
+    never changes between games (NeoCD's backup RAM, shared because the core
+    applies its per-content option too late to matter). The archive's
+    clear-then-restore-then-dump cycle already isolates anything under
+    `SAVE_DIR` per game regardless of filename, so symlinking the fixed
+    source path at its `SAVE_DIR` destination is enough to bring it under
+    that isolation.
+
+    Best effort: a real file already at the source path is left alone with a
+    loud warning, never silently deleted or moved.
+
+    Args:
+        links: `SYSTEM_DIR`-relative source path to `SAVE_DIR`-relative
+            destination path.
+    """
+    for source_rel, dest_rel in links.items():
+        source = SYSTEM_DIR / source_rel
+        dest = SAVE_DIR / dest_rel
+        try:
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            source.parent.mkdir(parents=True, exist_ok=True)
+            if source.is_symlink():
+                if source.resolve() == dest.resolve():
+                    continue
+                source.unlink()
+            elif source.exists():
+                log.warning(
+                    "retroarch: %s is a real file, not a link to %s, so its saves will "
+                    "stay shared across every game on this core; move or remove it to "
+                    "restore per-game save isolation",
+                    source,
+                    dest,
+                )
+                continue
+            source.symlink_to(dest)
+        except OSError as exc:
+            log.error("retroarch: could not link save %s -> %s: %s", source, dest, exc)
+            continue
+        log.info("retroarch: linked save %s -> %s", source, dest)
+
+
+def _resolve_core_options(options: dict[str, str], seeds: dict[str, str]) -> dict[str, str]:
+    """Merge a platform's hard-pinned core options over its one-time seed defaults.
+
+    A seed key gets its default value only while it is missing from
+    `CORE_OPTIONS_CFG`; once written, the value already on disk is kept
+    instead, so a later change the user makes from RetroArch's own Quick Menu
+    (which lands in the same file, because `_write_broker_cfg` forces
+    `global_core_options`) survives the next launch rather than being reset.
+    A key named in `options` always takes the pinned value, even over a seed
+    for the same key.
+
+    Args:
+        options: A platform's hard-pinned `core_options`; always applied.
+        seeds: A platform's `core_option_seeds`; applied only for a key
+            currently absent from `CORE_OPTIONS_CFG`.
+
+    Returns:
+        The full option map to pass to `_write_core_options`.
+    """
+    resolved: dict[str, str] = {}
+    if seeds:
+        try:
+            text = CORE_OPTIONS_CFG.read_text()
+        except OSError:
+            text = ""
+        existing: dict[str, str] = {}
+        for line in text.splitlines():
+            key, sep, value = line.partition("=")
+            if sep:
+                existing[key.strip()] = value.strip().strip('"')
+        resolved.update({key: existing.get(key, default) for key, default in seeds.items()})
+    resolved.update(options)
+    return resolved
+
+
+def _write_core_options(options: dict[str, str]) -> Path:
+    """Write the per-launch core options file a platform's `core_options` pins into.
+
+    Written unconditionally, even when `options` is empty: `_write_broker_cfg`
+    forces `game_specific_options` off for every platform, so RetroArch
+    expects `CORE_OPTIONS_CFG` to exist on every launch. The file is written
+    through a temp file.
+
+    Args:
+        options: Core option key to the value it is pinned to, both exactly
+            as the core's own `retro_variable` names and values.
+
+    Returns:
+        The path of the written file, `CORE_OPTIONS_CFG`.
+    """
+    RA_DATA_DIR.mkdir(parents=True, exist_ok=True)
+    cfg = "".join(f'{key} = "{value}"\n' for key, value in options.items())
+    tmp = CORE_OPTIONS_CFG.with_suffix(".tmp")
+    tmp.write_text(cfg)
+    os.replace(tmp, CORE_OPTIONS_CFG)
+    return CORE_OPTIONS_CFG
+
+
 def _write_broker_cfg() -> Path:
     """Write the minimal per-launch config, applied *on top of* the user's config.
 
@@ -719,6 +849,14 @@ def _write_broker_cfg() -> Path:
         # confirmation.
         'confirm_quit = "false"\n'
         'quit_press_twice = "false"\n'
+        # core_options_path alone is not enough: RetroArch prefers a
+        # pre-existing per-game or per-core options file over it unless
+        # game_specific_options is off and global_core_options is on. All
+        # three are stated so a stale options file on disk cannot silently
+        # shadow a platform's pinned options.
+        f'core_options_path = "{CORE_OPTIONS_CFG}"\n'
+        'global_core_options = "true"\n'
+        'game_specific_options = "false"\n'
     )
     if JOYPAD_DRIVER:
         cfg += f'input_joypad_driver = "{JOYPAD_DRIVER}"\n'
@@ -1902,9 +2040,11 @@ class Retroarch(Emulator):
         """Start RetroArch on `rom_path` with the platform's core.
 
         Any running session is stopped first. The core is downloaded if
-        missing, its assets linked, and the broker config written; then
-        RetroArch starts fullscreen with that config appended. A resume is
-        deferred to a background thread that waits for the game to be up.
+        missing, its assets linked, its fixed-path saves linked into the
+        archive, its core options pinned or seeded, and the broker config
+        written; then RetroArch starts fullscreen with that config appended.
+        A resume is deferred to a background thread that waits for the game
+        to be up.
 
         Args:
             rom_path: The file to boot, as returned by `resolve_rom_file`.
@@ -1923,6 +2063,10 @@ class Retroarch(Emulator):
             )
         core = _ensure_core(info["core"], info.get("core_source"))
         _ensure_core_assets(info.get("assets", {}))
+        _ensure_save_links(info.get("save_links", {}))
+        _write_core_options(
+            _resolve_core_options(info.get("core_options", {}), info.get("core_option_seeds", {}))
+        )
         self._resume_settle = info.get("resume_settle", RESUME_LOAD_SETTLE)
         self._state_confirm_wait = info.get("state_confirm_wait", STATE_CONFIRM_WAIT)
         cfg_path = _write_broker_cfg()
