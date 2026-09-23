@@ -100,8 +100,8 @@ _ROM_SEARCH_GLOBS = ("*", "*/*", "*/*/*")
 # Only executables named EBOOT.* are bootable; other .bin/.self files in a
 # rip (licenses, sdata) are not.
 _EBOOT_EXTS = (".bin", ".self", ".elf")
-_ARCHIVE_EXTS = (".7z", ".zip", ".rar")
-_GB = 1024**3
+_ARCHIVE_EXTS = extraction_cache._ARCHIVE_EXTS
+_GB = extraction_cache._GB
 _LICENSE_EXTS = (".rap", ".edat")
 # Title ids are alphanumeric (BLUS30443, NPUB30638). Everything parsed out of
 # a PKG header or a PARAM.SFO is attacker-supplied and gets joined onto
@@ -757,6 +757,14 @@ specifically (the shared class's own message is generic), and
 assert the orchestration order, which only works when the orchestrating
 code looks that name up from this module rather than from inside
 `ExtractionCache.extract`'s own method body.
+
+Because of that, `_CACHE` is never given `budget`/`stage`/`phase_name`/
+`missing_target_error` here, and nothing in this module calls
+`_CACHE.extract()`. Calling it directly is unsupported: it would fall back
+to the shared class's generic defaults (member-listing-based size
+budgeting, a plain extract-and-check stage) instead of this module's own
+`_extraction_size`/`_require_room` accounting, and its error text would
+name `max_gb` rather than `RPCS3_CACHE_MAX_GB`.
 """
 
 _cache_key = extraction_cache._cache_key

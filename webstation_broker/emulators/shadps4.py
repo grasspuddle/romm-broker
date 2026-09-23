@@ -135,10 +135,10 @@ _MAX_GPU_DETECT_ATTEMPTS = 3
 rather than exits costs `_VULKANINFO_TIMEOUT` a few times instead of on every
 launch for the broker's lifetime."""
 
-_GB = 1024**3
+_GB = extraction_cache._GB
 """Bytes per GB, the unit CACHE_MAX_GB and the space checks are expressed in."""
 
-_ARCHIVE_EXTS = (".7z", ".zip", ".rar")
+_ARCHIVE_EXTS = extraction_cache._ARCHIVE_EXTS
 """Archive formats that may hold a `.pkg`, extracted before pkg_extractor ever sees it."""
 
 ROM_EXTENSIONS = (".zar", ".bin", ".pkg") + _ARCHIVE_EXTS
@@ -699,6 +699,15 @@ generic), and `tests/test_shadps4.py` monkeypatches `_evict_lru` and
 which only works when the orchestrating code looks those names up from
 this module rather than from inside `ExtractionCache.extract`'s own
 method body.
+
+Because of that, `_CACHE` is never given `budget`/`stage`/`phase_name`/
+`missing_target_error` here, and nothing in this module calls
+`_CACHE.extract()`. Calling it directly is unsupported: it would fall back
+to the shared class's generic defaults (member-listing-based size
+budgeting, a plain extract-and-check stage that does not know how to run
+pkg_extractor or unpack an archive-holding-a-pkg) instead of this module's
+own `_check_expansion`/`_require_room` accounting, and its error text
+would name `max_gb` rather than `SHADPS4_CACHE_MAX_GB`.
 """
 
 _cache_key = extraction_cache._cache_key

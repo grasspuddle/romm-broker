@@ -447,7 +447,7 @@ class ExtractionCache:
         which a library of already-extracted (or never-archived) titles may
         never run again.
         """
-        with self._locked(f"{self._name} startup scratch sweep"):
+        with self._locked("startup scratch sweep"):
             self._clear_scratch()
 
     def _default_stage(
@@ -510,10 +510,14 @@ class ExtractionCache:
             if game_dir.is_dir():
                 boot = self._find_boot_target(game_dir)
                 if boot is not None:
-                    log.info("%s cache hit: %s (boot target: %s)", self._name, rom.name, boot.name)
+                    log.info(
+                        "%s extraction cache hit: %s (boot target: %s)", self._name, rom.name, boot.name,
+                    )
                     _touch_last_accessed(game_dir)
                     return boot
-                log.warning("%s cache: %s has no boot target, re-extracting", self._name, rom.name)
+                log.warning(
+                    "%s extraction cache: %s has no boot target, re-extracting", self._name, rom.name,
+                )
                 shutil.rmtree(game_dir, ignore_errors=True)
 
             # Set before eviction, not after: eviction can rmtree tens of GB
@@ -551,7 +555,7 @@ class ExtractionCache:
                         staged.replace(game_dir)
                     except OSError as exc:
                         log.error(
-                            "%s cache: could not move the extraction of %s into %s: %s",
+                            "%s extraction cache: could not move the extraction of %s into %s: %s",
                             self._name, rom.name, game_dir, exc,
                         )
                         raise RuntimeError(f"could not cache the extraction of {rom.name}: {exc}") from exc
@@ -566,5 +570,5 @@ class ExtractionCache:
             if boot is None:
                 raise RuntimeError(f"{rom.name} extracted but {self._missing_target_error}")
             _touch_last_accessed(game_dir)
-            log.info("%s: extracted %s, booting %s", self._name, rom.name, boot)
+            log.info("%s extraction cache: extracted %s, booting %s", self._name, rom.name, boot)
         return boot
