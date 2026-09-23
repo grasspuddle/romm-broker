@@ -1,5 +1,89 @@
 # Changelog
 
+## [0.9.0](https://github.com/romm-streaming/romm-broker/compare/v0.8.5...v0.9.0) (2026-09-21)
+
+
+### Features
+
+* **activate:** preflight declared imports before the clear and record placements ([218b5c4](https://github.com/romm-streaming/romm-broker/commit/218b5c466b496985348cd0f4f29589afd90b5937))
+* **api:** accept RomM's title_id and save_target on activate ([bb46efd](https://github.com/romm-streaming/romm-broker/commit/bb46efdf8cc14063743cfea08a5d9368e340a863))
+* **api:** add the import-spec discovery route ([e31fa34](https://github.com/romm-streaming/romm-broker/commit/e31fa3480716fe9429f67b7422d6adbb72fdcd91))
+* **azahar:** accept declared save imports and rewrite the console ids ([35a6325](https://github.com/romm-streaming/romm-broker/commit/35a6325692bec5be18531ee0c9858e916e858776))
+* **cemu:** accept declared save imports under the account Cemu created ([54749ef](https://github.com/romm-streaming/romm-broker/commit/54749ef22ff4041b6752b954286fca30e9bb9730))
+* **dolphin:** accept declared GameCube cards, Wii NAND saves and states ([ca6b142](https://github.com/romm-streaming/romm-broker/commit/ca6b14294be32b85c6c4aa952ad4f3698b2204a3))
+* **dolphin:** read a game id out of bytes, and normalise a full Wii title id ([2099339](https://github.com/romm-streaming/romm-broker/commit/20993394fcceadfb9af042d25e96a0690a2a9f85))
+* **duckstation:** pin the shared memory card and accept cards and resume states as imports ([eac417f](https://github.com/romm-streaming/romm-broker/commit/eac417f0f48eadf75520cfbfd093cd670893dc66))
+* **eden:** accept declared save imports with their profile store ([fb97713](https://github.com/romm-streaming/romm-broker/commit/fb977135079c900d8762b46d5f18277e2b6d6193))
+* **flycast:** accept VMU saves, cards and marker-owned resume states as imports ([9fd1583](https://github.com/romm-streaming/romm-broker/commit/9fd1583b03fd2e1b5a05c537a8502fa08a9546ff))
+* **imports:** add kind companions, unit subtrees and the push-route identity checks ([44a46d7](https://github.com/romm-streaming/romm-broker/commit/44a46d774e1837ade0ce76e9f79ddd32ac741e4f))
+* **imports:** add owner_marker_sidecar for marker-owned resume states ([10ce7d9](https://github.com/romm-streaming/romm-broker/commit/10ce7d91a3ba6fca24ad15ff1e2ee9e4d98c150e))
+* **imports:** add preflight and the emulator import hooks, refusing by default ([d726de1](https://github.com/romm-streaming/romm-broker/commit/d726de1be2ac2d92cc87f52915d46cc86238c486))
+* **imports:** add the declared-import types and refusal body ([fc560b0](https://github.com/romm-streaming/romm-broker/commit/fc560b08e74694db444b4ba73a94a2d5d7f68c91))
+* **imports:** add the kind gate and shared placement helpers ([dfd56ec](https://github.com/romm-streaming/romm-broker/commit/dfd56ec76eb50eef1cebd6a18d446373df88b761))
+* **imports:** check an import plan as a whole before anything is written ([49b2279](https://github.com/romm-streaming/romm-broker/commit/49b227972bf9a10af0baa20f509fa00ad85030ed))
+* **imports:** parse the version 2 manifest's declarations ([6eefb99](https://github.com/romm-streaming/romm-broker/commit/6eefb994f7e50e063eac4035ddd9f47b605a9851))
+* **imports:** refine refusals by declared origin and suggest an emulator ([f203747](https://github.com/romm-streaming/romm-broker/commit/f2037476d53927d35ed7a4f5e0b2473f29ef595e))
+* **imports:** refuse unreadable members as unreadable_member, not unsafe_path ([16666d1](https://github.com/romm-streaming/romm-broker/commit/16666d109dfee4cab9d96ca09438f96a07e1b907))
+* **imports:** refuse unsafe import member paths in one pass ([6ad0f9b](https://github.com/romm-streaming/romm-broker/commit/6ad0f9bdf8404f16a7a2c39facca670bf10a4227))
+* **imports:** resolve and check game identity for imports ([b21f727](https://github.com/romm-streaming/romm-broker/commit/b21f727a6e07a18a951808f91bfee0a911cfb47a))
+* **pcsx2:** accept declared folder memory cards ([1b0de57](https://github.com/romm-streaming/romm-broker/commit/1b0de57e4b3b0ac13299b0c68668dea532ecb09b))
+* **ppsspp:** accept declared PSP save folders and one state with its screenshot ([5ba749a](https://github.com/romm-streaming/romm-broker/commit/5ba749a2bec3f7b16d04c1118f434135537bd6b6))
+* **retroarch:** import Wii NAND and 3DS saves, keep GameCube refused ([08b9e49](https://github.com/romm-streaming/romm-broker/commit/08b9e497f5bd22fcd1535d065ccab5bf574619b0))
+* **retroarch:** pin the sorted save dirs and accept .srm saves as imports ([451da72](https://github.com/romm-streaming/romm-broker/commit/451da72c22ba23afb714cb67a3a15550fec74265))
+* **rpcs3:** import save folders, game data and one savestate ([405267e](https://github.com/romm-streaming/romm-broker/commit/405267ea9d0b37af9934885aa4c0889e3157124b))
+* **saves:** check a v1 restore's members without writing them ([9c27f78](https://github.com/romm-streaming/romm-broker/commit/9c27f789a8f0e861c0a7f6eee95fe4376857eadc))
+* **saves:** read an archive's members in one pass before restoring ([e4b81f7](https://github.com/romm-streaming/romm-broker/commit/e4b81f789bc7830b6f4a8b2bd895d7834e2024a3))
+* **saves:** ship a session's placed imports in its exit dump ([f15dab7](https://github.com/romm-streaming/romm-broker/commit/f15dab7e7d1202398b6dba0135418cf032884f85))
+* **scummvm:** import saves and one state by target ([38f5fe7](https://github.com/romm-streaming/romm-broker/commit/38f5fe7d6b122f8c6a4811be7f7d98f771e9b40d))
+* **shadps4:** accept declared save imports and re-root them to the default user ([88e375e](https://github.com/romm-streaming/romm-broker/commit/88e375ec160c556746d130ab02d65ade7ad94a86))
+* **xemu:** accept declared save imports under the session's title ([b57e728](https://github.com/romm-streaming/romm-broker/commit/b57e7287bbc969e1c851714be9be89e60c36ad6a))
+* **xenia:** accept declared save imports and read the signed-in profile's XUID ([6832e5f](https://github.com/romm-streaming/romm-broker/commit/6832e5fe1b92795af8cfb8fc8cea31651997e599))
+
+
+### Bug Fixes
+
+* **activate:** refuse a bad save archive before clearing the slot ([3fc139d](https://github.com/romm-streaming/romm-broker/commit/3fc139dba6e90bf639623a1ea4ec126e27631211))
+* **api:** say an unknown save_target_layout is passed through ([0578595](https://github.com/romm-streaming/romm-broker/commit/05785954ccf21ba57f58193df51b0802496a02af))
+* **dolphin:** let Dolphin's own config pick the video backend ([12209dc](https://github.com/romm-streaming/romm-broker/commit/12209dc899b55a859a96261b0d56d3440eb9e3be))
+* **duckstation,rpcs3:** serve the exit state a saving exit confirmed through the state-file GET so RomM can file it ([3c6d529](https://github.com/romm-streaming/romm-broker/commit/3c6d529c2b455b1ef39a378c7c528b26276f6034))
+* **duckstation:** normalize archive paths in the carried-card check and skip a non-file pinned card ([9cf53fb](https://github.com/romm-streaming/romm-broker/commit/9cf53fb241d43d8cef9a6970e35d38236f9bb62f))
+* **emulators:** fullmatch state and card names as ASCII, and push names through check_state_basename ([8b07dbc](https://github.com/romm-streaming/romm-broker/commit/8b07dbc4bee3dd137931cd3857d3801e38320404))
+* **imports:** hold Azahar, Cemu, shadPS4 and xemu saves to the launched game ([2f08b42](https://github.com/romm-streaming/romm-broker/commit/2f08b4200652028cec56b3dda94c025030b2e614))
+* **imports:** hold sidecars to the placement checks and suggest retroarch only for libretro states ([82d9fd2](https://github.com/romm-streaming/romm-broker/commit/82d9fd29814cd043fc534db7eb4be2c509a6c609))
+* **imports:** keep the xemu registry tests off /config and correct two docs entries ([cb566eb](https://github.com/romm-streaming/romm-broker/commit/cb566eb9465b82f1395f0e304de1ec10f5e05e14))
+* **imports:** key the identity memo on every input and read ids as ASCII ([aa84991](https://github.com/romm-streaming/romm-broker/commit/aa84991d993faeaefb998348535cc142f16ca7cf))
+* **imports:** log both ids and the override hint when a pushed state names another game ([b23ef27](https://github.com/romm-streaming/romm-broker/commit/b23ef272d074b4976a49dc1b4acef4a548c0aaf1))
+* **imports:** read a non-string manifest origin as unknown ([d149c02](https://github.com/romm-streaming/romm-broker/commit/d149c0212b4a8f7fb1f1f3c71d931635ba4b0c30))
+* **imports:** refuse a file/directory clash between destinations before the clear ([2d152e9](https://github.com/romm-streaming/romm-broker/commit/2d152e9b2350cfdf7f521ac3d4a46abd33be47eb))
+* **imports:** refuse C1, bidi and duplicate names; catch failed head() reads ([97cbebb](https://github.com/romm-streaming/romm-broker/commit/97cbebbdfe236c0aba3f4a0d05044b39e7621416))
+* **imports:** refuse, not crash, when a renamer rejects a name ([39d7f8c](https://github.com/romm-streaming/romm-broker/commit/39d7f8cfdbdac86215498d04a4ae9c4ddf081acc))
+* **logging:** bound the import block and log import refusals at warning ([c690ce7](https://github.com/romm-streaming/romm-broker/commit/c690ce76b00ae9ac5fb6870248eb0e5653286651))
+* **pcsx2:** take save_root from DATA_DIR so restore and PCSX2 agree on the tree ([ed1aea4](https://github.com/romm-streaming/romm-broker/commit/ed1aea450e06cac1e693b1c683755915ff231c27))
+* **ppsspp:** keep the undo states from counting against an imported state ([bc9fc53](https://github.com/romm-streaming/romm-broker/commit/bc9fc53bc62a87c0da02fdbda4756264ebfff821))
+* **retroarch:** accept .srm only on platforms whose core loads it ([09f8838](https://github.com/romm-streaming/romm-broker/commit/09f8838940c5ac9ecf14142bd779b30ba04753ea))
+* **retroarch:** derive the state leaf regex from the suffix regex and assert the renamed .srm is accepted ([140031e](https://github.com/romm-streaming/romm-broker/commit/140031e911dae67a466a1b124c4c9ec0ba0ca02c))
+* **room:** start the stream at 60% volume on a first visit ([24f5369](https://github.com/romm-streaming/romm-broker/commit/24f5369406a36e8221d7b150cfdc097d3127030d))
+* **saves:** let RPCS3's savestates link through as a declared link root ([e438aac](https://github.com/romm-streaming/romm-broker/commit/e438aac35e923825f01d43bc3badbdde2f995bb5))
+* **saves:** read every planned member before the working slot is cleared ([9841a87](https://github.com/romm-streaming/romm-broker/commit/9841a874ab23fe0a506fac14aa1fa03d308f3e9a))
+* **saves:** refuse unreadable archive members before the slot is cleared ([710567f](https://github.com/romm-streaming/romm-broker/commit/710567ff9375a0c3dd8afea5e28fef523d4ba029))
+* **xenia:** drop the removed --headless flag and give Xenia a terminal so launch errors reach the log ([cf2b3c6](https://github.com/romm-streaming/romm-broker/commit/cf2b3c63b2cb983ce7c44c6f415bc9957a6adb0c))
+* **xenia:** drop the removed --headless flag and give Xenia a terminal so launch errors reach the log ([2c1ac89](https://github.com/romm-streaming/romm-broker/commit/2c1ac89334a3224306f7e11a5e4541d0892eeb20))
+
+
+### Documentation
+
+* **api:** correct import refusal, discovery and out-of-subtree wording ([f6cda86](https://github.com/romm-streaming/romm-broker/commit/f6cda86434563a33744c7925d64e8fcb5a8bcc56))
+* **api:** document declared imports and every refusal reason ([9c1e230](https://github.com/romm-streaming/romm-broker/commit/9c1e23023d518087ba58122f748ec8f363dd32fb))
+* **contributing:** require signed commits ([a6b3c3f](https://github.com/romm-streaming/romm-broker/commit/a6b3c3fa1113f60672609fa3d924fcc6496d1b2d))
+* **contributing:** require signed commits ([84d51d0](https://github.com/romm-streaming/romm-broker/commit/84d51d066805a74c90de4c1c3c7bd64ae4743799))
+* correct the pinned-card comment and the RetroArch memcard advice ([3f63c32](https://github.com/romm-streaming/romm-broker/commit/3f63c3254cd87c0b2eed8cda774ce29ce456fce6))
+* **imports:** document PPSSPP, Dolphin and PCSX2 imports ([7ba75a2](https://github.com/romm-streaming/romm-broker/commit/7ba75a27601aac459d9f33416945e5fad17354f5))
+* **imports:** document RPCS3, ScummVM and RetroArch Wii and 3DS imports ([7e6b7b4](https://github.com/romm-streaming/romm-broker/commit/7e6b7b447dec24824d472e8da380f34bf4cf5da5))
+* **imports:** document the Cemu, Eden, Azahar, xemu, Xenia and shadPS4 imports ([c97b3ce](https://github.com/romm-streaming/romm-broker/commit/c97b3ce6d3b2bce84cb94a95fc3e7d935c27061d))
+* **imports:** fix the core-name, resume_slot and manifest-example wording ([5e54cd1](https://github.com/romm-streaming/romm-broker/commit/5e54cd15349967c295797c9e889f2eb37be8ae25))
+* **imports:** narrow the loose data.bin and Dolphin push-check wording ([b9471fe](https://github.com/romm-streaming/romm-broker/commit/b9471fe8cd8e19104e1d4485796e46d516672961))
+* point webstation examples at taisun/random-images:webstation-romm ([9c31cca](https://github.com/romm-streaming/romm-broker/commit/9c31cca93c4b5006964bdc87e6e00b12498e8b17))
+
 ## [0.8.5](https://github.com/romm-streaming/romm-broker/compare/v0.8.4...v0.8.5) (2026-09-17)
 
 
