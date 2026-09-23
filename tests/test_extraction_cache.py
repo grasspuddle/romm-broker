@@ -5,6 +5,9 @@ import zipfile
 from pathlib import Path
 from typing import Optional
 
+import pytest
+
+from webstation_broker.emulators import extraction_cache
 from webstation_broker.emulators.base import Emulator
 from webstation_broker.emulators.extraction_cache import ExtractionCache
 
@@ -60,3 +63,38 @@ def test_root_reflects_a_live_change_to_the_cache_dir_callable(tmp_path: Path) -
     assert cache.root() == tmp_path / "first"
     current["dir"] = tmp_path / "second"
     assert cache.root() == tmp_path / "second"
+
+
+def test_cache_key_combines_stem_and_a_content_fingerprint(tmp_path: Path) -> None:
+    """The key is the stem plus a short hash of the resolved path, size, and mtime."""
+    rom = tmp_path / "Game.zip"
+    rom.write_bytes(b"data")
+    key = extraction_cache._cache_key(rom)
+    assert key.startswith("Game-")
+    assert len(key) == len("Game-") + 12
+
+
+def test_cache_key_differs_for_files_sharing_a_stem_but_not_an_extension(tmp_path: Path) -> None:
+    """Two archives that share a stem but differ in extension never collide."""
+    a = tmp_path / "Game.zip"
+    b = tmp_path / "Game.7z"
+    a.write_bytes(b"same content")
+    b.write_bytes(b"same content")
+    assert extraction_cache._cache_key(a) != extraction_cache._cache_key(b)
+
+
+def test_cache_key_changes_when_a_same_named_file_is_replaced(tmp_path: Path) -> None:
+    """A same-named re-upload with different content never reuses the old cache entry."""
+    rom = tmp_path / "Game.zip"
+    rom.write_bytes(b"original")
+    first = extraction_cache._cache_key(rom)
+    rom.write_bytes(b"replaced, different size")
+    second = extraction_cache._cache_key(rom)
+    assert first != second
+
+
+def test_cache_key_raises_when_the_file_cannot_be_read(tmp_path: Path) -> None:
+    """An unreadable file raises rather than falling back to the collision-prone bare stem."""
+    missing = tmp_path / "Missing.zip"
+    with pytest.raises(RuntimeError, match="could not read"):
+        extraction_cache._cache_key(missing)

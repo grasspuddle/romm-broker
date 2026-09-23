@@ -8,7 +8,7 @@ no-op.
 """
 from __future__ import annotations
 
-import hashlib  # noqa: F401
+import hashlib
 import logging
 import os  # noqa: F401
 import shutil  # noqa: F401
@@ -35,6 +35,39 @@ _LAST_ACCESSED_MARKER = ".last_accessed"
 
 _SCRATCH_DIR_NAME = ".scratch"
 """Subdirectory of a cache dir every staged extraction lives under until renamed into place."""
+
+
+def _cache_key(rom: Path) -> str:
+    """Cache dir name for rom: its stem plus a short hash of the file's identity.
+
+    A bare stem collides two ROMs that share a name but differ in extension,
+    and survives a same-named re-upload with different content, either of
+    which would otherwise serve up whatever is sitting in the old cache dir
+    as if it were the new ROM. The hash covers the resolved path, the size,
+    and the nanosecond mtime: same-second rewrites are exactly how a library
+    sync replaces a dump, so second granularity would let a replacement keep
+    the old key.
+
+    Args:
+        rom: The archive or package being extracted.
+
+    Returns:
+        The cache directory name for this ROM.
+
+    Raises:
+        RuntimeError: If the file cannot be read. Falling back to the bare
+            name here would hand back the collision-prone key this function
+            exists to avoid, and the extraction that follows would fail on
+            the same unreadable file anyway.
+    """
+    try:
+        st = rom.stat()
+        fingerprint = f"{rom.resolve()}:{st.st_size}:{st.st_mtime_ns}"
+    except OSError as exc:
+        log.error("extraction cache: could not read %s to key its extraction: %s", rom, exc)
+        raise RuntimeError(f"could not read {rom.name} to key its extraction: {exc}") from exc
+    digest = hashlib.sha1(fingerprint.encode()).hexdigest()[:12]
+    return f"{rom.stem}-{digest}"
 
 
 class ExtractionCache:
