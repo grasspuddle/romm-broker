@@ -22,7 +22,7 @@ on the `romm` branch:
 ```yaml
 services:
   webstation:
-    image: taisun/random-images:webstation-romm
+    image: lscr.io/linuxserver/webstation:romm
     container_name: webstation
     environment:
       - PUID=1000
