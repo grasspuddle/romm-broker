@@ -599,3 +599,58 @@ def test_extract_refuses_and_raises_when_nothing_fits(tmp_path: Path) -> None:
     archive = _make_zip(tmp_path / "Game.zip", {"EBOOT.BIN": b"x" * 5000})
     with pytest.raises(RuntimeError, match="max_gb"):
         cache.extract(archive, _FakeEmulator())
+
+
+def test_extract_still_raises_if_stage_succeeds_but_leaves_no_boot_target(tmp_path: Path) -> None:
+    """Stage returning normally does NOT bypass the generic post-stage boot check.
+
+    Even if stage() completes without raising, if find_boot_target(staged)
+    finds nothing, extract() raises missing_target_error — stage's internal
+    bookkeeping does not override the generic validation.
+    """
+    cache = _cache(tmp_path, max_gb=10.0)
+    archive = _make_zip(tmp_path / "Game.zip", {"readme.txt": b"no boot here"})
+
+    def stage_that_appears_ok(rom: Path, staged: Path, scratch: Path, emulator: Emulator, kept: int) -> None:
+        # Extract the archive (readme.txt), but no EBOOT.BIN will be found
+        extraction_cache._extract_archive(rom, staged, 30.0)
+        # Stage could set internal flags saying "I found boot!" but that's ignored
+        # The post-stage check still calls find_boot_target(staged) and finds nothing
+
+    cache._stage = stage_that_appears_ok
+    with pytest.raises(RuntimeError, match="held no bootable"):
+        cache.extract(archive, _FakeEmulator())
+
+
+def test_extract_releases_lock_on_unbounded_wait_even_when_stage_raises(tmp_path: Path) -> None:
+    """lock_wait=None (unbounded blocking) still releases the lock after a stage exception."""
+    cache = ExtractionCache(
+        name="test", cache_dir=lambda: tmp_path / "cache", enabled=lambda: True,
+        max_gb=lambda: 10.0, find_boot_target=_find_eboot, lock_wait=None,
+    )
+    archive = _make_zip(tmp_path / "Game.zip", {"EBOOT.BIN": b"boot"})
+
+    def failing_stage(rom: Path, staged: Path, scratch: Path, emulator: Emulator, kept: int) -> None:
+        raise RuntimeError("stage explosion")
+
+    cache._stage = failing_stage
+    emulator = _FakeEmulator()
+    with pytest.raises(RuntimeError, match="stage explosion"):
+        cache.extract(archive, emulator)
+    # Lock should be released (not stuck held) even with unbounded wait
+    assert cache._lock.acquire(timeout=0.1)
+    cache._lock.release()
+
+
+def test_extract_propagates_uncaught_find_boot_target_exceptions(tmp_path: Path) -> None:
+    """find_boot_target raising an exception is not caught; it propagates out."""
+    def raising_find_boot(root: Path) -> Optional[Path]:
+        raise RuntimeError("boot lookup exploded")
+
+    cache = ExtractionCache(
+        name="test", cache_dir=lambda: tmp_path / "cache", enabled=lambda: True,
+        max_gb=lambda: 10.0, find_boot_target=raising_find_boot,
+    )
+    archive = _make_zip(tmp_path / "Game.zip", {"EBOOT.BIN": b"boot"})
+    with pytest.raises(RuntimeError, match="boot lookup exploded"):
+        cache.extract(archive, _FakeEmulator())

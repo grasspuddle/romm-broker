@@ -521,11 +521,10 @@ class ExtractionCache:
             # see that stall rather than an idle-looking None.
             emulator.extraction_phase = self._phase_name(rom)
             try:
-                # Resolved here, not in __init__: __init__ runs before
-                # _default_budget/_default_stage exist as methods on this
-                # class (they're added after __init__ in the source), so
-                # None is stored as-is at construction and only resolved
-                # to the default implementation at first use.
+                # Resolve budget/stage at call time for uniformity: both
+                # default to instance methods only if None was passed to
+                # __init__, so checking here keeps the resolution logic
+                # together with its use rather than scattered across init.
                 budget = self._budget if self._budget is not None else self._default_budget
                 stage = self._stage if self._stage is not None else self._default_stage
                 peak_bytes, kept_bytes = budget(rom)
