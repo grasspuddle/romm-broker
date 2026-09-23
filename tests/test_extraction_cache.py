@@ -358,3 +358,87 @@ def test_sweep_stale_extractions_removes_orphaned_scratch_dirs(tmp_path: Path) -
     cache.sweep_stale_extractions()
     assert not (cache.root() / extraction_cache._SCRATCH_DIR_NAME / "orphaned").exists()
     assert (cache.root() / "RealEntry").exists()
+
+
+def test_reject_unsafe_members_rejects_a_traversal_path(tmp_path: Path) -> None:
+    """A `../` member path is rejected before anything is written."""
+    dest = tmp_path / "dest"
+    dest.mkdir()
+    with pytest.raises(RuntimeError, match="escapes"):
+        extraction_cache._reject_unsafe_members(dest, ["../outside.txt"])
+
+
+def test_reject_unsafe_members_allows_normal_paths(tmp_path: Path) -> None:
+    """Ordinary relative member paths are accepted."""
+    dest = tmp_path / "dest"
+    dest.mkdir()
+    extraction_cache._reject_unsafe_members(dest, ["a/b/c.txt", "top.txt"])
+
+
+def test_safe_extract_zip_extracts_normal_members(tmp_path: Path) -> None:
+    """A normal zip extracts its members under dest."""
+    archive = _make_zip(tmp_path / "Game.zip", {"PS_GAME/EBOOT.BIN": b"boot"})
+    dest = tmp_path / "Game"
+    dest.mkdir()
+    with zipfile.ZipFile(archive) as zf:
+        extraction_cache._safe_extract_zip(zf, dest)
+    assert (dest / "PS_GAME" / "EBOOT.BIN").read_bytes() == b"boot"
+
+
+def test_safe_extract_zip_rejects_a_member_that_escapes_the_dest(tmp_path: Path) -> None:
+    """A zip-slip member is rejected instead of extracted."""
+    archive = _make_zip(tmp_path / "Evil.zip", {"../../etc/passwd": b"pwned"})
+    dest = tmp_path / "Evil"
+    dest.mkdir()
+    with zipfile.ZipFile(archive) as zf:
+        with pytest.raises(RuntimeError, match="escapes"):
+            extraction_cache._safe_extract_zip(zf, dest)
+
+
+def test_reject_escaped_tree_allows_a_normal_extraction(tmp_path: Path) -> None:
+    """A normal extraction tree with no symlinks passes."""
+    dest = tmp_path / "dest"
+    (dest / "sub").mkdir(parents=True)
+    (dest / "sub" / "file.txt").write_bytes(b"x")
+    extraction_cache._reject_escaped_tree(dest)
+
+
+def test_reject_escaped_tree_rejects_a_symlink_that_resolves_outside_dest(tmp_path: Path) -> None:
+    """A symlink that resolves outside dest is caught by the post-extraction walk."""
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    dest = tmp_path / "dest"
+    dest.mkdir()
+    (dest / "escape").symlink_to(outside, target_is_directory=True)
+    with pytest.raises(RuntimeError, match="escapes cache dir"):
+        extraction_cache._reject_escaped_tree(dest)
+
+
+def test_run_extractor_raises_on_a_nonzero_exit(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A nonzero exit from the extractor binary raises with its exit code."""
+    monkeypatch.setattr(
+        extraction_cache.subprocess, "run",
+        lambda *a, **k: type("R", (), {"returncode": 2, "stderr": "boom"})(),
+    )
+    with pytest.raises(RuntimeError, match="exited 2"):
+        extraction_cache._run_extractor(["7z", "x"], "7z (Game.7z)", 30.0)
+
+
+def test_run_extractor_raises_when_the_binary_is_missing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A missing extractor binary raises rather than propagating an OSError."""
+    from typing import NoReturn
+    def raise_oserror(*a: object, **k: object) -> NoReturn:
+        raise OSError("not found")
+    monkeypatch.setattr(extraction_cache.subprocess, "run", raise_oserror)
+    with pytest.raises(RuntimeError, match="failed to run"):
+        extraction_cache._run_extractor(["unrar", "x"], "unrar (Game.rar)", 30.0)
+
+
+def test_default_stage_extracts_a_zip_directly_into_staged(tmp_path: Path) -> None:
+    """The default stage extracts rom directly into staged, ignoring scratch/emulator/kept_bytes."""
+    cache = _cache(tmp_path)
+    archive = _make_zip(tmp_path / "Game.zip", {"EBOOT.BIN": b"boot"})
+    staged = tmp_path / "staged"
+    staged.mkdir()
+    cache._default_stage(archive, staged, tmp_path / "scratch", _FakeEmulator(), 0)
+    assert (staged / "EBOOT.BIN").read_bytes() == b"boot"
