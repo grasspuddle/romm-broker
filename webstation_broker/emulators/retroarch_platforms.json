@@ -367,8 +367,8 @@
     "core": "applewin",
     "save_ram": false,
     "core_source": {
-        "github_release": "audetto/AppleWin",
-        "asset": "applewin-libretro-linux-x86_64-.*\\.zip"
+      "github_release": "audetto/AppleWin",
+      "asset": "applewin-libretro-linux-x86_64-.*\\.zip"
     },
     "extensions": [".dsk", ".po", ".do", ".nib", ".woz", ".2mg"]
   },
@@ -392,7 +392,7 @@
     "save_ram": false,
     "extensions": [".dim", ".img", ".d88", ".88d", ".hdm", ".dup", ".2hd", ".xdf", ".hdf", ".cmd", ".m3u", ".zip"]
   },
-    "arcadia-2001": {
+  "arcadia-2001": {
     "core": "amiarcadia",
     "save_ram": false,
     "library_name": "amiarcadia",
@@ -438,7 +438,7 @@
     "library_name": "puae",
     "extensions": [".cue", ".ccd", ".chd", ".nrg", ".mds", ".iso", ".zip", ".7z"]
   },
-    "atari8bit": {
+  "atari8bit": {
     "core": "atari800",
     "save_ram": false,
     "extensions": [".xfd", ".atr", ".atx", ".cdm", ".cas", ".bin", ".a52", ".xex", ".zip"]
