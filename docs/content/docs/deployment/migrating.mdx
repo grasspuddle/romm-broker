@@ -19,6 +19,7 @@ those, using a `platforms:` map instead:
 ```yaml
 # before: one container per platform
 streaming:
+  enabled: true
   containers:
     - platform: ps2
       host: https://192.168.1.51:3001
@@ -32,6 +33,7 @@ streaming:
 
 # after: one webstation container serving both
 streaming:
+  enabled: true
   containers:
     - host: https://192.168.1.56:3010
       protocol: webstation
