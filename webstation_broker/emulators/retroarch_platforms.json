@@ -358,11 +358,6 @@
     "save_ram": false,
     "extensions": [".zip", ".7z"]
   },
-    "philips-cd-i":  {
-    "core": "same_cdi",
-    "save_ram": false,
-    "extensions": [".chd", ".cue", ".iso", ".bin"]
-  },
   "pc-fx": {
     "core": "mednafen_pcfx",
     "save_ram": false,
@@ -397,11 +392,6 @@
     "save_ram": false,
     "extensions": [".dim", ".img", ".d88", ".88d", ".hdm", ".dup", ".2hd", ".xdf", ".hdf", ".cmd", ".m3u", ".zip"]
   },
-  "mac": {
-    "core": "minivmac",
-    "save_ram": false,
-    "extensions": [".dsk", ".img", ".hvf", ".cmd", ".zip"]
-  },
     "arcadia-2001": {
     "core": "amiarcadia",
     "save_ram": false,
@@ -426,22 +416,11 @@
     "library_name": "mednafen wonderswan",
     "extensions": [".pc2", ".zip"]
   },
-  "ti-83": {
-    "core": "numero",
-    "save_ram": false,
-    "library_name": "numero",
-    "extensions": [".8xp", ".8xk", ".8xg"]
-  },
   "epoch-super-cassette-vision": {
     "core": "emuscv",
     "save_ram": false,
     "library_name": "emuscv",
     "extensions": [".cart", ".bin", ".rom"]
-  },
-  "fm-towns": {
-    "core": "mame",
-    "save_ram": false,
-    "extensions": [".cue", ".chd", ".iso", ".d88", ".zip"]
   },
   "videopac-g7000": {
     "core": "o2em",
