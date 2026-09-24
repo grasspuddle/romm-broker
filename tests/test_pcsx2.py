@@ -7,6 +7,7 @@ that never comes up.
 import os
 import struct
 import time
+import zipfile
 from collections.abc import Callable
 from pathlib import Path, PurePosixPath
 from typing import Any, Optional
@@ -500,6 +501,7 @@ def test_launch_always_spawns_the_watchdog_even_with_no_resume_slot(
     """
     started = []
     monkeypatch.setattr(pcsx2, "_patch_ini", lambda: None)
+    monkeypatch.setattr(pcsx2, "_validate_patches_cache", lambda: None)
     monkeypatch.setattr(pcsx2.Pcsx2, "_ensure_folder_card", lambda self: None)
     monkeypatch.setattr(pcsx2.Pcsx2, "_spawn", lambda self, cmd, env: None)
 
@@ -530,6 +532,57 @@ def test_an_unpatchable_ini_is_raised_rather_than_logged(
 
     with pytest.raises(RuntimeError):
         pcsx2._patch_ini()
+
+
+def test_validate_patches_cache_leaves_a_missing_file_alone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No cached zip yet is not an error; nothing is created."""
+    monkeypatch.setattr(pcsx2, "PATCHES_ZIP", tmp_path / "cache" / "patches.zip")
+
+    pcsx2._validate_patches_cache()
+
+    assert not (tmp_path / "cache" / "patches.zip").exists()
+
+
+def test_validate_patches_cache_leaves_a_good_zip_alone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A cache that opens cleanly and passes its CRC check survives, so most launches skip the fetch."""
+    zip_path = tmp_path / "patches.zip"
+    with zipfile.ZipFile(zip_path, "w") as zf:
+        zf.writestr("SLUS-20946.pnach", "patch=1,EE,00000000,extended,00000000")
+    monkeypatch.setattr(pcsx2, "PATCHES_ZIP", zip_path)
+
+    pcsx2._validate_patches_cache()
+
+    assert zip_path.exists()
+
+
+def test_validate_patches_cache_removes_an_empty_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A zero-byte cache, the shape a download cut off mid-transfer leaves, is deleted."""
+    zip_path = tmp_path / "patches.zip"
+    zip_path.write_bytes(b"")
+    monkeypatch.setattr(pcsx2, "PATCHES_ZIP", zip_path)
+
+    pcsx2._validate_patches_cache()
+
+    assert not zip_path.exists()
+
+
+def test_validate_patches_cache_removes_a_corrupt_zip(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A file that exists but is not a valid zip is deleted rather than left for PCSX2 to fail on."""
+    zip_path = tmp_path / "patches.zip"
+    zip_path.write_bytes(b"not actually a zip file")
+    monkeypatch.setattr(pcsx2, "PATCHES_ZIP", zip_path)
+
+    pcsx2._validate_patches_cache()
+
+    assert not zip_path.exists()
 
 
 def test_a_launch_stops_at_an_unpatchable_ini(

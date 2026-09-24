@@ -28,7 +28,6 @@ the cache key is taken from the archive itself rather than the throwaway
 scratch extraction.
 """
 
-import hashlib
 import json
 import logging
 import os
@@ -36,7 +35,6 @@ import re
 import shutil
 import subprocess
 import tempfile
-import time
 import zipfile
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -45,7 +43,9 @@ from threading import Lock
 from typing import Any, Optional, Union
 
 from .. import imports, settings
+from . import extraction_cache
 from .base import Emulator, base_launch_env, xdg_data_dir
+from .extraction_cache import ExtractionCache
 
 log = logging.getLogger(__name__)
 
@@ -164,10 +164,10 @@ _MAX_GPU_DETECT_ATTEMPTS = 3
 rather than exits costs `_VULKANINFO_TIMEOUT` a few times instead of on every
 launch for the broker's lifetime."""
 
-_GB = 1024**3
+_GB = extraction_cache._GB
 """Bytes per GB, the unit CACHE_MAX_GB and the space checks are expressed in."""
 
-_ARCHIVE_EXTS = (".7z", ".zip", ".rar")
+_ARCHIVE_EXTS = extraction_cache._ARCHIVE_EXTS
 """Archive formats that may hold a `.pkg`, extracted before pkg_extractor ever sees it."""
 
 ROM_EXTENSIONS = (".zar", ".bin", ".pkg") + _ARCHIVE_EXTS
@@ -208,20 +208,14 @@ of the run even though only the output survives.
 CACHE_DIR = Path(os.environ.get("SHADPS4_CACHE_DIR", str(DATA_DIR / "extracted")))
 CACHE_ENABLED = _truthy(os.environ.get("SHADPS4_CACHE_ENABLED", "false"))
 CACHE_MAX_GB = float(os.environ.get("SHADPS4_CACHE_MAX_GB", "30"))
-_LAST_ACCESSED_MARKER = ".last_accessed"
-_SCRATCH_DIR_NAME = ".scratch"
+_LAST_ACCESSED_MARKER = extraction_cache._LAST_ACCESSED_MARKER
+_SCRATCH_DIR_NAME = extraction_cache._SCRATCH_DIR_NAME
 """Subdirectory of CACHE_DIR every archive scratch extraction lives under.
 
 Keeping scratch dirs out of CACHE_DIR's top level means a cache entry and a
 scratch dir can never be confused by name, so eviction and the startup sweep
 both work off location rather than guessing from a filename.
 """
-
-# Serializes cache-dir mutation: eviction picking a victim, extraction of a
-# new one, and the boot-target lookup that follows all touch the same
-# CACHE_DIR tree, so one launch's eviction can't rmtree a directory another
-# launch is mid-extracting into or about to boot from.
-_CACHE_LOCK = Lock()
 
 _CACHE_LOCK_WAIT = float(os.environ.get("SHADPS4_CACHE_LOCK_WAIT", "120"))
 """Seconds a caller waits for `_CACHE_LOCK` before giving up (env `SHADPS4_CACHE_LOCK_WAIT`).
@@ -234,34 +228,6 @@ it gives up and says why instead.
 
 _CONFIG_LOCK = Lock()
 """Serializes the read/modify/write of shadPS4's config.json across launch threads."""
-
-
-@contextmanager
-def _cache_lock(what: str) -> Iterator[None]:
-    """Hold `_CACHE_LOCK` for the block, giving up after `_CACHE_LOCK_WAIT`.
-
-    Args:
-        what: The operation waiting for the lock, named in the log and the error.
-
-    Yields:
-        Nothing; the lock is released when the block ends.
-
-    Raises:
-        RuntimeError: When the lock is still held elsewhere after `_CACHE_LOCK_WAIT`.
-    """
-    if not _CACHE_LOCK.acquire(timeout=_CACHE_LOCK_WAIT):
-        log.error(
-            "shadps4 cache: %s gave up after waiting %.0fs for the cache lock",
-            what, _CACHE_LOCK_WAIT,
-        )
-        raise RuntimeError(
-            f"another shadps4 extraction is still running; {what} waited "
-            f"{_CACHE_LOCK_WAIT:.0f}s for the extraction cache"
-        )
-    try:
-        yield
-    finally:
-        _CACHE_LOCK.release()
 
 BIN_NAME = os.environ.get("SHADPS4_BIN_NAME", "Shadps4-sdl.AppImage")
 """The binary looked for inside a release folder (env `SHADPS4_BIN_NAME`, default `Shadps4-sdl.AppImage`).
@@ -366,75 +332,6 @@ def _archive_pkg_member(root: Path) -> Optional[Path]:
     return None
 
 
-def _extracted_dir_size(path: Path) -> int:
-    total = 0
-    for f in path.rglob("*"):
-        if f.name == _LAST_ACCESSED_MARKER:
-            continue
-        try:
-            if f.is_file():
-                total += f.stat().st_size
-        except OSError as exc:
-            log.debug("shadps4 cache: skipping %s while sizing %s: %s", f, path, exc)
-            continue
-    return total
-
-
-def _cache_size_bytes() -> int:
-    if not CACHE_DIR.is_dir():
-        return 0
-    return sum(_extracted_dir_size(d) for d in CACHE_DIR.iterdir() if d.is_dir())
-
-
-def _touch_last_accessed(game_dir: Path) -> None:
-    try:
-        (game_dir / _LAST_ACCESSED_MARKER).write_text(str(time.time()))
-    except OSError as exc:
-        log.warning("shadps4 cache: could not update last-accessed marker for %s: %s", game_dir, exc)
-
-
-def _evict_lru(needed_bytes: int, keep: str) -> None:
-    """Evict least-recently-used extracted titles until `needed_bytes` fits within CACHE_MAX_GB.
-
-    Args:
-        needed_bytes: Additional bytes that must fit under the cache cap.
-        keep: The cache key currently being (re-)extracted, so a stale
-            entry for it already removed by the caller is never chosen.
-    """
-    if not CACHE_ENABLED or not CACHE_DIR.is_dir():
-        return
-    max_bytes = int(CACHE_MAX_GB * 1024**3)
-    current = _cache_size_bytes()
-    while current + needed_bytes > max_bytes:
-        candidates = []
-        for game_dir in CACHE_DIR.iterdir():
-            if not game_dir.is_dir() or game_dir.name in (keep, _SCRATCH_DIR_NAME):
-                continue
-            marker = game_dir / _LAST_ACCESSED_MARKER
-            try:
-                mtime = marker.stat().st_mtime if marker.exists() else 0.0
-            except OSError as exc:
-                log.debug(
-                    "shadps4 cache: could not read last-accessed time for %s, treating as oldest: %s",
-                    game_dir, exc,
-                )
-                mtime = 0.0
-            candidates.append((mtime, game_dir))
-        if not candidates:
-            log.warning("shadps4 cache: nothing left to evict under the %.0f GB cap", CACHE_MAX_GB)
-            return
-        candidates.sort(key=lambda c: c[0])
-        victim = candidates[0][1]
-        victim_size = _extracted_dir_size(victim)
-        log.info("shadps4 cache: evicting %s (least recently used)", victim.name)
-        try:
-            shutil.rmtree(victim)
-        except OSError as exc:
-            log.warning("shadps4 cache: could not evict %s: %s", victim, exc)
-            return
-        current -= victim_size
-
-
 def _require_room(peak_bytes: int, kept_bytes: int, rom_name: str) -> None:
     """Refuse an extraction that cannot fit before any of it is written.
 
@@ -511,40 +408,6 @@ def _check_expansion(actual_bytes: int, reserved_bytes: int, rom_name: str) -> N
             f"{rom_name} extracted to about {actual_bytes / _GB:.1f} GB, more than "
             f"SHADPS4_CACHE_MAX_GB ({CACHE_MAX_GB:.0f} GB) allows"
         )
-
-
-def _cache_key(rom: Path) -> str:
-    """Cache dir name for rom (a .pkg or an archive): its stem plus a short identity hash.
-
-    A bare stem collides two ROMs that share a name, and survives a
-    same-named re-upload with different content, either of which would
-    otherwise serve up whatever is sitting in the old cache dir as if it
-    were the new ROM. The hash therefore covers the resolved path, the size,
-    and the nanosecond mtime: same-second rewrites are exactly how a library
-    sync replaces a dump, so second granularity would let a replacement keep
-    the old key, and two same-named ROMs in different folders keying off the
-    bare filename would share one cache dir.
-
-    Args:
-        rom: The .pkg or archive being extracted.
-
-    Returns:
-        The cache directory name for this ROM.
-
-    Raises:
-        RuntimeError: If the ROM cannot be read. Falling back to the bare
-            name here would hand back the collision-prone key this function
-            exists to avoid, and the extraction that follows would fail on
-            the same unreadable file anyway.
-    """
-    try:
-        st = rom.stat()
-        fingerprint = f"{rom.resolve()}:{st.st_size}:{st.st_mtime_ns}"
-    except OSError as exc:
-        log.error("shadps4 cache: could not read %s to key its extraction: %s", rom, exc)
-        raise RuntimeError(f"could not read {rom.name} to key its extraction: {exc}") from exc
-    digest = hashlib.sha1(fingerprint.encode()).hexdigest()[:12]
-    return f"{rom.stem}-{digest}"
 
 
 def _run_extractor(cmd: list[str], what: str) -> str:
@@ -778,26 +641,131 @@ def _run_pkg_extractor(pkg: Path, dest: Path) -> None:
         )
 
 
-def _clear_scratch() -> None:
-    """Remove every scratch dir under CACHE_DIR. Callers must hold _CACHE_LOCK.
+def _stage_pkg(rom: Path, staged: Path, scratch: Path, emulator: Emulator, kept_bytes: int) -> None:
+    """Get rom (a .pkg, or an archive holding one) staged and confirmed bootable.
 
-    Everything under `_SCRATCH_DIR_NAME` is scratch by construction, so the
-    whole subtree goes without inspecting names or contents. Guessing from
-    either would be unsound in both directions: a real cache dir's key can
-    contain any substring the ROM's own filename does, and a scratch dir
-    holds whatever the archive held, up to and including a file named
-    eboot.bin.
+    An archive is unpacked to a second scratch dir first to locate the .pkg
+    it holds; only pkg_extractor's own output is kept, so relaunching the
+    same archive still hits the cache even though its scratch extraction is
+    discarded every time.
 
-    The lock is what makes this safe: no extraction can be mid-flight while
-    it is held, so anything still sitting here was orphaned by a process
-    that died.
+    Args:
+        rom: The .pkg or archive to extract.
+        staged: The directory pkg_extractor's output must land in.
+        scratch: The scratch dir `staged` sits under, used for the archive's
+            own throwaway unpack when `rom` is an archive.
+        emulator: The launching emulator; `extraction_phase` is flipped to
+            `extracting_pkg` mid-run for the archive-then-pkg case.
+        kept_bytes: Bytes `_require_room` reserved in the cache for this
+            extraction, checked against what it actually produced.
+
+    Raises:
+        RuntimeError: If `rom` is an archive holding no .pkg, or the staged
+            extraction holds no eboot.bin.
     """
-    scratch_root = CACHE_DIR / _SCRATCH_DIR_NAME
-    if not scratch_root.is_dir():
-        return
-    for entry in scratch_root.iterdir():
-        log.warning("shadps4 cache: removing orphaned scratch dir %s", entry.name)
-        shutil.rmtree(entry, ignore_errors=True)
+    is_archive = rom.suffix.lower() in _ARCHIVE_EXTS
+    if is_archive:
+        unpacked = scratch / "archive"
+        unpacked.mkdir()
+        _extract_archive(rom, unpacked)
+        pkg = _archive_pkg_member(unpacked)
+        if pkg is None:
+            raise RuntimeError(f"{rom.name} extracted but held no .pkg")
+        emulator.extraction_phase = "extracting_pkg"
+        _run_pkg_extractor(pkg, staged)
+    else:
+        _run_pkg_extractor(rom, staged)
+    if _extracted_boot_target(staged) is None:
+        raise RuntimeError(f"{rom.name} extracted but held no eboot.bin")
+    _check_expansion(_extracted_dir_size(staged), kept_bytes, rom.name)
+
+
+def _budget_pkg(rom: Path) -> tuple[int, int]:
+    """Bytes to reserve for extracting rom: (peak bytes on disk, bytes kept in the cache).
+
+    An archive needs its scratch extraction and pkg_extractor's staged
+    output living under CACHE_DIR at the same time; only the output
+    survives, so the two figures differ for an archive and coincide for a
+    bare .pkg.
+
+    Args:
+        rom: The .pkg or archive about to be extracted.
+
+    Returns:
+        The (peak_bytes, kept_bytes) pair `_require_room` and `_evict_lru` budget against.
+    """
+    is_archive = rom.suffix.lower() in _ARCHIVE_EXTS
+    try:
+        size = rom.stat().st_size
+    except OSError as exc:
+        log.debug("shadps4 cache: could not stat %s, treating size as 0: %s", rom, exc)
+        size = 0
+    kept = int(size * PKG_EXPANSION_FACTOR)
+    peak = int(size * ARCHIVE_PEAK_FACTOR) if is_archive else kept
+    return (peak, kept)
+
+
+def _phase_for(rom: Path) -> str:
+    """The `extraction_phase` value to report while rom is first staged."""
+    return "extracting_archive" if rom.suffix.lower() in _ARCHIVE_EXTS else "extracting_pkg"
+
+
+_CACHE = ExtractionCache(
+    name="shadps4",
+    cache_dir=lambda: CACHE_DIR,
+    enabled=lambda: CACHE_ENABLED,
+    max_gb=lambda: CACHE_MAX_GB,
+    find_boot_target=_extracted_boot_target,
+    lock_wait=lambda: _CACHE_LOCK_WAIT,
+)
+"""Owns shadps4's cache-dir lock and its size/eviction bookkeeping.
+
+`_extract_and_cache_pkg` orchestrates the extraction itself rather than
+calling `_CACHE.extract()`: shadps4's over-cap error names
+`SHADPS4_CACHE_MAX_GB` specifically (the shared class's own message is
+generic), and `tests/test_shadps4.py` monkeypatches `_evict_lru` and
+`_require_room` by module attribute to assert the orchestration order,
+which only works when the orchestrating code looks those names up from
+this module rather than from inside `ExtractionCache.extract`'s own
+method body.
+
+Because of that, `_CACHE` is never given `budget`/`stage`/`phase_name`/
+`missing_target_error` here, and nothing in this module calls
+`_CACHE.extract()`. Calling it directly is unsupported: it would fall back
+to the shared class's generic defaults (member-listing-based size
+budgeting, a plain extract-and-check stage that does not know how to run
+pkg_extractor or unpack an archive-holding-a-pkg) instead of this module's
+own `_check_expansion`/`_require_room` accounting, and its error text
+would name `max_gb` rather than `SHADPS4_CACHE_MAX_GB`.
+"""
+
+_cache_key = extraction_cache._cache_key
+_extracted_dir_size = extraction_cache._dir_size
+_touch_last_accessed = extraction_cache._touch_last_accessed
+_cache_size_bytes = _CACHE._cache_size_bytes
+_evict_lru = _CACHE._evict_lru
+_clear_scratch = _CACHE._clear_scratch
+
+
+@contextmanager
+def _cache_lock(what: str) -> Iterator[None]:
+    """Hold the shared cache lock for the block, giving up after `_CACHE_LOCK_WAIT`.
+
+    Args:
+        what: The operation waiting for the lock, named in the log and the error.
+
+    Yields:
+        Nothing; the lock is released when the block ends.
+
+    Raises:
+        RuntimeError: When the lock is still held elsewhere after `_CACHE_LOCK_WAIT`.
+    """
+    with _CACHE._locked(what):
+        yield
+
+
+_CACHE_LOCK = _CACHE._lock
+"""The lock `_cache_lock` holds, exposed for tests that assert on it directly."""
 
 
 def sweep_stale_extractions() -> None:
@@ -809,8 +777,7 @@ def sweep_stale_extractions() -> None:
     only when the next extraction happens to run.
     """
     try:
-        with _cache_lock("startup scratch sweep"):
-            _clear_scratch()
+        _CACHE.sweep_stale_extractions()
     except RuntimeError as exc:
         log.warning("shadps4 cache: startup scratch sweep skipped: %s", exc)
 
@@ -824,16 +791,13 @@ def _extract_and_cache_pkg(rom: Path, emulator: Emulator) -> Path:
     confirmed, so game_dir either does not exist or holds a complete
     extraction: a process killed mid-run leaves scratch to be reclaimed
     rather than a truncated eboot.bin the next launch would cache-hit on
-    forever. An archive is unpacked to a second scratch dir first to locate
-    the .pkg it holds; only pkg_extractor's own output is kept, so
-    relaunching the same archive still hits the cache even though its
-    scratch extraction is discarded every time.
+    forever.
 
-    Holds _CACHE_LOCK for the whole call: eviction, extraction, and the
-    boot-target lookup all touch the same CACHE_DIR tree, so a second
-    launch racing in here must wait rather than potentially evicting the
-    directory this one is mid-extracting into or about to boot from. The
-    wait is bounded by `_CACHE_LOCK_WAIT`, since the lock is held for as
+    Holds the shared cache lock for the whole call: eviction, extraction,
+    and the boot-target lookup all touch the same CACHE_DIR tree, so a
+    second launch racing in here must wait rather than potentially evicting
+    the directory this one is mid-extracting into or about to boot from.
+    The wait is bounded by `_CACHE_LOCK_WAIT`, since the lock is held for as
     long as an extraction takes.
 
     Args:
@@ -864,23 +828,12 @@ def _extract_and_cache_pkg(rom: Path, emulator: Emulator) -> Path:
             log.warning("shadps4 cache: %s has no boot target, re-extracting", rom.name)
             shutil.rmtree(game_dir, ignore_errors=True)
 
-        is_archive = rom.suffix.lower() in _ARCHIVE_EXTS
         # Set before eviction, not after: eviction can rmtree tens of GB
         # under the lock, and a caller polling extraction_phase should see
         # that stall rather than an idle-looking None.
-        emulator.extraction_phase = "extracting_archive" if is_archive else "extracting_pkg"
+        emulator.extraction_phase = _phase_for(rom)
         try:
-            try:
-                size = rom.stat().st_size
-            except OSError as exc:
-                log.debug("shadps4 cache: could not stat %s, treating size as 0: %s", rom, exc)
-                size = 0
-            # An archive needs its scratch extraction and pkg_extractor's
-            # staged output living under CACHE_DIR at the same time; only the
-            # output survives, so the two figures differ for an archive and
-            # coincide for a bare .pkg.
-            kept = int(size * PKG_EXPANSION_FACTOR)
-            peak = int(size * ARCHIVE_PEAK_FACTOR) if is_archive else kept
+            peak, kept = _budget_pkg(rom)
             CACHE_DIR.mkdir(parents=True, exist_ok=True)
             # Orphaned scratch is un-evictable but still counts toward the
             # cap, so reclaim it before sizing the cache rather than letting
@@ -898,20 +851,7 @@ def _extract_and_cache_pkg(rom: Path, emulator: Emulator) -> Path:
             with tempfile.TemporaryDirectory(prefix=f"{key}-", dir=str(scratch_root)) as scratch:
                 staged = Path(scratch) / "extracted"
                 staged.mkdir()
-                if is_archive:
-                    unpacked = Path(scratch) / "archive"
-                    unpacked.mkdir()
-                    _extract_archive(rom, unpacked)
-                    pkg = _archive_pkg_member(unpacked)
-                    if pkg is None:
-                        raise RuntimeError(f"{rom.name} extracted but held no .pkg")
-                    emulator.extraction_phase = "extracting_pkg"
-                    _run_pkg_extractor(pkg, staged)
-                else:
-                    _run_pkg_extractor(rom, staged)
-                if _extracted_boot_target(staged) is None:
-                    raise RuntimeError(f"{rom.name} extracted but held no eboot.bin")
-                _check_expansion(_extracted_dir_size(staged), kept, rom.name)
+                _stage_pkg(rom, staged, Path(scratch), emulator, kept)
                 # The rmtree above uses ignore_errors, so game_dir can still
                 # be sitting there non-empty and the rename then fails.
                 try:

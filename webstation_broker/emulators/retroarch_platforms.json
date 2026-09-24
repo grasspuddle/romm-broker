@@ -84,9 +84,9 @@
     "extensions": [".vb", ".vboy", ".bin"]
   },
   "nds": {
-    "core": "melonds",
-    "library_name": "melonDS",
-    "save_ram": false,
+    "core": "melondsds",
+    "library_name": "melonDS DS",
+    "save_ram": true,
     "extensions": [".nds", ".srl"]
   },
   "3ds": {
